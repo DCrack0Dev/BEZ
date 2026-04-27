@@ -134,7 +134,8 @@ public:
             "\"pnl_today\":" + DoubleToString(profit, 2) + ","
             "\"margin\":" + DoubleToString(margin, 2) + ","
             "\"freeMargin\":" + DoubleToString(freeMargin, 2) + ","
-            "\"accountId\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) +
+            "\"accountId\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
+            "\"eaSymbol\":\"" + _Symbol + "\""
          "},"
          "\"positions\":[";
       

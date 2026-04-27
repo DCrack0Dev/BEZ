@@ -231,7 +231,8 @@ app.get('/api/account', (req, res) => {
     equity: state.equity,
     pnl_today: state.pnl_today,
     ea_connected: isConnected,
-    positions: state.positions
+    positions: state.positions,
+    ea_symbol: state.eaSymbol || 'XAUUSD'
   });
 });
 
