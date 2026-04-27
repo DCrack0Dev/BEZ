@@ -1,0 +1,526 @@
+//+------------------------------------------------------------------+
+//|                                                 ScalpKing_EA.mq5 |
+//|                                        Your Trading Bot Platform |
+//|                     Scalper: Gold (XAU/USD) + Indices (US30/NAS) |
+//|                    Strategy: EMA Crossover + Bollinger Squeeze   |
+//|                          Timeframes: M1 confirmation + M5 signal |
+//+------------------------------------------------------------------+
+#property copyright   "FxScalpKing"
+#property link        "https://fxscalpking.com"
+#property version     "2.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include "FxScalpKing_HTTP.mqh"
+
+//+------------------------------------------------------------------+
+//| INPUT PARAMETERS (Configurable from App or MT5 Settings)        |
+//+------------------------------------------------------------------+
+
+// --- LICENSE & CONNECTION ---
+input string   ApiKey            = "FXSK-DEFAULT-KEY-2025"; // Your API Key (from FxScalpKing App)
+input string   ServerURL         = "http://YOUR_SERVER_IP:5000"; // Backend Server URL
+
+// --- TRADE SETTINGS ---
+input double   LotSize           = 0.01;        // Fixed Lot Size
+input int      StopLoss_Points   = 150;         // Stop Loss in Points
+input int      TakeProfit_Points = 300;         // Take Profit in Points
+input int      MaxOpenTrades     = 3;           // Max simultaneous trades
+input int      MagicNumber       = 20250101;    // EA Identifier
+
+// --- EMA SETTINGS ---
+input int      FastEMA_Period    = 8;           // Fast EMA Period
+input int      SlowEMA_Period    = 21;          // Slow EMA Period
+
+// --- BOLLINGER BAND SETTINGS ---
+input int      BB_Period         = 20;          // Bollinger Band Period
+input double   BB_Deviation      = 2.0;         // Bollinger Band Deviation
+input double   SqueezeThreshold  = 0.002;       // Squeeze threshold (% of price)
+
+// --- SESSION FILTER ---
+input bool     UseSessionFilter  = true;        // Only trade during active sessions
+input int      SessionStartHour  = 7;           // Session Start (Server Time)
+input int      SessionEndHour    = 20;          // Session End (Server Time)
+
+// --- TRAILING STOP ---
+input bool     UseTrailingStop   = true;        // Enable Trailing Stop
+input int      TrailingStop_Points = 80;        // Trailing Stop Distance in Points
+
+// --- HEARTBEAT SETTINGS ---
+input int      HeartbeatInterval  = 3;          // Heartbeat interval in seconds
+
+//+------------------------------------------------------------------+
+//| GLOBAL VARIABLES                                                 |
+//+------------------------------------------------------------------+
+CTrade         trade;
+CPositionInfo  posInfo;
+
+int            handle_FastEMA_M5, handle_SlowEMA_M5;
+int            handle_FastEMA_M1, handle_SlowEMA_M1;
+int            handle_BB_M5;
+
+double         fastEMA_M5[], slowEMA_M5[];
+double         fastEMA_M1[], slowEMA_M1[];
+double         bb_upper[], bb_lower[], bb_middle[];
+
+bool           licenseValid      = false;
+datetime       lastBarTime_M5   = 0;
+datetime       lastBarTime_M1   = 0;
+datetime       lastHeartbeat    = 0;
+
+string         EA_Name           = "FxScalpKing EA v2.0";
+string         licenseExpiry     = "";
+string         licensePlan       = "";
+
+//+------------------------------------------------------------------+
+//| EXPERT INITIALIZATION                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   Print("=== ", EA_Name, " Starting ===");
+   Print("📡 Server URL: ", ServerURL);
+
+   // --- Configure HTTP Client ---
+   FxScalpKing.SetServerUrl(ServerURL);
+   FxScalpKing.SetApiKey(ApiKey);
+
+   // --- License Validation ---
+   if(!ValidateLicense())
+   {
+      Alert("❌ Invalid or expired API Key. Please check your subscription at fxscalpking.com");
+      return INIT_FAILED;
+   }
+   licenseValid = true;
+   Print("✅ License validated. Plan: ", licensePlan, " | Expires: ", licenseExpiry);
+
+   // --- Set Magic Number ---
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(10);
+
+   // --- Initialize Indicators on M5 ---
+   handle_FastEMA_M5 = iMA(_Symbol, PERIOD_M5, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   handle_SlowEMA_M5 = iMA(_Symbol, PERIOD_M5, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   handle_BB_M5      = iBands(_Symbol, PERIOD_M5, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
+
+   // --- Initialize Indicators on M1 ---
+   handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   handle_SlowEMA_M1 = iMA(_Symbol, PERIOD_M1, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(handle_FastEMA_M5 == INVALID_HANDLE || handle_SlowEMA_M5 == INVALID_HANDLE ||
+      handle_BB_M5 == INVALID_HANDLE || handle_FastEMA_M1 == INVALID_HANDLE ||
+      handle_SlowEMA_M1 == INVALID_HANDLE)
+   {
+      Alert("❌ Failed to initialize indicators. Check symbol name.");
+      return INIT_FAILED;
+   }
+
+   Print("✅ Indicators initialized on M1 + M5.");
+   Print("📊 Symbol: ", _Symbol);
+   Print("📦 Lot Size: ", LotSize);
+   Print("🛑 Stop Loss: ", StopLoss_Points, " points");
+   Print("🎯 Take Profit: ", TakeProfit_Points, " points");
+
+   // --- Set Timer for Heartbeat (every HeartbeatInterval seconds) ---
+   EventSetTimer(HeartbeatInterval);
+
+   // --- Send initial heartbeat ---
+   SendHeartbeat();
+
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| EXPERT DEINITIALIZATION                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   IndicatorRelease(handle_FastEMA_M5);
+   IndicatorRelease(handle_SlowEMA_M5);
+   IndicatorRelease(handle_BB_M5);
+   IndicatorRelease(handle_FastEMA_M1);
+   IndicatorRelease(handle_SlowEMA_M1);
+   Print("=== ", EA_Name, " Stopped ===");
+}
+
+//+------------------------------------------------------------------+
+//| EXPERT TIMER (Heartbeat)                                         |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   if(!licenseValid) return;
+   SendHeartbeat();
+}
+
+//+------------------------------------------------------------------+
+//| MAIN TICK FUNCTION                                               |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(!licenseValid) return;
+
+   // --- Session Filter ---
+   if(UseSessionFilter && !IsWithinSession()) return;
+
+   // --- Manage Trailing Stops on every tick ---
+   if(UseTrailingStop) ManageTrailingStop();
+
+   // --- Process Pending Commands from App ---
+   ProcessPendingCommands();
+
+   // --- M5 Signal Logic (entry signals) ---
+   datetime currentBarTime_M5 = iTime(_Symbol, PERIOD_M5, 0);
+   if(currentBarTime_M5 == lastBarTime_M5) return; // Only on new M5 bar
+   lastBarTime_M5 = currentBarTime_M5;
+
+   // --- Check open trade count ---
+   if(CountOpenTrades() >= MaxOpenTrades) return;
+
+   // --- Get M5 Data ---
+   if(!GetIndicatorData()) return;
+
+   // --- Determine M5 Signal ---
+   int m5Signal = GetM5Signal();
+   if(m5Signal == 0) return;
+
+   // --- Confirm on M1 ---
+   int m1Confirm = GetM1Confirmation();
+   if(m1Confirm == 0 || m1Confirm != m5Signal) return;
+
+   // --- Check Bollinger Squeeze ---
+   if(!IsBollingerSqueeze()) return;
+
+   // --- Execute Trade ---
+   if(m5Signal == 1)
+      OpenBuy();
+   else if(m5Signal == -1)
+      OpenSell();
+}
+
+//+------------------------------------------------------------------+
+//| GET INDICATOR DATA                                               |
+//+------------------------------------------------------------------+
+bool GetIndicatorData()
+{
+   ArraySetAsSeries(fastEMA_M5, true);
+   ArraySetAsSeries(slowEMA_M5, true);
+   ArraySetAsSeries(fastEMA_M1, true);
+   ArraySetAsSeries(slowEMA_M1, true);
+   ArraySetAsSeries(bb_upper,   true);
+   ArraySetAsSeries(bb_lower,   true);
+   ArraySetAsSeries(bb_middle,  true);
+
+   if(CopyBuffer(handle_FastEMA_M5, 0, 0, 3, fastEMA_M5) < 3) return false;
+   if(CopyBuffer(handle_SlowEMA_M5, 0, 0, 3, slowEMA_M5) < 3) return false;
+   if(CopyBuffer(handle_BB_M5, UPPER_BAND,  0, 3, bb_upper)  < 3) return false;
+   if(CopyBuffer(handle_BB_M5, LOWER_BAND,  0, 3, bb_lower)  < 3) return false;
+   if(CopyBuffer(handle_BB_M5, BASE_LINE,   0, 3, bb_middle) < 3) return false;
+   if(CopyBuffer(handle_FastEMA_M1, 0, 0, 3, fastEMA_M1) < 3) return false;
+   if(CopyBuffer(handle_SlowEMA_M1, 0, 0, 3, slowEMA_M1) < 3) return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| M5 SIGNAL: EMA Crossover                                        |
+//| Returns: 1 = BUY, -1 = SELL, 0 = NO SIGNAL                     |
+//+------------------------------------------------------------------+
+int GetM5Signal()
+{
+   // Bullish crossover: fast crossed above slow on previous bar
+   bool bullishCross = (fastEMA_M5[1] > slowEMA_M5[1]) && (fastEMA_M5[2] <= slowEMA_M5[2]);
+   // Bearish crossover: fast crossed below slow on previous bar
+   bool bearishCross = (fastEMA_M5[1] < slowEMA_M5[1]) && (fastEMA_M5[2] >= slowEMA_M5[2]);
+
+   if(bullishCross) return 1;
+   if(bearishCross) return -1;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| M1 CONFIRMATION: EMA Alignment                                  |
+//| Returns: 1 = BUY confirm, -1 = SELL confirm, 0 = NONE          |
+//+------------------------------------------------------------------+
+int GetM1Confirmation()
+{
+   bool bullish = fastEMA_M1[0] > slowEMA_M1[0];
+   bool bearish = fastEMA_M1[0] < slowEMA_M1[0];
+
+   if(bullish) return 1;
+   if(bearish) return -1;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| BOLLINGER SQUEEZE DETECTION                                      |
+//| Squeeze = Bands are narrow relative to price (low volatility)   |
+//+------------------------------------------------------------------+
+bool IsBollingerSqueeze()
+{
+   double bandWidth = (bb_upper[1] - bb_lower[1]) / bb_middle[1];
+   return (bandWidth <= SqueezeThreshold);
+}
+
+//+------------------------------------------------------------------+
+//| OPEN BUY TRADE                                                   |
+//+------------------------------------------------------------------+
+void OpenBuy()
+{
+   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double sl     = ask - StopLoss_Points * point;
+   double tp     = ask + TakeProfit_Points * point;
+
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+
+   if(trade.Buy(LotSize, _Symbol, ask, sl, tp, EA_Name))
+   {
+      ulong ticket = trade.ResultOrder();
+      Print("✅ BUY opened | Ticket: ", ticket, " | Price: ", ask, " | SL: ", sl, " | TP: ", tp);
+      NotifyTradeExecuted(ticket, "BUY", LotSize, ask, sl, tp);
+   }
+   else
+      Print("❌ BUY failed: ", trade.ResultRetcodeDescription());
+}
+
+//+------------------------------------------------------------------+
+//| OPEN SELL TRADE                                                  |
+//+------------------------------------------------------------------+
+void OpenSell()
+{
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double sl     = bid + StopLoss_Points * point;
+   double tp     = bid - TakeProfit_Points * point;
+
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+
+   if(trade.Sell(LotSize, _Symbol, bid, sl, tp, EA_Name))
+   {
+      ulong ticket = trade.ResultOrder();
+      Print("✅ SELL opened | Ticket: ", ticket, " | Price: ", bid, " | SL: ", sl, " | TP: ", tp);
+      NotifyTradeExecuted(ticket, "SELL", LotSize, bid, sl, tp);
+   }
+   else
+      Print("❌ SELL failed: ", trade.ResultRetcodeDescription());
+}
+
+//+------------------------------------------------------------------+
+//| CLOSE TRADE (Called from App command)                            |
+//+------------------------------------------------------------------+
+bool CloseTrade(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+   {
+      Print("❌ Position not found: ", ticket);
+      return false;
+   }
+
+   if(trade.PositionClose(ticket))
+   {
+      Print("✅ Position closed: ", ticket);
+      NotifyTradeClosed(ticket);
+      return true;
+   }
+
+   Print("❌ Failed to close position: ", ticket);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| TRAILING STOP MANAGER                                            |
+//+------------------------------------------------------------------+
+void ManageTrailingStop()
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol) continue;
+      if(posInfo.Magic() != MagicNumber) continue;
+
+      double currentSL = posInfo.StopLoss();
+      double openPrice = posInfo.PriceOpen();
+
+      if(posInfo.PositionType() == POSITION_TYPE_BUY)
+      {
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double newSL = bid - TrailingStop_Points * point;
+         newSL = NormalizeDouble(newSL, _Digits);
+
+         if(newSL > currentSL && newSL > openPrice)
+            trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+      }
+      else if(posInfo.PositionType() == POSITION_TYPE_SELL)
+      {
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double newSL = ask + TrailingStop_Points * point;
+         newSL = NormalizeDouble(newSL, _Digits);
+
+         if(newSL < currentSL && newSL < openPrice)
+            trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| COUNT OPEN TRADES FOR THIS EA                                    |
+//+------------------------------------------------------------------+
+int CountOpenTrades()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() == _Symbol && posInfo.Magic() == MagicNumber)
+         count++;
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| SESSION TIME FILTER                                              |
+//+------------------------------------------------------------------+
+bool IsWithinSession()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   return (dt.hour >= SessionStartHour && dt.hour < SessionEndHour);
+}
+
+//+------------------------------------------------------------------+
+//| LICENSE VALIDATION (Backend Call)                                |
+//+------------------------------------------------------------------+
+bool ValidateLicense()
+{
+   if(ApiKey == "" || StringLen(ApiKey) < 8)
+   {
+      Print("❌ License check failed: empty or too short API key.");
+      return false;
+   }
+
+   // Call backend to validate
+   return FxScalpKing.ValidateLicense(licenseExpiry, licensePlan);
+}
+
+//+------------------------------------------------------------------+
+//| SEND HEARTBEAT TO BACKEND                                         |
+//+------------------------------------------------------------------+
+void SendHeartbeat()
+{
+   datetime now = TimeCurrent();
+   if(now - lastHeartbeat < HeartbeatInterval)
+      return;
+
+   string commands[];
+   if(FxScalpKing.SendHeartbeat(commands))
+   {
+      lastHeartbeat = now;
+
+      // Process any commands from app
+      for(int i = 0; i < ArraySize(commands); i++)
+      {
+         Print("📱 App command received: ", commands[i]);
+         // Process command (e.g., CLOSE_ALL, CLOSE_TICKET_123)
+         ProcessCommand(commands[i]);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PROCESS PENDING COMMANDS FROM APP                                 |
+//+------------------------------------------------------------------+
+void ProcessPendingCommands()
+{
+   string commands[];
+   if(FxScalpKing.SendHeartbeat(commands))
+   {
+      for(int i = 0; i < ArraySize(commands); i++)
+      {
+         ProcessCommand(commands[i]);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PROCESS INDIVIDUAL COMMAND                                        |
+//+------------------------------------------------------------------+
+void ProcessCommand(string cmd)
+{
+   if(cmd == "CLOSE_ALL")
+   {
+      CloseAllTrades();
+   }
+   else if(StringFind(cmd, "CLOSE_TICKET_") == 0)
+   {
+      ulong ticket = (ulong)StringToInteger(StringSubstr(cmd, 13));
+      CloseTrade(ticket);
+   }
+   else if(cmd == "PAUSE")
+   {
+      Print("⏸ EA Paused by app");
+      // Could set a global flag to pause trading
+   }
+   else if(cmd == "RESUME")
+   {
+      Print("▶ EA Resumed by app");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| CLOSE ALL TRADES                                                 |
+//+------------------------------------------------------------------+
+void CloseAllTrades()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol) continue;
+      if(posInfo.Magic() != MagicNumber) continue;
+
+      trade.PositionClose(posInfo.Ticket());
+      Print("✅ Closed all positions");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NOTIFY TRADE EXECUTED TO BACKEND                                  |
+//+------------------------------------------------------------------+
+void NotifyTradeExecuted(ulong ticket, string type, double volume, double price, double sl, double tp)
+{
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+   FxScalpKing.NotifyTradeExecuted(ticket, type, volume, price, sl, tp, profit);
+}
+
+//+------------------------------------------------------------------+
+//| NOTIFY TRADE CLOSED TO BACKEND                                    |
+//+------------------------------------------------------------------+
+void NotifyTradeClosed(ulong ticket)
+{
+   double profit = 0;
+   if(PositionSelectByTicket(ticket))
+   {
+      profit = PositionGetDouble(POSITION_PROFIT);
+   }
+   FxScalpKing.NotifyTradeExecuted(ticket, "CLOSE", 0, 0, 0, 0, profit);
+}
+
+//+------------------------------------------------------------------+
+//| ON TRADE TRANSACTION (optional: log fills to journal)            |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest     &request,
+                        const MqlTradeResult      &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      Print("📋 Deal executed | Ticket: ", trans.deal,
+            " | Volume: ", trans.volume,
+            " | Price: ", trans.price);
+   }
+}
+//+------------------------------------------------------------------+
