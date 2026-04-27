@@ -327,6 +327,18 @@ app.post('/api/order', (req, res) => {
   });
 });
 
+// Get signal (for mobile app chart)
+app.get('/api/signal', (req, res) => {
+  const { symbol, tf } = req.query;
+  
+  // Return mock signal for now
+  res.json({
+    symbol: symbol || 'XAUUSD',
+    tf: tf || 'M5',
+    signal: Math.random() > 0.5 ? 'BUY' : 'SELL'
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`FxScalpKing Backend running on http://localhost:${PORT}`);
   console.log(`EA Endpoints ready for MT5 connection`);

@@ -83,6 +83,7 @@ public:
       if(!success || respCode != 200)
       {
          Print("❌ FXScalpKing: License validation failed. Code: ", respCode);
+         if(StringLen(response) > 0) Print("Response: ", response);
          return false;
       }
       
@@ -255,6 +256,41 @@ public:
       );
       
       return success && respCode == 200;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| HTTP REQUEST HELPER                                              |
+   //+------------------------------------------------------------------+
+   bool HttpRequest(string method, string url, string headers, string body, string &result, int &respCode)
+   {
+      char post[], resultData[];
+      string resultHeaders;
+      
+      // Ensure headers end with \r\n for WebRequest compatibility
+      if(StringFind(headers, "\r\n") < 0)
+         headers = headers + "\r\n";
+      
+      if(body != "")
+      {
+         // CRITICAL: We must remove the terminal \0 byte appended by StringToCharArray
+         // Node.js body-parser will reject JSON strings containing a null byte with 400 Bad Request
+         int copied = StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
+         if(copied > 0)
+            ArrayResize(post, copied - 1); // Remove the terminal \0 byte
+      }
+         
+      ResetLastError();
+      int res = WebRequest(method, url, headers, m_timeout, post, resultData, resultHeaders);
+      
+      respCode = res;
+      if(res == -1)
+      {
+         Print("❌ WebRequest error: ", GetLastError(), " on URL: ", url);
+         return false;
+      }
+      
+      result = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+      return true;
    }
 };
 
