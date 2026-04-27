@@ -23,7 +23,23 @@ const db = {
 // --- Helper Functions ---
 const generateKey = () => `FXSK-${require('crypto').randomBytes(16).toString('hex')}`;
 
-const findApiKey = (key) => db.apiKeys.find(k => k.key === key);
+const findApiKey = (key) => {
+  let keyEntry = db.apiKeys.find(k => k.key === key);
+  
+  // Auto-register keys starting with FXSK- for testing purposes
+  if (!keyEntry && key && key.startsWith('FXSK-')) {
+    keyEntry = { key: key, type: 'PAID', lastUsed: null, accountId: null };
+    db.apiKeys.push(keyEntry);
+    console.log(`Auto-registered new API Key: ${key}`);
+  }
+  
+  return keyEntry;
+};
+
+// --- BASE ENDPOINT ---
+app.get('/', (req, res) => {
+  res.send('FxScalpKing Backend is Running Successfully!');
+});
 
 // --- MT5 EA ENDPOINTS ---
 
