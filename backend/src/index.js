@@ -84,7 +84,7 @@ app.post('/api/ea/update', (req, res) => {
 
   // Update account state
   db.accountStates[apiKey] = {
-    ...accountData,
+    ...(accountData || {}),
     positions: positions || [],
     lastSeen: new Date().toISOString()
   };
@@ -220,7 +220,12 @@ app.get('/api/account', (req, res) => {
       pnl_today: 0,
       ea_connected: false,
       positions: [],
-      message: 'EA not connected'
+      ea_symbol: 'XAUUSD',
+      price: 0,
+      fastEMA: 0,
+      slowEMA: 0,
+      bbUpper: 0,
+      bbLower: 0
     });
   }
 
@@ -232,7 +237,12 @@ app.get('/api/account', (req, res) => {
     pnl_today: state.pnl_today,
     ea_connected: isConnected,
     positions: state.positions,
-    ea_symbol: state.eaSymbol || 'XAUUSD'
+    ea_symbol: state.eaSymbol || 'XAUUSD',
+    price: state.price || 0,
+    fastEMA: state.fastEMA || 0,
+    slowEMA: state.slowEMA || 0,
+    bbUpper: state.bbUpper || 0,
+    bbLower: state.bbLower || 0
   });
 });
 

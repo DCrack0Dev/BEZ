@@ -166,36 +166,14 @@ void OnTick()
    // --- Manage Trailing Stops on every tick ---
    if(UseTrailingStop) ManageTrailingStop();
 
-   // --- Process Pending Commands from App ---
-   ProcessPendingCommands();
-
-   // --- M5 Signal Logic (entry signals) ---
-   datetime currentBarTime_M5 = iTime(_Symbol, PERIOD_M5, 0);
-   if(currentBarTime_M5 == lastBarTime_M5) return; // Only on new M5 bar
-   lastBarTime_M5 = currentBarTime_M5;
-
-   // --- Check open trade count ---
-   if(CountOpenTrades() >= MaxOpenTrades) return;
+   // --- Process Heartbeat & Commands ---
+   SendHeartbeat();
 
    // --- Get M5 Data ---
    if(!GetIndicatorData()) return;
 
-   // --- Determine M5 Signal ---
-   int m5Signal = GetM5Signal();
-   if(m5Signal == 0) return;
-
-   // --- Confirm on M1 ---
-   int m1Confirm = GetM1Confirmation();
-   if(m1Confirm == 0 || m1Confirm != m5Signal) return;
-
-   // --- Check Bollinger Squeeze ---
-   if(!IsBollingerSqueeze()) return;
-
-   // --- Execute Trade ---
-   if(m5Signal == 1)
-      OpenBuy();
-   else if(m5Signal == -1)
-      OpenSell();
+   // The brain is now on the app. We just gather data and let Heartbeat send it.
+   // We no longer automatically open trades here.
 }
 
 //+------------------------------------------------------------------+
@@ -416,6 +394,12 @@ void SendHeartbeat()
    if(now - lastHeartbeat < HeartbeatInterval)
       return;
 
+   // Update indicator data before sending heartbeat
+   if(GetIndicatorData()) {
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0]);
+   }
+
    string commands[];
    if(FxScalpKing.SendHeartbeat(commands))
    {
@@ -426,21 +410,6 @@ void SendHeartbeat()
       {
          Print("📱 App command received: ", commands[i]);
          // Process command (e.g., CLOSE_ALL, CLOSE_TICKET_123)
-         ProcessCommand(commands[i]);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| PROCESS PENDING COMMANDS FROM APP                                 |
-//+------------------------------------------------------------------+
-void ProcessPendingCommands()
-{
-   string commands[];
-   if(FxScalpKing.SendHeartbeat(commands))
-   {
-      for(int i = 0; i < ArraySize(commands); i++)
-      {
          ProcessCommand(commands[i]);
       }
    }
@@ -459,6 +428,14 @@ void ProcessCommand(string cmd)
    {
       ulong ticket = (ulong)StringToInteger(StringSubstr(cmd, 13));
       CloseTrade(ticket);
+   }
+   else if(cmd == "BUY")
+   {
+      OpenBuy();
+   }
+   else if(cmd == "SELL")
+   {
+      OpenSell();
    }
    else if(cmd == "PAUSE")
    {

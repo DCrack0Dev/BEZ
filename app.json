@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "FxScalpKing",
+    "slug": "fx-scalpking-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.scalpking.app"
+    },
+    "android": {
+      "package": "com.scalpking.app"
+    },
+    "updates": {
+      "enabled": false
+    },
+    "web": {
+    },
+    "plugins": [
+      "expo-notifications",
+      "expo-secure-store"
+    ]
+  }
+}

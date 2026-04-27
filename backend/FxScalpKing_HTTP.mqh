@@ -25,6 +25,13 @@ private:
    string      m_serverUrl;
    uint        m_timeout;
    
+   // Market Data for App
+   double      m_lastPrice;
+   double      m_fastEMA;
+   double      m_slowEMA;
+   double      m_bbUpper;
+   double      m_bbLower;
+   
 public:
    // Constructor
    void CFxScalpKingHTTP()
@@ -32,6 +39,21 @@ public:
       m_apiKey = "";
       m_serverUrl = API_BASE_URL;
       m_timeout = 5000; // 5 second timeout
+      m_lastPrice = 0.0;
+      m_fastEMA = 0.0;
+      m_slowEMA = 0.0;
+      m_bbUpper = 0.0;
+      m_bbLower = 0.0;
+   }
+   
+   // Set Market Data to send in heartbeat
+   void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower)
+   {
+      m_lastPrice = price;
+      m_fastEMA = fastEMA;
+      m_slowEMA = slowEMA;
+      m_bbUpper = bbUpper;
+      m_bbLower = bbLower;
    }
    
    // Set API Key
@@ -135,7 +157,12 @@ public:
             "\"margin\":" + DoubleToString(margin, 2) + ","
             "\"freeMargin\":" + DoubleToString(freeMargin, 2) + ","
             "\"accountId\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
-            "\"eaSymbol\":\"" + _Symbol + "\""
+            "\"eaSymbol\":\"" + _Symbol + "\","
+            "\"price\":" + DoubleToString(m_lastPrice, 5) + ","
+            "\"fastEMA\":" + DoubleToString(m_fastEMA, 5) + ","
+            "\"slowEMA\":" + DoubleToString(m_slowEMA, 5) + ","
+            "\"bbUpper\":" + DoubleToString(m_bbUpper, 5) + ","
+            "\"bbLower\":" + DoubleToString(m_bbLower, 5) +
          "},"
          "\"positions\":[";
       
@@ -151,7 +178,7 @@ public:
          if(!first) json += ",";
          first = false;
          
-         ENUM_POSITION_TYPE posType = PositionGetInteger(POSITION_TYPE);
+         ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
          json += "{";
          json += "\"ticket\":" + IntegerToString(PositionGetInteger(POSITION_TICKET)) + ",";
          json += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";

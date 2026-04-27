@@ -44,41 +44,6 @@ if (MOCK_MODE) {
         },
       });
     }
-    if (config.url?.includes('/api/orders/open')) {
-      return Promise.reject({
-        mockResponse: {
-          data: [
-            {
-              ticket: '123456',
-              symbol: 'XAUUSD',
-              type: 'BUY',
-              lots: 0.1,
-              openPrice: 2350.5,
-              currentPrice: 2355.2,
-              pnl: 47.0,
-              openTime: new Date().toISOString(),
-            },
-            {
-              ticket: '123457',
-              symbol: 'US30',
-              type: 'SELL',
-              lots: 0.05,
-              openPrice: 38500,
-              currentPrice: 38450,
-              pnl: 25.0,
-              openTime: new Date().toISOString(),
-            },
-          ],
-        },
-      });
-    }
-    if (config.url?.includes('/api/signal')) {
-      return Promise.reject({
-        mockResponse: {
-          data: { symbol: 'XAUUSD', tf: 'M5', signal: 'BUY' },
-        },
-      });
-    }
     if (config.url?.includes('/api/order')) {
       return Promise.reject({
         mockResponse: { data: { success: true, ticket: Math.floor(Math.random() * 1000000).toString() } },

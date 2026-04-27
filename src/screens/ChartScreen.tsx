@@ -29,21 +29,26 @@ const ChartScreen = () => {
   ];
 
   useEffect(() => {
-    const fetchSignal = async () => {
-      try {
-        const data = await getSignal(selectedSymbol, timeframe);
-        setSignal(data.signal);
-      } catch (error) {
-        console.error('Failed to fetch signal');
-      }
-    };
-    fetchSignal();
-  }, [selectedSymbol, timeframe]);
+    if (account.fastEMA > account.slowEMA && account.slowEMA > 0) {
+      setSignal('BUY');
+    } else if (account.fastEMA < account.slowEMA && account.fastEMA > 0) {
+      setSignal('SELL');
+    } else {
+      setSignal('NONE');
+    }
+  }, [account.fastEMA, account.slowEMA]);
 
   return (
     <ScrollView style={styles.container}>
       <View style={styles.header}>
-        <Text style={TYPOGRAPHY.h2}>{selectedSymbol}</Text>
+        <View>
+          <Text style={TYPOGRAPHY.h2}>{selectedSymbol}</Text>
+          {account.price > 0 && (
+            <Text style={[TYPOGRAPHY.h3, { color: COLORS.primary, marginTop: 4 }]}>
+              {account.price.toFixed(5)}
+            </Text>
+          )}
+        </View>
         <View style={styles.timeframeContainer}>
           {timeframes.map((tf) => (
             <TouchableOpacity
@@ -95,15 +100,21 @@ const ChartScreen = () => {
         <View style={styles.indicators}>
           <View style={styles.indicatorRow}>
             <Text style={TYPOGRAPHY.bodySecondary}>EMA 8</Text>
-            <Text style={[TYPOGRAPHY.body, { color: COLORS.primary }]}>2352.45</Text>
+            <Text style={[TYPOGRAPHY.body, { color: COLORS.primary }]}>
+              {account.fastEMA ? account.fastEMA.toFixed(5) : '-'}
+            </Text>
           </View>
           <View style={styles.indicatorRow}>
             <Text style={TYPOGRAPHY.bodySecondary}>EMA 21</Text>
-            <Text style={[TYPOGRAPHY.body, { color: '#FFA000' }]}>2348.12</Text>
+            <Text style={[TYPOGRAPHY.body, { color: '#FFA000' }]}>
+              {account.slowEMA ? account.slowEMA.toFixed(5) : '-'}
+            </Text>
           </View>
           <View style={styles.indicatorRow}>
             <Text style={TYPOGRAPHY.bodySecondary}>Bollinger Bands</Text>
-            <Text style={TYPOGRAPHY.body}>2340.0 - 2360.0</Text>
+            <Text style={TYPOGRAPHY.body}>
+              {account.bbLower ? account.bbLower.toFixed(5) : '-'} - {account.bbUpper ? account.bbUpper.toFixed(5) : '-'}
+            </Text>
           </View>
         </View>
       </View>

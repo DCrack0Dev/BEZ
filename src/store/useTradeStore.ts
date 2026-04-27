@@ -17,6 +17,11 @@ export interface AccountData {
   pnlToday: number;
   eaConnected: boolean;
   eaSymbol: string;
+  price: number;
+  fastEMA: number;
+  slowEMA: number;
+  bbUpper: number;
+  bbLower: number;
 }
 
 interface TradeState {
@@ -39,6 +44,11 @@ export const useTradeStore = create<TradeState>((set) => ({
     pnlToday: 0,
     eaConnected: false,
     eaSymbol: 'XAUUSD',
+    price: 0,
+    fastEMA: 0,
+    slowEMA: 0,
+    bbUpper: 0,
+    bbLower: 0,
   },
   openPositions: [],
   closedPositions: [],

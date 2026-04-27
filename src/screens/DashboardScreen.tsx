@@ -39,7 +39,11 @@ const DashboardScreen = () => {
     if (!pendingOrder) return;
     setConfirmVisible(false);
     try {
-      await placeOrder(pendingOrder.symbol, pendingOrder.type, botSettings.defaultLots);
+      await placeOrder({
+        symbol: pendingOrder.symbol,
+        type: pendingOrder.type,
+        lots: botSettings.defaultLots
+      });
       Alert.alert('Success', 'Order Sent Successfully');
       refresh();
     } catch (error) {
