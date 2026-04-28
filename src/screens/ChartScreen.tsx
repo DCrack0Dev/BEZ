@@ -36,7 +36,7 @@ const ChartScreen = () => {
       <View style={styles.header}>
         <View>
           <Text style={TYPOGRAPHY.h2}>{selectedSymbol}</Text>
-          {account.price > 0 && (
+          {account.price !== undefined && account.price > 0 && (
             <Text style={[TYPOGRAPHY.h3, { color: COLORS.primary, marginTop: 4 }]}>
               {account.price.toFixed(5)}
             </Text>

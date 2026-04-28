@@ -22,7 +22,7 @@ const JournalScreen = () => {
         id: t.id,
         symbol: t.symbol,
         type: t.type,
-        pnl: t.profit,
+        pnl: t.profit || 0,
         openTime: new Date(t.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         closeTime: new Date(t.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         duration: '-', // Backend currently doesn't track duration directly without open time

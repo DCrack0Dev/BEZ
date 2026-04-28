@@ -29,7 +29,7 @@ const PositionCard: React.FC<PositionCardProps> = ({ position, onClose }) => {
         </View>
         <View style={styles.pnlContainer}>
           <Text style={[TYPOGRAPHY.mono, { color: isPositive ? COLORS.buy : COLORS.sell, fontSize: 18 }]}>
-            {isPositive ? '+' : ''}{position.pnl.toFixed(2)}
+            {isPositive ? '+' : ''}{(position.pnl || 0).toFixed(2)}
           </Text>
           <Text style={TYPOGRAPHY.bodySecondary}>Price: {position.currentPrice}</Text>
         </View>

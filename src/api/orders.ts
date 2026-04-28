@@ -3,7 +3,17 @@ import apiClient from './client';
 
 export const getOpenOrders = async () => {
   const response = await apiClient.get('/api/account'); // Account endpoint now returns positions
-  return response.data.positions || [];
+  const positions = response.data.positions || [];
+  return positions.map((pos: any) => ({
+    ticket: String(pos.ticket),
+    symbol: pos.symbol,
+    type: pos.type,
+    lots: pos.volume || 0,
+    openPrice: pos.price || 0,
+    currentPrice: response.data.price || pos.price || 0,
+    pnl: pos.profit || 0,
+    openTime: new Date().toISOString(), // Mock if not provided by EA
+  }));
 };
 
 export const getClosedOrders = async (filter: 'today' | 'week' | 'month') => {

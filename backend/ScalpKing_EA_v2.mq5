@@ -260,11 +260,23 @@ void OpenBuy()
       Print("❌ Algo Trading is disabled for this account by the broker.");
       return;
    }
-   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_ALLOWED))
+   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
    {
       Print("❌ Trading is disabled for symbol ", _Symbol);
       return;
    }
+
+   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   double safeLotSize = LotSize;
+   if(safeLotSize < minVolume) safeLotSize = minVolume;
+   if(safeLotSize > maxVolume) safeLotSize = maxVolume;
+   
+   // Align to volume step
+   int steps = (int)MathRound(safeLotSize / stepVolume);
+   safeLotSize = steps * stepVolume;
 
    double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -275,11 +287,11 @@ void OpenBuy()
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
 
-   if(trade.Buy(LotSize, _Symbol, ask, sl, tp, EA_Name))
+   if(trade.Buy(safeLotSize, _Symbol, ask, sl, tp, EA_Name))
    {
       ulong ticket = trade.ResultOrder();
       Print("✅ BUY opened | Ticket: ", ticket, " | Price: ", ask, " | SL: ", sl, " | TP: ", tp);
-      NotifyTradeExecuted(ticket, "BUY", LotSize, ask, sl, tp);
+      NotifyTradeExecuted(ticket, "BUY", safeLotSize, ask, sl, tp);
    }
    else
       Print("❌ BUY failed: ", trade.ResultRetcodeDescription());
@@ -305,11 +317,23 @@ void OpenSell()
       Print("❌ Algo Trading is disabled for this account by the broker.");
       return;
    }
-   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_ALLOWED))
+   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
    {
       Print("❌ Trading is disabled for symbol ", _Symbol);
       return;
    }
+
+   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   double safeLotSize = LotSize;
+   if(safeLotSize < minVolume) safeLotSize = minVolume;
+   if(safeLotSize > maxVolume) safeLotSize = maxVolume;
+   
+   // Align to volume step
+   int steps = (int)MathRound(safeLotSize / stepVolume);
+   safeLotSize = steps * stepVolume;
 
    double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -319,11 +343,11 @@ void OpenSell()
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
 
-   if(trade.Sell(LotSize, _Symbol, bid, sl, tp, EA_Name))
+   if(trade.Sell(safeLotSize, _Symbol, bid, sl, tp, EA_Name))
    {
       ulong ticket = trade.ResultOrder();
       Print("✅ SELL opened | Ticket: ", ticket, " | Price: ", bid, " | SL: ", sl, " | TP: ", tp);
-      NotifyTradeExecuted(ticket, "SELL", LotSize, bid, sl, tp);
+      NotifyTradeExecuted(ticket, "SELL", safeLotSize, bid, sl, tp);
    }
    else
       Print("❌ SELL failed: ", trade.ResultRetcodeDescription());
@@ -366,24 +390,43 @@ void ManageTrailingStop()
 
       double currentSL = posInfo.StopLoss();
       double openPrice = posInfo.PriceOpen();
+      double tp = posInfo.TakeProfit();
 
       if(posInfo.PositionType() == POSITION_TYPE_BUY)
       {
+         if(tp <= openPrice) continue; // Invalid TP for 20% calculation
+         double distanceToTP = tp - openPrice;
+         double activationPrice = openPrice + (distanceToTP * 0.20);
+         
          double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double newSL = bid - TrailingStop_Points * point;
-         newSL = NormalizeDouble(newSL, _Digits);
+         
+         // Start trailing only when price reaches 20% in profit to TP
+         if(bid >= activationPrice)
+         {
+            double newSL = bid - TrailingStop_Points * point;
+            newSL = NormalizeDouble(newSL, _Digits);
 
-         if(newSL > currentSL && newSL > openPrice)
-            trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+            if((currentSL == 0.0 || newSL > currentSL) && newSL > openPrice)
+               trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+         }
       }
       else if(posInfo.PositionType() == POSITION_TYPE_SELL)
       {
+         if(tp >= openPrice || tp == 0.0) continue; // Invalid TP for 20% calculation
+         double distanceToTP = openPrice - tp;
+         double activationPrice = openPrice - (distanceToTP * 0.20);
+         
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double newSL = ask + TrailingStop_Points * point;
-         newSL = NormalizeDouble(newSL, _Digits);
+         
+         // Start trailing only when price reaches 20% in profit to TP
+         if(ask <= activationPrice)
+         {
+            double newSL = ask + TrailingStop_Points * point;
+            newSL = NormalizeDouble(newSL, _Digits);
 
-         if(newSL < currentSL && newSL < openPrice)
-            trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+            if((currentSL == 0.0 || newSL < currentSL) && newSL < openPrice)
+               trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+         }
       }
    }
 }
