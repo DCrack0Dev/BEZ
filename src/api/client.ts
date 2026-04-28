@@ -13,7 +13,7 @@ const apiClient = axios.create({
 
 apiClient.interceptors.request.use((config) => {
   const { jwt, serverUrl, apiKey } = useAuthStore.getState();
-  if (serverUrl && !config.baseURL) {
+  if (serverUrl) {
     config.baseURL = serverUrl;
   }
   if (jwt) {
