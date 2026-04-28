@@ -168,18 +168,19 @@ public:
 
       double open[], high[], low[], close[];
       ENUM_TIMEFRAMES currentPeriod = Period();
-      int copied = CopyOpen(_Symbol, currentPeriod, 0, 20, open);
+      ResetLastError();
+      int copied = CopyOpen(Symbol(), currentPeriod, 0, 20, open);
       if(copied > 0)
       {
-         CopyHigh(_Symbol, currentPeriod, 0, copied, high);
-         CopyLow(_Symbol, currentPeriod, 0, copied, low);
-         CopyClose(_Symbol, currentPeriod, 0, copied, close);
-         
+         CopyHigh(Symbol(), currentPeriod, 0, copied, high);
+         CopyLow(Symbol(), currentPeriod, 0, copied, low);
+         CopyClose(Symbol(), currentPeriod, 0, copied, close);
+
          ArraySetAsSeries(open, true);
          ArraySetAsSeries(high, true);
          ArraySetAsSeries(low, true);
          ArraySetAsSeries(close, true);
-         
+
          int limit = MathMin(20, copied);
          for(int i = limit - 1; i >= 0; i--)
          {
@@ -192,6 +193,10 @@ public:
             json += "\"close\":" + DoubleToString(close[i], 5);
             json += "}";
          }
+      }
+      else
+      {
+         Print("âš ï¸ Failed to copy chart data for ", Symbol(), " Period: ", EnumToString(currentPeriod), " Error: ", GetLastError());
       }
       
       json += "],"
