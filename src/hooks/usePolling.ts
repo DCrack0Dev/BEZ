@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import React, { useEffect, useCallback, useRef } from 'react';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { getAccountData } from '../api/account';
@@ -8,6 +8,7 @@ export const usePolling = () => {
   const { setAccount, setOpenPositions, setLoading, setError, openPositions } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const lastSignalRef = useRef<'BUY' | 'SELL' | 'NONE'>('NONE');
+  const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -34,35 +35,19 @@ export const usePolling = () => {
       setOpenPositions(openOrders);
       setError(null);
 
-      // Auto Trading Logic (App acts as the brain)
-      if (botSettings.autoTradingEnabled && accountData.ea_connected) {
-        let currentSignal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
-        if (accountData.fastEMA > accountData.slowEMA && accountData.slowEMA > 0) {
-          currentSignal = 'BUY';
-        } else if (accountData.fastEMA < accountData.slowEMA && accountData.fastEMA > 0) {
-          currentSignal = 'SELL';
+      // Sync botSettings.autoTradingEnabled to backend so EA knows
+      if (prevAutoTrading.current !== botSettings.autoTradingEnabled) {
+        prevAutoTrading.current = botSettings.autoTradingEnabled;
+        if (accountData.ea_connected) {
+          console.log(`🤖 Sending Auto-trading state to EA: ${botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE'}`);
+          placeOrder({
+            symbol: accountData.ea_symbol || 'XAUUSD',
+            type: botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE',
+            lots: 0,
+            sl: 0,
+            tp: 0
+          }).catch(e => console.error("Auto-trade sync failed:", e));
         }
-
-        // Only act on a fresh signal and respect max trades
-        if (
-          currentSignal !== 'NONE' &&
-          currentSignal !== lastSignalRef.current &&
-          openOrders.length < botSettings.maxOpenTrades
-        ) {
-          // Check if we already have a trade in this direction to avoid duplicates
-          const hasTradeInDirection = openOrders.some((pos: any) => pos.type === currentSignal);
-          if (!hasTradeInDirection) {
-            console.log(`🤖 Auto-trading: Opening ${currentSignal} on ${accountData.ea_symbol || 'XAUUSD'}`);
-            placeOrder({
-              symbol: accountData.ea_symbol || 'XAUUSD',
-              type: currentSignal,
-              lots: botSettings.defaultLots,
-              sl: botSettings.stopLoss,
-              tp: botSettings.takeProfit
-            }).catch(e => console.error("Auto-trade failed:", e));
-          }
-        }
-        lastSignalRef.current = currentSignal;
       }
 
     } catch (error) {

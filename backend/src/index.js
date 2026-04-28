@@ -77,6 +77,12 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData, positions, chart } = req.body;
 
+  if (chart && chart.length > 0) {
+    console.log(`Received chart data with ${chart.length} candles`);
+  } else {
+    console.log(`Received empty or no chart data`);
+  }
+
   const keyEntry = findApiKey(apiKey);
   if (!keyEntry) {
     return res.status(401).json({ error: 'Invalid API Key' });
@@ -277,16 +283,37 @@ app.get('/api/orders/closed', (req, res) => {
       startDate = new Date(0);
   }
 
-  const trades = db.tradeHistory
-    .filter(t => t.apiKey === apiKey && new Date(t.executedAt) >= startDate)
+  const userTrades = db.tradeHistory.filter(t => t.apiKey === apiKey);
+  const groupedTrades = {};
+
+  userTrades.forEach(t => {
+    if (!groupedTrades[t.ticket]) {
+      groupedTrades[t.ticket] = { ticket: t.ticket, symbol: t.symbol || 'XAUUSD' };
+    }
+    if (t.type === 'BUY' || t.type === 'SELL') {
+      groupedTrades[t.ticket].type = t.type;
+      groupedTrades[t.ticket].openTime = t.executedAt;
+      groupedTrades[t.ticket].lots = t.lots;
+    } else if (t.type === 'CLOSE') {
+      groupedTrades[t.ticket].closeTime = t.executedAt;
+      groupedTrades[t.ticket].profit = t.profit || 0;
+      groupedTrades[t.ticket].pips = t.pips || 0;
+    }
+  });
+
+  const trades = Object.values(groupedTrades)
+    .filter(t => t.closeTime && new Date(t.closeTime) >= startDate)
     .map(t => ({
-      id: t.trade?.ticket || Date.now(),
-      symbol: t.trade?.symbol || 'XAUUSD',
-      type: t.trade?.type === 'BUY' ? 'BUY' : 'SELL',
-      pips: t.trade?.pips || 0,
-      profit: t.trade?.profit || 0,
-      date: t.executedAt
-    }));
+      id: t.ticket || Date.now() + Math.random(),
+      symbol: t.symbol,
+      type: t.type || 'UNKNOWN',
+      pips: t.pips || 0,
+      profit: t.profit || 0,
+      date: t.closeTime,
+      openTime: t.openTime,
+      closeTime: t.closeTime
+    }))
+    .sort((a, b) => new Date(b.closeTime) - new Date(a.closeTime));
 
   res.json(trades);
 });

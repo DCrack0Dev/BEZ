@@ -18,15 +18,32 @@ const JournalScreen = () => {
       const data = await getClosedOrders(filter);
       
       // Transform backend data if needed, or use directly
-      const formattedTrades = data.map((t: any) => ({
-        id: t.id,
-        symbol: t.symbol,
-        type: t.type,
-        pnl: t.profit || 0,
-        openTime: new Date(t.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        closeTime: new Date(t.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        duration: '-', // Backend currently doesn't track duration directly without open time
-      }));
+      const formattedTrades = data.map((t: any) => {
+        const oTime = t.openTime ? new Date(t.openTime) : new Date(t.date);
+        const cTime = t.closeTime ? new Date(t.closeTime) : new Date(t.date);
+        
+        let durationStr = '-';
+        if (t.openTime && t.closeTime) {
+          const diffMs = cTime.getTime() - oTime.getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          if (diffMins < 60) durationStr = `${diffMins}m`;
+          else {
+            const h = Math.floor(diffMins / 60);
+            const m = diffMins % 60;
+            durationStr = `${h}h ${m}m`;
+          }
+        }
+
+        return {
+          id: t.id,
+          symbol: t.symbol,
+          type: t.type,
+          pnl: t.profit || 0,
+          openTime: oTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          closeTime: cTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          duration: durationStr,
+        };
+      });
       
       setTrades(formattedTrades);
       
