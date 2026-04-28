@@ -75,7 +75,7 @@ app.post('/api/ea/validate', (req, res) => {
 // 2. EA Heartbeat & Data Sync
 // EA calls this every 2-3 seconds with current account state
 app.post('/api/ea/update', (req, res) => {
-  const { apiKey, accountData, positions } = req.body;
+  const { apiKey, accountData, positions, chart } = req.body;
 
   const keyEntry = findApiKey(apiKey);
   if (!keyEntry) {
@@ -86,6 +86,7 @@ app.post('/api/ea/update', (req, res) => {
   db.accountStates[apiKey] = {
     ...(accountData || {}),
     positions: positions || [],
+    chart: chart || [],
     lastSeen: new Date().toISOString()
   };
 
@@ -225,7 +226,8 @@ app.get('/api/account', (req, res) => {
       fastEMA: 0,
       slowEMA: 0,
       bbUpper: 0,
-      bbLower: 0
+      bbLower: 0,
+      chart: []
     });
   }
 
@@ -242,7 +244,8 @@ app.get('/api/account', (req, res) => {
     fastEMA: state.fastEMA || 0,
     slowEMA: state.slowEMA || 0,
     bbUpper: state.bbUpper || 0,
-    bbLower: state.bbLower || 0
+    bbLower: state.bbLower || 0,
+    chart: state.chart || []
   });
 });
 

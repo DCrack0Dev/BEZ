@@ -164,6 +164,37 @@ public:
             "\"bbUpper\":" + DoubleToString(m_bbUpper, 5) + ","
             "\"bbLower\":" + DoubleToString(m_bbLower, 5) +
          "},"
+         "\"chart\":[";
+
+      double open[], high[], low[], close[];
+      ENUM_TIMEFRAMES currentPeriod = Period();
+      int copied = CopyOpen(_Symbol, currentPeriod, 0, 20, open);
+      if(copied > 0)
+      {
+         CopyHigh(_Symbol, currentPeriod, 0, copied, high);
+         CopyLow(_Symbol, currentPeriod, 0, copied, low);
+         CopyClose(_Symbol, currentPeriod, 0, copied, close);
+         
+         ArraySetAsSeries(open, true);
+         ArraySetAsSeries(high, true);
+         ArraySetAsSeries(low, true);
+         ArraySetAsSeries(close, true);
+         
+         int limit = MathMin(20, copied);
+         for(int i = limit - 1; i >= 0; i--)
+         {
+            if(i < limit - 1) json += ",";
+            json += "{";
+            json += "\"x\":" + IntegerToString(limit - i) + ",";
+            json += "\"open\":" + DoubleToString(open[i], 5) + ",";
+            json += "\"high\":" + DoubleToString(high[i], 5) + ",";
+            json += "\"low\":" + DoubleToString(low[i], 5) + ",";
+            json += "\"close\":" + DoubleToString(close[i], 5);
+            json += "}";
+         }
+      }
+      
+      json += "],"
          "\"positions\":[";
       
       // Add open positions

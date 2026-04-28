@@ -28,6 +28,7 @@ export const usePolling = () => {
         slowEMA: accountData.slowEMA || 0,
         bbUpper: accountData.bbUpper || 0,
         bbLower: accountData.bbLower || 0,
+        chart: accountData.chart || [],
       });
       
       setOpenPositions(openOrders);

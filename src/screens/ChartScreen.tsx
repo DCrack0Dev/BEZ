@@ -18,15 +18,8 @@ const ChartScreen = () => {
 
   const timeframes = ['M1', 'M5', 'M15', 'M30', 'H1'];
 
-  // Mock data for chart
-  const mockChartData = [
-    { x: 1, open: 2345, close: 2348, high: 2350, low: 2344 },
-    { x: 2, open: 2348, close: 2346, high: 2349, low: 2345 },
-    { x: 3, open: 2346, close: 2350, high: 2352, low: 2345 },
-    { x: 4, open: 2350, close: 2352, high: 2355, low: 2349 },
-    { x: 5, open: 2352, close: 2351, high: 2353, low: 2350 },
-    { x: 6, open: 2351, close: 2355, high: 2358, low: 2350 },
-  ];
+  // Use real data from EA, fallback to empty array
+  const chartData = account.chart?.length > 0 ? account.chart : [];
 
   useEffect(() => {
     if (account.fastEMA > account.slowEMA && account.slowEMA > 0) {
@@ -67,12 +60,13 @@ const ChartScreen = () => {
           theme={VictoryTheme.material}
           width={width - 32}
           height={300}
-          padding={{ top: 20, bottom: 40, left: 50, right: 20 }}
+          padding={{ top: 20, bottom: 40, left: 60, right: 20 }}
+          domainPadding={{ x: 10, y: 10 }}
         >
           <VictoryAxis
             style={{
               axis: { stroke: COLORS.border },
-              tickLabels: { fill: COLORS.textSecondary, fontSize: 10 },
+              tickLabels: { fill: COLORS.textSecondary, fontSize: 10, fontFamily: 'System' },
               grid: { stroke: COLORS.border, strokeDasharray: '4' },
             }}
           />
@@ -80,17 +74,23 @@ const ChartScreen = () => {
             dependentAxis
             style={{
               axis: { stroke: COLORS.border },
-              tickLabels: { fill: COLORS.textSecondary, fontSize: 10 },
+              tickLabels: { fill: COLORS.textSecondary, fontSize: 10, fontFamily: 'System' },
               grid: { stroke: COLORS.border, strokeDasharray: '4' },
             }}
           />
-          <VictoryCandlestick
-            data={mockChartData}
-            candleColors={{ positive: COLORS.buy, negative: COLORS.sell }}
-            style={{
-              data: { strokeWidth: 1 },
-            }}
-          />
+          {chartData.length > 0 ? (
+            <VictoryCandlestick
+              data={chartData}
+              candleColors={{ positive: COLORS.buy, negative: COLORS.sell }}
+              style={{
+                data: { strokeWidth: 1 },
+              }}
+            />
+          ) : (
+            <View style={{ position: 'absolute', top: 140, alignSelf: 'center' }}>
+              <Text style={{ color: COLORS.textSecondary, fontFamily: 'System' }}>Waiting for chart data...</Text>
+            </View>
+          )}
         </VictoryChart>
       </View>
 

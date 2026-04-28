@@ -22,6 +22,7 @@ export interface AccountData {
   slowEMA: number;
   bbUpper: number;
   bbLower: number;
+  chart: { x: number; open: number; close: number; high: number; low: number }[];
 }
 
 interface TradeState {
@@ -49,6 +50,7 @@ export const useTradeStore = create<TradeState>((set) => ({
     slowEMA: 0,
     bbUpper: 0,
     bbLower: 0,
+    chart: [],
   },
   openPositions: [],
   closedPositions: [],

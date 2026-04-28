@@ -245,7 +245,29 @@ bool IsBollingerSqueeze()
 //+------------------------------------------------------------------+
 void OpenBuy()
 {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      Print("❌ Algo Trading is disabled in MT5 terminal. Please click the 'Algo Trading' button at the top.");
+      return;
+   }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+   {
+      Print("❌ Trading is disabled for this account by the broker.");
+      return;
+   }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   {
+      Print("❌ Algo Trading is disabled for this account by the broker.");
+      return;
+   }
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_ALLOWED))
+   {
+      Print("❌ Trading is disabled for symbol ", _Symbol);
+      return;
+   }
+
    double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
    double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double sl     = ask - StopLoss_Points * point;
    double tp     = ask + TakeProfit_Points * point;
@@ -268,6 +290,27 @@ void OpenBuy()
 //+------------------------------------------------------------------+
 void OpenSell()
 {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      Print("❌ Algo Trading is disabled in MT5 terminal. Please click the 'Algo Trading' button at the top.");
+      return;
+   }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+   {
+      Print("❌ Trading is disabled for this account by the broker.");
+      return;
+   }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   {
+      Print("❌ Algo Trading is disabled for this account by the broker.");
+      return;
+   }
+   if(!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_ALLOWED))
+   {
+      Print("❌ Trading is disabled for symbol ", _Symbol);
+      return;
+   }
+
    double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double sl     = bid + StopLoss_Points * point;
