@@ -83,6 +83,9 @@ app.post('/api/ea/update', (req, res) => {
     console.log(`Received empty or no chart data`);
   }
 
+  // Store raw request for debugging
+  db.lastRawPayload = req.body;
+
   const keyEntry = findApiKey(apiKey);
   if (!keyEntry) {
     return res.status(401).json({ error: 'Invalid API Key' });
@@ -163,19 +166,23 @@ app.get('/api/admin/keys', (req, res) => {
 
 // Get Dashboard Stats (Admin)
 app.get('/api/admin/stats', (req, res) => {
-  const activeKeys = db.apiKeys.filter(k => k.lastUsed).length;
-  const totalTrades = db.tradeHistory.length;
-  const activeEAs = Object.keys(db.accountStates).length;
-
-  res.json({
-    totalKeys: db.apiKeys.length,
-    activeKeys,
-    totalTrades,
-    activeEAs
+    const activeKeys = db.apiKeys.filter(k => k.lastUsed).length;
+    const totalTrades = db.tradeHistory.length;
+    const activeEAs = Object.keys(db.accountStates).length;
+  
+    res.json({
+      totalKeys: db.apiKeys.length,
+      activeKeys,
+      totalTrades,
+      activeEAs
+    });
   });
-});
 
-// --- CUSTOMER ENDPOINTS ---
+  app.get('/api/admin/debug', (req, res) => {
+    res.json(db.lastRawPayload || { error: 'No payload received yet' });
+  });
+
+  // --- CUSTOMER ENDPOINTS ---
 
 // Customer Registration (Simulate Payment)
 app.post('/api/register', (req, res) => {
