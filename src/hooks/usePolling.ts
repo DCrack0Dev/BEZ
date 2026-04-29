@@ -61,11 +61,13 @@ export const usePolling = () => {
       if (botSettings.autoTradingEnabled && accountData.ea_connected) {
         // Use M5 chart for the trading brain logic if available, else M1 or empty
         let chart = [];
+        let h1Chart = [];
         if (accountData.chart) {
           if (Array.isArray(accountData.chart)) {
             chart = accountData.chart;
           } else {
             chart = accountData.chart['M5'] || accountData.chart['M1'] || [];
+            h1Chart = accountData.chart['H1'] || [];
           }
         }
         
@@ -169,6 +171,7 @@ export const usePolling = () => {
           // Entry Logic (Only 1 concurrent trade for this strategy usually, or max 1)
           if (signal === 'NONE' && totalOpen === 0) {
              
+             // --- STRATEGY 1: VWAP REVERSION ---
              // BUY SETUP
              // 1. Price visibly below VWAP
              // 2. Distance >= 1x ATR(14)
@@ -181,6 +184,7 @@ export const usePolling = () => {
                    if (distance > 0.50) { // 50 points = 0.50 for Gold
                       signal = 'BUY';
                       slPrice = price - 2.00; // 200 points below entry
+                      tpPrice = vwap;
                    }
                 }
              }
@@ -190,13 +194,64 @@ export const usePolling = () => {
              // 2. Distance >= 1x ATR(14)
              // 3. RSI(7) > 70
              // 4. Last closed candle bearish with strong body
-             if (price > vwap) {
+             if (price > vwap && signal === 'NONE') {
                 const distance = price - vwap;
                 if (distance >= atr && rsi > 70 && isBearish && isStrongBody) {
                    if (distance > 0.50) { // 50 points = 0.50 for Gold
                       signal = 'SELL';
                       slPrice = price + 2.00; // 200 points above entry
+                      tpPrice = vwap;
                    }
+                }
+             }
+
+             // --- STRATEGY 2: KEY LEVELS (Asian Range / H1 Support & Resistance) ---
+             // Fallback if VWAP is not met
+             if (signal === 'NONE' && h1Chart.length > 5) {
+                // Extract Resistance (High) and Support (Low) from recent H1 candles (approx 20 hours)
+                // Exclude the current forming candle (x=1) to ensure the level is established
+                const closedH1 = h1Chart.filter((c: any) => c.x > 1);
+                const resistance = Math.max(...closedH1.map((c: any) => c.high));
+                const support = Math.min(...closedH1.map((c: any) => c.low));
+
+                const distanceToRes = Math.abs(resistance - price);
+                const distanceToSup = Math.abs(price - support);
+                
+                // Define "near" a key level (e.g., within 1x ATR)
+                const nearThreshold = atr; 
+
+                // 1. Resistance Rejection (SELL)
+                if (distanceToRes <= nearThreshold && isBearish && isStrongBody && rsi > 60) {
+                   signal = 'SELL';
+                   slPrice = resistance + atr; // SL just above resistance
+                   tpPrice = price - (atr * 3); // 1:3 RR approx
+                   console.log(`🔑 Key Level Rejection: Resistance at ${resistance}`);
+                }
+                
+                // 2. Support Rejection (BUY)
+                else if (distanceToSup <= nearThreshold && isBullish && isStrongBody && rsi < 40) {
+                   signal = 'BUY';
+                   slPrice = support - atr; // SL just below support
+                   tpPrice = price + (atr * 3);
+                   console.log(`🔑 Key Level Rejection: Support at ${support}`);
+                }
+                
+                // 3. Resistance Breakout (BUY)
+                // If previous M5 candle closed strongly ABOVE H1 resistance
+                else if (c1.close > resistance && c1.open < resistance && isBullish && isStrongBody) {
+                   signal = 'BUY';
+                   slPrice = resistance - atr; // SL below broken resistance
+                   tpPrice = price + (atr * 4);
+                   console.log(`🔑 Key Level Breakout: Broke Resistance at ${resistance}`);
+                }
+                
+                // 4. Support Breakout (SELL)
+                // If previous M5 candle closed strongly BELOW H1 support
+                else if (c1.close < support && c1.open > support && isBearish && isStrongBody) {
+                   signal = 'SELL';
+                   slPrice = support + atr; // SL above broken support
+                   tpPrice = price - (atr * 4);
+                   console.log(`🔑 Key Level Breakout: Broke Support at ${support}`);
                 }
              }
           }
