@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Dimensions } from 'react-native';
-import { VictoryChart, VictoryLine, VictoryTheme, VictoryAxis, VictoryCandlestick } from 'victory-native';
+import { VictoryChart, VictoryTheme, VictoryAxis, VictoryCandlestick, VictoryScatter } from 'victory-native';
 import { getSignal } from '../api/signal';
 import SignalBadge from '../components/SignalBadge';
 import { useTradeStore } from '../store/useTradeStore';
 import { COLORS } from '../theme/colors';
 import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
+import { findFVGs, findOrderBlocks } from '../hooks/usePolling';
 
 const { width } = Dimensions.get('window');
 
@@ -22,6 +23,40 @@ const ChartScreen = () => {
   const chartData = account.chart && account.chart[timeframe] && Array.isArray(account.chart[timeframe]) 
     ? account.chart[timeframe] 
     : (Array.isArray(account.chart) ? account.chart : []);
+
+  const [obs, setObs] = useState<any[]>([]);
+  const [fvgs, setFvgs] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (chartData.length > 0) {
+      // Sort for indicator calculation (oldest to newest or vice versa depending on helper expectation)
+      // The helpers expect chart[0] to be newest, which matches our x descending logic
+      const sorted = [...chartData].sort((a: any, b: any) => b.x - a.x);
+      
+      const foundOBs = findOrderBlocks(sorted);
+      const foundFVGs = findFVGs(sorted);
+      
+      // Map to Victory Scatter format for rendering markers
+      const obMarkers = foundOBs.filter(ob => !ob.mitigated).map(ob => ({
+        x: sorted[ob.index].x,
+        y: ob.type === 'BULLISH' ? ob.bottom : ob.top,
+        type: ob.type,
+        symbol: 'square',
+        size: 5
+      }));
+      
+      const fvgMarkers = foundFVGs.filter(fvg => !fvg.mitigated).map(fvg => ({
+        x: sorted[fvg.index].x,
+        y: fvg.type === 'BULLISH' ? fvg.bottom : fvg.top,
+        type: fvg.type,
+        symbol: 'diamond',
+        size: 5
+      }));
+      
+      setObs(obMarkers);
+      setFvgs(fvgMarkers);
+    }
+  }, [chartData]);
 
   useEffect(() => {
     if (account.fastEMA > account.slowEMA && account.slowEMA > 0) {
@@ -81,13 +116,37 @@ const ChartScreen = () => {
             }}
           />
           {chartData.length > 0 ? (
-            <VictoryCandlestick
-              data={chartData}
-              candleColors={{ positive: COLORS.buy, negative: COLORS.sell }}
-              style={{
-                data: { strokeWidth: 1 },
-              }}
-            />
+            <>
+              <VictoryCandlestick
+                data={chartData}
+                candleColors={{ positive: COLORS.buy, negative: COLORS.sell }}
+                style={{
+                  data: { strokeWidth: 1 },
+                }}
+              />
+              {obs.length > 0 && (
+                <VictoryScatter
+                  data={obs}
+                  style={{
+                    data: {
+                      fill: ({ datum }) => datum.type === 'BULLISH' ? COLORS.buy : COLORS.sell,
+                      opacity: 0.6
+                    }
+                  }}
+                />
+              )}
+              {fvgs.length > 0 && (
+                <VictoryScatter
+                  data={fvgs}
+                  style={{
+                    data: {
+                      fill: ({ datum }) => datum.type === 'BULLISH' ? '#2196F3' : '#9C27B0',
+                      opacity: 0.6
+                    }
+                  }}
+                />
+              )}
+            </>
           ) : (
             <View style={{ position: 'absolute', top: 140, alignSelf: 'center' }}>
               <Text style={{ color: COLORS.textSecondary, fontFamily: 'System' }}>Waiting for chart data...</Text>

@@ -744,6 +744,43 @@ void ProcessCommand(string cmd)
       Print("▶ EA Resumed by app");
       isPaused = false;
    }
+   else if(action == "DRAW_OB")
+   {
+      // Format: DRAW_OB|top|bottom|type|time
+      if(ArraySize(parts) >= 5) {
+         double top = StringToDouble(parts[1]);
+         double bottom = StringToDouble(parts[2]);
+         string type = parts[3];
+         datetime time = (datetime)StringToInteger(parts[4]);
+         string name = "OB_" + IntegerToString((long)time);
+         DrawZone(name, time, top, TimeCurrent() + PeriodSeconds(PERIOD_M15)*15, bottom, type == "BULLISH" ? clrDarkGreen : clrDarkRed);
+      }
+   }
+   else if(action == "DRAW_FVG")
+   {
+      // Format: DRAW_FVG|top|bottom|type|time
+      if(ArraySize(parts) >= 5) {
+         double top = StringToDouble(parts[1]);
+         double bottom = StringToDouble(parts[2]);
+         string type = parts[3];
+         datetime time = (datetime)StringToInteger(parts[4]);
+         string name = "FVG_" + IntegerToString((long)time);
+         DrawZone(name, time, top, TimeCurrent() + PeriodSeconds(PERIOD_M15)*15, bottom, type == "BULLISH" ? clrDarkBlue : clrPurple);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| DRAW ZONES ON CHART                                              |
+//+------------------------------------------------------------------+
+void DrawZone(string name, datetime time1, double price1, datetime time2, double price2, color clr)
+{
+   ObjectDelete(0, name); // Ensure old box is removed
+   ObjectCreate(0, name, OBJ_RECTANGLE, 0, time1, price1, time2, price2);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FILL, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+

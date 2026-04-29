@@ -196,13 +196,18 @@ public:
          json += "\"" + tfNames[t] + "\":[";
          
          double open[], high[], low[], close[];
-         int copied = CopyOpen(_Symbol, tfs[t], 0, 20, open);
-         int copiedH = CopyHigh(_Symbol, tfs[t], 0, 20, high);
-         int copiedL = CopyLow(_Symbol, tfs[t], 0, 20, low);
-         int copiedC = CopyClose(_Symbol, tfs[t], 0, 20, close);
+         long tickVol[];
          
-         int limit = MathMin(copied, MathMin(copiedH, MathMin(copiedL, copiedC)));
-         limit = MathMin(20, limit);
+         // To properly identify HTF structures, we need more candles. 100 should be safe.
+         int numCandles = 100;
+         int copied = CopyOpen(_Symbol, tfs[t], 0, numCandles, open);
+         int copiedH = CopyHigh(_Symbol, tfs[t], 0, numCandles, high);
+         int copiedL = CopyLow(_Symbol, tfs[t], 0, numCandles, low);
+         int copiedC = CopyClose(_Symbol, tfs[t], 0, numCandles, close);
+         int copiedV = CopyTickVolume(_Symbol, tfs[t], 0, numCandles, tickVol);
+         
+         int limit = MathMin(copied, MathMin(copiedH, MathMin(copiedL, MathMin(copiedC, copiedV))));
+         limit = MathMin(numCandles, limit);
          
          if(limit > 0)
          {
@@ -210,16 +215,21 @@ public:
             ArraySetAsSeries(high, true);
             ArraySetAsSeries(low, true);
             ArraySetAsSeries(close, true);
+            ArraySetAsSeries(tickVol, true);
             
             for(int i = limit - 1; i >= 0; i--)
             {
                if(i < limit - 1) json += ",";
+               
+               datetime time = iTime(_Symbol, tfs[t], i);
+               
                json += "{";
-               json += "\"x\":" + IntegerToString(limit - i) + ",";
+               json += "\"x\":" + IntegerToString(time) + ",";
                json += "\"open\":" + DoubleToString(open[i], 5) + ",";
                json += "\"high\":" + DoubleToString(high[i], 5) + ",";
                json += "\"low\":" + DoubleToString(low[i], 5) + ",";
-               json += "\"close\":" + DoubleToString(close[i], 5);
+               json += "\"close\":" + DoubleToString(close[i], 5) + ",";
+               json += "\"tick_volume\":" + IntegerToString(tickVol[i]);
                json += "}";
             }
          }
@@ -274,8 +284,10 @@ public:
          respCode
       );
       
-      if(!success || respCode != 200)
+      if(!success || respCode != 200) {
+         Print("❌ Update failed. Code: ", respCode);
          return false;
+      }
       
       // Parse commands from response
       ArrayResize(commands, 0);
@@ -288,6 +300,7 @@ public:
       int arrayStart = cmdStart + 12;
       int arrayEnd = StringFind(response, "]", arrayStart);
       string cmds = StringSubstr(response, arrayStart, arrayEnd - arrayStart);
+      if (StringLen(cmds) > 2) Print("Raw commands from backend: ", cmds);
       
       // Simple parsing of command objects (Backend returns objects)
       int pos = 0;
@@ -317,10 +330,39 @@ public:
          if(tpEnd < 0) tpEnd = StringFind(cmdObj, "}", tpStart);
          string tpStr = (tpStart > 4 && tpEnd > tpStart) ? StringSubstr(cmdObj, tpStart, tpEnd - tpStart) : "0";
          
-         // Add to commands array (Format: ACTION|SL|TP)
+         // Extract top (for DRAW)
+         int topStart = StringFind(cmdObj, "\"top\":") + 6;
+         int topEnd = StringFind(cmdObj, ",", topStart);
+         if(topEnd < 0) topEnd = StringFind(cmdObj, "}", topStart);
+         string topStr = (topStart > 5 && topEnd > topStart) ? StringSubstr(cmdObj, topStart, topEnd - topStart) : "0";
+         
+         // Extract bottom (for DRAW)
+         int botStart = StringFind(cmdObj, "\"bottom\":") + 9;
+         int botEnd = StringFind(cmdObj, ",", botStart);
+         if(botEnd < 0) botEnd = StringFind(cmdObj, "}", botStart);
+         string botStr = (botStart > 8 && botEnd > botStart) ? StringSubstr(cmdObj, botStart, botEnd - botStart) : "0";
+         
+         // Extract zoneType (for DRAW)
+         int typeStart = StringFind(cmdObj, "\"zoneType\":\"") + 12;
+         int typeEnd = StringFind(cmdObj, "\"", typeStart);
+         string typeStr = (typeStart > 11 && typeEnd > typeStart) ? StringSubstr(cmdObj, typeStart, typeEnd - typeStart) : "";
+         
+         // Extract time (for DRAW)
+         int timeStart = StringFind(cmdObj, "\"time\":") + 7;
+         int timeEnd = StringFind(cmdObj, ",", timeStart);
+         if(timeEnd < 0) timeEnd = StringFind(cmdObj, "}", timeStart);
+         string timeStr = (timeStart > 6 && timeEnd > timeStart) ? StringSubstr(cmdObj, timeStart, timeEnd - timeStart) : "0";
+         
+         // Add to commands array (Format: ACTION|SL|TP|TOP|BOTTOM|TYPE|TIME)
          int idx = ArraySize(commands);
          ArrayResize(commands, idx + 1);
-         commands[idx] = action + "|" + slStr + "|" + tpStr;
+         if(StringFind(action, "DRAW_") == 0) {
+            commands[idx] = action + "|" + topStr + "|" + botStr + "|" + typeStr + "|" + timeStr;
+            Print("Parsed drawing command: ", commands[idx]);
+         } else {
+            commands[idx] = action + "|" + slStr + "|" + tpStr;
+            Print("Parsed trade command: ", commands[idx]);
+         }
          
          pos = objEnd + 1;
       }

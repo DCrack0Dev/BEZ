@@ -23,10 +23,14 @@ export const getClosedOrders = async (filter: 'today' | 'week' | 'month') => {
 
 export const placeOrder = async (orderData: {
   symbol: string;
-  type: 'BUY' | 'SELL' | 'CLOSE_ALL' | 'PAUSE' | 'RESUME';
+  type: string;
   lots: number;
   sl?: number;
   tp?: number;
+  top?: number;
+  bottom?: number;
+  zoneType?: string;
+  time?: number;
 }) => {
   const { apiKey } = useAuthStore.getState();
   const payload = {

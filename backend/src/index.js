@@ -99,6 +99,10 @@ app.post('/api/ea/update', (req, res) => {
   // Get pending commands for this EA
   const commands = db.pendingCommands[apiKey] || [];
   db.pendingCommands[apiKey] = [];
+  
+  if (commands.length > 0) {
+    console.log(`Sending ${commands.length} commands to MT5 EA:`, JSON.stringify(commands));
+  }
 
   res.json({
     success: true,
@@ -352,7 +356,7 @@ app.get('/api/subscription', (req, res) => {
 
 // Place Order (for mobile app manual trade - currently disabled for auto-only)
 app.post('/api/order', (req, res) => {
-  const { apiKey, action, symbol, type, lots, sl, tp } = req.body;
+  const { apiKey, action, symbol, type, lots, sl, tp, top, bottom, zoneType, time } = req.body;
 
   if (!db.pendingCommands[apiKey]) {
     db.pendingCommands[apiKey] = [];
@@ -360,12 +364,16 @@ app.post('/api/order', (req, res) => {
 
   const command = {
     id: Date.now(),
-    action,
+    action: action || type, // handle both formats
     symbol,
     type,
     lots,
     sl,
     tp,
+    top,
+    bottom,
+    zoneType,
+    time,
     createdAt: new Date().toISOString()
   };
 
