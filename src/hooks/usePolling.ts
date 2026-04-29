@@ -254,6 +254,51 @@ export const usePolling = () => {
                    console.log(`🔑 Key Level Breakout: Broke Support at ${support}`);
                 }
              }
+             // --- STRATEGY 3: REJECTION + ENGULFING CANDLE ---
+             // Fallback if neither VWAP nor Key Levels hit
+             if (signal === 'NONE' && chart.length >= 3) {
+                const c2 = sortedChart[2]; // The candle before the last closed candle (the rejection candle)
+
+                const c1Body = Math.abs(c1.close - c1.open);
+                const c2Body = Math.abs(c2.close - c2.open);
+                const c2UpperWick = c2.high - Math.max(c2.open, c2.close);
+                const c2LowerWick = Math.min(c2.open, c2.close) - c2.low;
+                
+                const c1IsBullish = c1.close > c1.open;
+                const c1IsBearish = c1.close < c1.open;
+
+                // Define rejection: Wick is at least 2x the size of the body
+                // Added a safeguard to ensure the body isn't practically zero (division by zero risk)
+                const c2BodySafe = c2Body > 0.0001 ? c2Body : 0.0001; 
+                const isBullishRejection = c2LowerWick > (c2BodySafe * 2);
+                const isBearishRejection = c2UpperWick > (c2BodySafe * 2);
+
+                // 1. BUY SETUP (Bullish Rejection followed by Bullish Engulfing)
+                // c2 rejected lower prices (long bottom wick)
+                // c1 completely engulfed c2's body and closed bullish
+                if (isBullishRejection && c1IsBullish) {
+                   const isEngulfing = c1.close > c2.high && c1.open <= Math.min(c2.open, c2.close);
+                   if (isEngulfing && rsi < 50) { // Prefer buying from lower RSI
+                      signal = 'BUY';
+                      slPrice = c2.low - (atr * 0.5); // SL just below the rejection wick
+                      tpPrice = price + (atr * 2); // 1:2 RR approx
+                      console.log(`🕯️ Strategy 3: Bullish Rejection + Engulfing`);
+                   }
+                }
+
+                // 2. SELL SETUP (Bearish Rejection followed by Bearish Engulfing)
+                // c2 rejected higher prices (long top wick)
+                // c1 completely engulfed c2's body and closed bearish
+                if (isBearishRejection && c1IsBearish && signal === 'NONE') {
+                   const isEngulfing = c1.close < c2.low && c1.open >= Math.max(c2.open, c2.close);
+                   if (isEngulfing && rsi > 50) { // Prefer selling from higher RSI
+                      signal = 'SELL';
+                      slPrice = c2.high + (atr * 0.5); // SL just above the rejection wick
+                      tpPrice = price - (atr * 2); // 1:2 RR approx
+                      console.log(`🕯️ Strategy 3: Bearish Rejection + Engulfing`);
+                   }
+                }
+             }
           }
 
           // Throttle trades to max 1 every 2 seconds
