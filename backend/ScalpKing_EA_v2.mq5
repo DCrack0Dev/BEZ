@@ -72,13 +72,13 @@ CPositionInfo  posInfo;
 int            handle_FastEMA_M5, handle_SlowEMA_M5;
 int            handle_FastEMA_M1, handle_SlowEMA_M1;
 int            handle_BB_M5;
-int            handle_RSI_M5, handle_RSI_M1;
-int            handle_ATR_M1;
+int            handle_RSI_M5, handle_RSI7_M5, handle_RSI_M1;
+int            handle_ATR_M1, handle_ATR_M5;
 
 double         fastEMA_M5[], slowEMA_M5[];
 double         fastEMA_M1[], slowEMA_M1[];
 double         bb_upper[], bb_lower[], bb_middle[];
-double         rsi_M5[], rsi_M1[];
+double         rsi_M5[], rsi7_M5[], rsi_M1[];
 
 bool           licenseValid      = false;
 bool           isPaused          = false;
@@ -124,6 +124,8 @@ int OnInit()
    handle_SlowEMA_M5 = iMA(_Symbol, PERIOD_M5, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_BB_M5      = iBands(_Symbol, PERIOD_M5, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
    handle_RSI_M5     = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
+   handle_RSI7_M5    = iRSI(_Symbol, PERIOD_M5, 7, PRICE_CLOSE);
+   handle_ATR_M5     = iATR(_Symbol, PERIOD_M5, 14);
 
    // --- Initialize Indicators on M1 ---
    handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
@@ -133,7 +135,7 @@ int OnInit()
 
    if(handle_FastEMA_M5 == INVALID_HANDLE || handle_SlowEMA_M5 == INVALID_HANDLE ||
       handle_BB_M5 == INVALID_HANDLE || handle_FastEMA_M1 == INVALID_HANDLE ||
-      handle_SlowEMA_M1 == INVALID_HANDLE || handle_RSI_M5 == INVALID_HANDLE || handle_RSI_M1 == INVALID_HANDLE || handle_ATR_M1 == INVALID_HANDLE)
+      handle_SlowEMA_M1 == INVALID_HANDLE || handle_RSI_M5 == INVALID_HANDLE || handle_RSI_M1 == INVALID_HANDLE || handle_ATR_M1 == INVALID_HANDLE || handle_RSI7_M5 == INVALID_HANDLE || handle_ATR_M5 == INVALID_HANDLE)
    {
       Alert("❌ Failed to initialize indicators. Check symbol name.");
       return INIT_FAILED;
@@ -166,7 +168,10 @@ void OnDeinit(const int reason)
    IndicatorRelease(handle_FastEMA_M1);
    IndicatorRelease(handle_SlowEMA_M1);
    IndicatorRelease(handle_RSI_M5);
+   IndicatorRelease(handle_RSI7_M5);
    IndicatorRelease(handle_RSI_M1);
+   IndicatorRelease(handle_ATR_M1);
+   IndicatorRelease(handle_ATR_M5);
    Print("=== ", EA_Name, " Stopped ===");
 }
 
@@ -336,6 +341,35 @@ bool CheckCandleBody()
 }
 
 //+------------------------------------------------------------------+
+//| GET DAILY VWAP (Intraday)                                        |
+//+------------------------------------------------------------------+
+double GetDailyVWAP()
+{
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime startOfDay = StructToTime(dt);
+
+   int bars = iBarShift(_Symbol, PERIOD_M5, startOfDay);
+   if (bars < 0) return 0;
+   
+   double sumPV = 0;
+   long sumV = 0;
+   
+   MqlRates rates[];
+   if (CopyRates(_Symbol, PERIOD_M5, 0, bars + 1, rates) > 0) {
+      for (int i = 0; i <= bars; i++) {
+         double typicalPrice = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
+         sumPV += typicalPrice * rates[i].tick_volume;
+         sumV += rates[i].tick_volume;
+      }
+   }
+   if (sumV == 0) return 0;
+   return sumPV / sumV;
+}
+
+//+------------------------------------------------------------------+
 //| GET INDICATOR DATA                                               |
 //+------------------------------------------------------------------+
 bool GetIndicatorData()
@@ -358,6 +392,7 @@ bool GetIndicatorData()
    if(CopyBuffer(handle_FastEMA_M1, 0, 0, 3, fastEMA_M1) < 3) return false;
    if(CopyBuffer(handle_SlowEMA_M1, 0, 0, 3, slowEMA_M1) < 3) return false;
    if(CopyBuffer(handle_RSI_M5, 0, 0, 3, rsi_M5) < 3) return false;
+   if(CopyBuffer(handle_RSI7_M5, 0, 0, 3, rsi7_M5) < 3) return false;
    if(CopyBuffer(handle_RSI_M1, 0, 0, 3, rsi_M1) < 3) return false;
 
    return true;
@@ -406,10 +441,8 @@ bool IsBollingerSqueeze()
 //+------------------------------------------------------------------+
 //| OPEN BUY TRADE                                                   |
 //+------------------------------------------------------------------+
-void OpenBuy(int slPoints = 0, int tpPoints = 0, string comment = "")
+void OpenBuy(double slPrice = 0, double tpPrice = 0, string comment = "")
 {
-   if(slPoints == 0) slPoints = StopLoss_Points;
-   if(tpPoints == 0) tpPoints = TakeProfit_Points;
    if(comment == "") comment = EA_Name;
 
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
@@ -446,10 +479,13 @@ void OpenBuy(int slPoints = 0, int tpPoints = 0, string comment = "")
    safeLotSize = steps * stepVolume;
 
    double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
    double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double sl     = ask - slPoints * point;
-   double tp     = ask + tpPoints * point;
+   
+   double sl = slPrice;
+   double tp = tpPrice;
+
+   if(sl == 0) sl = ask - StopLoss_Points * point;
+   if(tp == 0) tp = ask + TakeProfit_Points * point;
 
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
@@ -467,10 +503,8 @@ void OpenBuy(int slPoints = 0, int tpPoints = 0, string comment = "")
 //+------------------------------------------------------------------+
 //| OPEN SELL TRADE                                                  |
 //+------------------------------------------------------------------+
-void OpenSell(int slPoints = 0, int tpPoints = 0, string comment = "")
+void OpenSell(double slPrice = 0, double tpPrice = 0, string comment = "")
 {
-   if(slPoints == 0) slPoints = StopLoss_Points;
-   if(tpPoints == 0) tpPoints = TakeProfit_Points;
    if(comment == "") comment = EA_Name;
 
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
@@ -508,8 +542,12 @@ void OpenSell(int slPoints = 0, int tpPoints = 0, string comment = "")
 
    double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double sl     = bid + slPoints * point;
-   double tp     = bid - tpPoints * point;
+   
+   double sl = slPrice;
+   double tp = tpPrice;
+
+   if(sl == 0) sl = bid + StopLoss_Points * point;
+   if(tp == 0) tp = bid - TakeProfit_Points * point;
 
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
@@ -547,7 +585,7 @@ bool CloseTrade(ulong ticket)
 }
 
 //+------------------------------------------------------------------+
-//| TRAILING STOP MANAGER                                            |
+//| TRAILING STOP / BREAKEVEN MANAGER                                |
 //+------------------------------------------------------------------+
 void ManageTrailingStop()
 {
@@ -563,40 +601,29 @@ void ManageTrailingStop()
       double openPrice = posInfo.PriceOpen();
       double tp = posInfo.TakeProfit();
 
+      // Strategy: Move SL to entry once 80 points in profit
       if(posInfo.PositionType() == POSITION_TYPE_BUY)
       {
-         if(tp <= openPrice) continue; // Invalid TP for 20% calculation
-         double distanceToTP = tp - openPrice;
-         double activationPrice = openPrice + (distanceToTP * 0.20);
-         
          double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         
-         // Start trailing only when price reaches 20% in profit to TP
-         if(bid >= activationPrice)
+         if (bid >= openPrice + 80 * point)
          {
-            double newSL = bid - TrailingStop_Points * point;
-            newSL = NormalizeDouble(newSL, _Digits);
-
-            if((currentSL == 0.0 || newSL > currentSL) && newSL > openPrice)
-               trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+            if (currentSL < openPrice)
+            {
+               trade.PositionModify(posInfo.Ticket(), openPrice, tp);
+               Print("🛡️ Moved SL to Breakeven for BUY Ticket: ", posInfo.Ticket());
+            }
          }
       }
       else if(posInfo.PositionType() == POSITION_TYPE_SELL)
       {
-         if(tp >= openPrice || tp == 0.0) continue; // Invalid TP for 20% calculation
-         double distanceToTP = openPrice - tp;
-         double activationPrice = openPrice - (distanceToTP * 0.20);
-         
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         
-         // Start trailing only when price reaches 20% in profit to TP
-         if(ask <= activationPrice)
+         if (ask <= openPrice - 80 * point)
          {
-            double newSL = ask + TrailingStop_Points * point;
-            newSL = NormalizeDouble(newSL, _Digits);
-
-            if((currentSL == 0.0 || newSL < currentSL) && newSL < openPrice)
-               trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+            if (currentSL > openPrice || currentSL == 0.0)
+            {
+               trade.PositionModify(posInfo.Ticket(), openPrice, tp);
+               Print("🛡️ Moved SL to Breakeven for SELL Ticket: ", posInfo.Ticket());
+            }
          }
       }
    }
@@ -655,10 +682,11 @@ void SendHeartbeat()
    if(GetIndicatorData()) {
       double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double atr[];
-      CopyBuffer(handle_ATR_M1, 0, 0, 1, atr);
+      CopyBuffer(handle_ATR_M5, 0, 0, 1, atr);
       int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      long tickVol = iVolume(_Symbol, PERIOD_M1, 0);
-      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0], rsi_M5[0], atr[0], spread, tickVol);
+      long tickVol = iVolume(_Symbol, PERIOD_M5, 0);
+      double dailyVWAP = GetDailyVWAP();
+      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0], rsi7_M5[0], atr[0], dailyVWAP, spread, tickVol);
    }
 
    string commands[];
@@ -681,29 +709,37 @@ void SendHeartbeat()
 //+------------------------------------------------------------------+
 void ProcessCommand(string cmd)
 {
-   if(cmd == "CLOSE_ALL")
+   string parts[];
+   StringSplit(cmd, '|', parts);
+   if(ArraySize(parts) == 0) return;
+   
+   string action = parts[0];
+   double slValue = (ArraySize(parts) > 1) ? StringToDouble(parts[1]) : 0;
+   double tpValue = (ArraySize(parts) > 2) ? StringToDouble(parts[2]) : 0;
+
+   if(action == "CLOSE_ALL")
    {
       CloseAllTrades();
    }
-   else if(StringFind(cmd, "CLOSE_TICKET_") == 0)
+   else if(StringFind(action, "CLOSE_TICKET_") == 0)
    {
-      ulong ticket = (ulong)StringToInteger(StringSubstr(cmd, 13));
+      ulong ticket = (ulong)StringToInteger(StringSubstr(action, 13));
       CloseTrade(ticket);
    }
-   else if(cmd == "BUY")
+   else if(action == "BUY")
    {
-      OpenBuy();
+      OpenBuy(slValue, tpValue);
    }
-   else if(cmd == "SELL")
+   else if(action == "SELL")
    {
-      OpenSell();
+      OpenSell(slValue, tpValue);
    }
-   else if(cmd == "PAUSE")
+   else if(action == "PAUSE")
    {
       Print("⏸ EA Paused by app");
       isPaused = true;
    }
-   else if(cmd == "RESUME")
+   else if(action == "RESUME")
    {
       Print("▶ EA Resumed by app");
       isPaused = false;

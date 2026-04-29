@@ -22,7 +22,12 @@ export interface AccountData {
   slowEMA: number;
   bbUpper: number;
   bbLower: number;
-  chart: { x: number; open: number; close: number; high: number; low: number }[];
+  rsi?: number;
+  atr?: number;
+  vwap?: number;
+  spread?: number;
+  tickVolume?: number;
+  chart: any;
 }
 
 interface TradeState {

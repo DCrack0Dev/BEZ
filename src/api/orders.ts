@@ -23,7 +23,7 @@ export const getClosedOrders = async (filter: 'today' | 'week' | 'month') => {
 
 export const placeOrder = async (orderData: {
   symbol: string;
-  type: 'BUY' | 'SELL';
+  type: 'BUY' | 'SELL' | 'CLOSE_ALL' | 'PAUSE' | 'RESUME';
   lots: number;
   sl?: number;
   tp?: number;

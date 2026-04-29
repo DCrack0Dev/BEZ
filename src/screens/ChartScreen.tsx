@@ -18,8 +18,10 @@ const ChartScreen = () => {
 
   const timeframes = ['M1', 'M5', 'M15', 'M30', 'H1'];
 
-  // Use real data from EA, fallback to empty array
-  const chartData = account.chart?.length > 0 ? account.chart : [];
+  // Use real data from EA based on selected timeframe, fallback to empty array
+  const chartData = account.chart && account.chart[timeframe] && Array.isArray(account.chart[timeframe]) 
+    ? account.chart[timeframe] 
+    : (Array.isArray(account.chart) ? account.chart : []);
 
   useEffect(() => {
     if (account.fastEMA > account.slowEMA && account.slowEMA > 0) {
@@ -114,6 +116,12 @@ const ChartScreen = () => {
             <Text style={TYPOGRAPHY.bodySecondary}>Bollinger Bands</Text>
             <Text style={TYPOGRAPHY.body}>
               {account.bbLower ? account.bbLower.toFixed(5) : '-'} - {account.bbUpper ? account.bbUpper.toFixed(5) : '-'}
+            </Text>
+          </View>
+          <View style={styles.indicatorRow}>
+            <Text style={TYPOGRAPHY.bodySecondary}>RSI (M5)</Text>
+            <Text style={[TYPOGRAPHY.body, { color: COLORS.primary }]}>
+              {account.rsi ? account.rsi.toFixed(2) : '-'}
             </Text>
           </View>
         </View>

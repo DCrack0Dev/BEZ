@@ -235,6 +235,7 @@ app.get('/api/account', (req, res) => {
       bbLower: 0,
       rsi: 0,
       atr: 0,
+      vwap: 0,
       spread: 0,
       tickVolume: 0,
       chart: {}
@@ -257,6 +258,7 @@ app.get('/api/account', (req, res) => {
     bbLower: state.bbLower || 0,
     rsi: state.rsi || 0,
     atr: state.atr || 0,
+    vwap: state.vwap || 0,
     spread: state.spread || 0,
     tickVolume: state.tickVolume || 0,
     chart: state.chart || {}

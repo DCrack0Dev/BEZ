@@ -33,6 +33,7 @@ private:
    double      m_bbLower;
    double      m_rsi;
    double      m_atr;
+   double      m_vwap;
    int         m_spread;
    long        m_tickVolume;
    
@@ -50,12 +51,13 @@ public:
       m_bbLower = 0.0;
       m_rsi = 0.0;
       m_atr = 0.0;
+      m_vwap = 0.0;
       m_spread = 0;
       m_tickVolume = 0;
    }
    
    // Set Market Data to send in heartbeat
-   void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower, double rsi = 0.0, double atr = 0.0, int spread = 0, long tickVolume = 0)
+   void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower, double rsi = 0.0, double atr = 0.0, double vwap = 0.0, int spread = 0, long tickVolume = 0)
    {
       m_lastPrice = price;
       m_fastEMA = fastEMA;
@@ -64,6 +66,7 @@ public:
       m_bbLower = bbLower;
       m_rsi = rsi;
       m_atr = atr;
+      m_vwap = vwap;
       m_spread = spread;
       m_tickVolume = tickVolume;
    }
@@ -177,6 +180,7 @@ public:
             "\"bbLower\":" + DoubleToString(m_bbLower, 5) + ","
             "\"rsi\":" + DoubleToString(m_rsi, 5) + ","
             "\"atr\":" + DoubleToString(m_atr, 5) + ","
+            "\"vwap\":" + DoubleToString(m_vwap, 5) + ","
             "\"spread\":" + IntegerToString(m_spread) + ","
             "\"tickVolume\":" + IntegerToString(m_tickVolume) +
          "},"
@@ -285,7 +289,7 @@ public:
       int arrayEnd = StringFind(response, "]", arrayStart);
       string cmds = StringSubstr(response, arrayStart, arrayEnd - arrayStart);
       
-      // Simple parsing of command objects
+      // Simple parsing of command objects (Backend returns objects)
       int pos = 0;
       while(pos < StringLen(cmds))
       {
@@ -301,10 +305,22 @@ public:
          int actionEnd = StringFind(cmdObj, "\"", actionStart);
          string action = StringSubstr(cmdObj, actionStart, actionEnd - actionStart);
          
-         // Add to commands array
+         // Extract sl
+         int slStart = StringFind(cmdObj, "\"sl\":") + 5;
+         int slEnd = StringFind(cmdObj, ",", slStart);
+         if(slEnd < 0) slEnd = StringFind(cmdObj, "}", slStart);
+         string slStr = (slStart > 4 && slEnd > slStart) ? StringSubstr(cmdObj, slStart, slEnd - slStart) : "0";
+         
+         // Extract tp
+         int tpStart = StringFind(cmdObj, "\"tp\":") + 5;
+         int tpEnd = StringFind(cmdObj, ",", tpStart);
+         if(tpEnd < 0) tpEnd = StringFind(cmdObj, "}", tpStart);
+         string tpStr = (tpStart > 4 && tpEnd > tpStart) ? StringSubstr(cmdObj, tpStart, tpEnd - tpStart) : "0";
+         
+         // Add to commands array (Format: ACTION|SL|TP)
          int idx = ArraySize(commands);
          ArrayResize(commands, idx + 1);
-         commands[idx] = action;
+         commands[idx] = action + "|" + slStr + "|" + tpStr;
          
          pos = objEnd + 1;
       }
