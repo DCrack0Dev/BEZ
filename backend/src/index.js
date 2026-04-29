@@ -77,14 +77,11 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData, positions, chart } = req.body;
 
-  if (chart && chart.length > 0) {
-    console.log(`Received chart data with ${chart.length} candles`);
+  if (chart && Object.keys(chart).length > 0) {
+    console.log(`Received chart data`);
   } else {
     console.log(`Received empty or no chart data`);
   }
-
-  // Store raw request for debugging
-  db.lastRawPayload = req.body;
 
   const keyEntry = findApiKey(apiKey);
   if (!keyEntry) {
@@ -95,7 +92,7 @@ app.post('/api/ea/update', (req, res) => {
   db.accountStates[apiKey] = {
     ...(accountData || {}),
     positions: positions || [],
-    chart: chart || [],
+    chart: chart || {},
     lastSeen: new Date().toISOString()
   };
 
@@ -166,23 +163,19 @@ app.get('/api/admin/keys', (req, res) => {
 
 // Get Dashboard Stats (Admin)
 app.get('/api/admin/stats', (req, res) => {
-    const activeKeys = db.apiKeys.filter(k => k.lastUsed).length;
-    const totalTrades = db.tradeHistory.length;
-    const activeEAs = Object.keys(db.accountStates).length;
-  
-    res.json({
-      totalKeys: db.apiKeys.length,
-      activeKeys,
-      totalTrades,
-      activeEAs
-    });
-  });
+  const activeKeys = db.apiKeys.filter(k => k.lastUsed).length;
+  const totalTrades = db.tradeHistory.length;
+  const activeEAs = Object.keys(db.accountStates).length;
 
-  app.get('/api/admin/debug', (req, res) => {
-    res.json(db.lastRawPayload || { error: 'No payload received yet' });
+  res.json({
+    totalKeys: db.apiKeys.length,
+    activeKeys,
+    totalTrades,
+    activeEAs
   });
+});
 
-  // --- CUSTOMER ENDPOINTS ---
+// --- CUSTOMER ENDPOINTS ---
 
 // Customer Registration (Simulate Payment)
 app.post('/api/register', (req, res) => {
@@ -240,7 +233,11 @@ app.get('/api/account', (req, res) => {
       slowEMA: 0,
       bbUpper: 0,
       bbLower: 0,
-      chart: []
+      rsi: 0,
+      atr: 0,
+      spread: 0,
+      tickVolume: 0,
+      chart: {}
     });
   }
 
@@ -258,7 +255,11 @@ app.get('/api/account', (req, res) => {
     slowEMA: state.slowEMA || 0,
     bbUpper: state.bbUpper || 0,
     bbLower: state.bbLower || 0,
-    chart: state.chart || []
+    rsi: state.rsi || 0,
+    atr: state.atr || 0,
+    spread: state.spread || 0,
+    tickVolume: state.tickVolume || 0,
+    chart: state.chart || {}
   });
 });
 

@@ -31,6 +31,10 @@ private:
    double      m_slowEMA;
    double      m_bbUpper;
    double      m_bbLower;
+   double      m_rsi;
+   double      m_atr;
+   int         m_spread;
+   long        m_tickVolume;
    
 public:
    // Constructor
@@ -44,16 +48,24 @@ public:
       m_slowEMA = 0.0;
       m_bbUpper = 0.0;
       m_bbLower = 0.0;
+      m_rsi = 0.0;
+      m_atr = 0.0;
+      m_spread = 0;
+      m_tickVolume = 0;
    }
    
    // Set Market Data to send in heartbeat
-   void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower)
+   void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower, double rsi = 0.0, double atr = 0.0, int spread = 0, long tickVolume = 0)
    {
       m_lastPrice = price;
       m_fastEMA = fastEMA;
       m_slowEMA = slowEMA;
       m_bbUpper = bbUpper;
       m_bbLower = bbLower;
+      m_rsi = rsi;
+      m_atr = atr;
+      m_spread = spread;
+      m_tickVolume = tickVolume;
    }
    
    // Set API Key
@@ -162,51 +174,66 @@ public:
             "\"fastEMA\":" + DoubleToString(m_fastEMA, 5) + ","
             "\"slowEMA\":" + DoubleToString(m_slowEMA, 5) + ","
             "\"bbUpper\":" + DoubleToString(m_bbUpper, 5) + ","
-            "\"bbLower\":" + DoubleToString(m_bbLower, 5) +
+            "\"bbLower\":" + DoubleToString(m_bbLower, 5) + ","
+            "\"rsi\":" + DoubleToString(m_rsi, 5) + ","
+            "\"atr\":" + DoubleToString(m_atr, 5) + ","
+            "\"spread\":" + IntegerToString(m_spread) + ","
+            "\"tickVolume\":" + IntegerToString(m_tickVolume) +
          "},"
-         "\"chart\":[";
+         "\"chart\":{";
 
-      double open[], high[], low[], close[];
-      ENUM_TIMEFRAMES currentPeriod = Period();
-      ResetLastError();
-      int copied = CopyOpen(Symbol(), currentPeriod, 0, 20, open);
-      if(copied > 0)
+      // Helper function to build chart JSON for a specific timeframe
+      ENUM_TIMEFRAMES tfs[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1};
+      string tfNames[] = {"M1", "M5", "M15", "M30", "H1"};
+      
+      for(int t = 0; t < ArraySize(tfs); t++)
       {
-         CopyHigh(Symbol(), currentPeriod, 0, copied, high);
-         CopyLow(Symbol(), currentPeriod, 0, copied, low);
-         CopyClose(Symbol(), currentPeriod, 0, copied, close);
-
-         ArraySetAsSeries(open, true);
-         ArraySetAsSeries(high, true);
-         ArraySetAsSeries(low, true);
-         ArraySetAsSeries(close, true);
-
-         int limit = MathMin(20, copied);
-         for(int i = limit - 1; i >= 0; i--)
+         if(t > 0) json += ",";
+         json += "\"" + tfNames[t] + "\":[";
+         
+         double open[], high[], low[], close[];
+         int copied = CopyOpen(_Symbol, tfs[t], 0, 20, open);
+         int copiedH = CopyHigh(_Symbol, tfs[t], 0, 20, high);
+         int copiedL = CopyLow(_Symbol, tfs[t], 0, 20, low);
+         int copiedC = CopyClose(_Symbol, tfs[t], 0, 20, close);
+         
+         int limit = MathMin(copied, MathMin(copiedH, MathMin(copiedL, copiedC)));
+         limit = MathMin(20, limit);
+         
+         if(limit > 0)
          {
-            if(i < limit - 1) json += ",";
-            json += "{";
-            json += "\"x\":" + IntegerToString(limit - i) + ",";
-            json += "\"open\":" + DoubleToString(open[i], 5) + ",";
-            json += "\"high\":" + DoubleToString(high[i], 5) + ",";
-            json += "\"low\":" + DoubleToString(low[i], 5) + ",";
-            json += "\"close\":" + DoubleToString(close[i], 5);
-            json += "}";
+            ArraySetAsSeries(open, true);
+            ArraySetAsSeries(high, true);
+            ArraySetAsSeries(low, true);
+            ArraySetAsSeries(close, true);
+            
+            for(int i = limit - 1; i >= 0; i--)
+            {
+               if(i < limit - 1) json += ",";
+               json += "{";
+               json += "\"x\":" + IntegerToString(limit - i) + ",";
+               json += "\"open\":" + DoubleToString(open[i], 5) + ",";
+               json += "\"high\":" + DoubleToString(high[i], 5) + ",";
+               json += "\"low\":" + DoubleToString(low[i], 5) + ",";
+               json += "\"close\":" + DoubleToString(close[i], 5);
+               json += "}";
+            }
          }
-      }
-      else
-      {
-         Print("âš ï¸ Failed to copy chart data for ", Symbol(), " Period: ", EnumToString(currentPeriod), " Error: ", GetLastError());
+         json += "]";
       }
       
-      json += "],"
+      json += "},"
          "\"positions\":[";
       
-      // Add open positions
+      // Add open positions (Fixed position iteration logic)
       bool first = true;
       for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
-         if(!PositionSelect(_Symbol))
+         ulong ticket = PositionGetTicket(i);
+         if(ticket <= 0) continue;
+         if(!PositionSelectByTicket(ticket)) continue;
+         
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol)
             continue;
          if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
             continue;
@@ -217,6 +244,7 @@ public:
          ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
          json += "{";
          json += "\"ticket\":" + IntegerToString(PositionGetInteger(POSITION_TICKET)) + ",";
+         json += "\"time\":" + IntegerToString(PositionGetInteger(POSITION_TIME)) + ",";
          json += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
          json += "\"symbol\":\"" + PositionGetString(POSITION_SYMBOL) + "\",";
          json += "\"volume\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) + ",";
@@ -299,7 +327,7 @@ public:
             "\"ticket\":" + IntegerToString(ticket) + ","
             "\"type\":\"" + type + "\","
             "\"symbol\":\"" + _Symbol + "\","
-            "\"volume\":" + DoubleToString(volume, 2) + ","
+            "\"lots\":" + DoubleToString(volume, 2) + ","
             "\"price\":" + DoubleToString(price, 5) + ","
             "\"sl\":" + DoubleToString(sl, 5) + ","
             "\"tp\":" + DoubleToString(tp, 5) + ","

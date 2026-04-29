@@ -19,14 +19,14 @@
 //+------------------------------------------------------------------+
 
 // --- LICENSE & CONNECTION ---
-input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541"; // Your API Key (from FxScalpKing App)
-input string   ServerURL         = "https://liquibot-back.onrender.com"; // Backend Server URL (NO trailing slash)
+input string   ApiKey            = "FXSK-DEFAULT-KEY-2025"; // Your API Key (from FxScalpKing App)
+input string   ServerURL         = "https://fancy-days-wonder.loca.lt"; // Backend Server URL (NO trailing slash)
 
 // --- TRADE SETTINGS ---
 input double   LotSize           = 0.01;        // Fixed Lot Size
 input int      StopLoss_Points   = 150;         // Stop Loss in Points
 input int      TakeProfit_Points = 300;         // Take Profit in Points
-input int      MaxOpenTrades     = 3;           // Max simultaneous trades
+input int      MaxOpenTrades     = 30;          // Max simultaneous trades
 input int      MagicNumber       = 20250101;    // EA Identifier
 
 // --- EMA SETTINGS ---
@@ -73,6 +73,7 @@ int            handle_FastEMA_M5, handle_SlowEMA_M5;
 int            handle_FastEMA_M1, handle_SlowEMA_M1;
 int            handle_BB_M5;
 int            handle_RSI_M5, handle_RSI_M1;
+int            handle_ATR_M1;
 
 double         fastEMA_M5[], slowEMA_M5[];
 double         fastEMA_M1[], slowEMA_M1[];
@@ -128,10 +129,11 @@ int OnInit()
    handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M1 = iMA(_Symbol, PERIOD_M1, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_RSI_M1     = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
+   handle_ATR_M1     = iATR(_Symbol, PERIOD_M1, 14);
 
    if(handle_FastEMA_M5 == INVALID_HANDLE || handle_SlowEMA_M5 == INVALID_HANDLE ||
       handle_BB_M5 == INVALID_HANDLE || handle_FastEMA_M1 == INVALID_HANDLE ||
-      handle_SlowEMA_M1 == INVALID_HANDLE || handle_RSI_M5 == INVALID_HANDLE || handle_RSI_M1 == INVALID_HANDLE)
+      handle_SlowEMA_M1 == INVALID_HANDLE || handle_RSI_M5 == INVALID_HANDLE || handle_RSI_M1 == INVALID_HANDLE || handle_ATR_M1 == INVALID_HANDLE)
    {
       Alert("❌ Failed to initialize indicators. Check symbol name.");
       return INIT_FAILED;
@@ -536,7 +538,7 @@ bool CloseTrade(ulong ticket)
    if(trade.PositionClose(ticket))
    {
       Print("✅ Position closed: ", ticket);
-      NotifyTradeClosed(ticket);
+      // NotifyTradeClosed(ticket); // Removed to avoid duplicate. OnTradeTransaction will handle it.
       return true;
    }
 
@@ -652,7 +654,11 @@ void SendHeartbeat()
    // Update indicator data before sending heartbeat
    if(GetIndicatorData()) {
       double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0]);
+      double atr[];
+      CopyBuffer(handle_ATR_M1, 0, 0, 1, atr);
+      int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      long tickVol = iVolume(_Symbol, PERIOD_M1, 0);
+      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0], rsi_M5[0], atr[0], spread, tickVol);
    }
 
    string commands[];
@@ -773,33 +779,7 @@ void NotifyTradeClosed(ulong ticket)
 //+------------------------------------------------------------------+
 void OnTrade()
 {
-   static int lastPositionsTotal = 0;
-   int currentPositionsTotal = PositionsTotal();
-   
-   if(currentPositionsTotal < lastPositionsTotal) {
-      // A trade was closed
-      // Update cooldown logic
-      int consecutiveLosses = 0;
-      HistorySelect(0, TimeCurrent());
-      for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
-         ulong dealTicket = HistoryDealGetTicket(i);
-         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == MagicNumber && 
-            HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT) {
-            
-            double p = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-            if(p < 0) consecutiveLosses++;
-            else break; // Win breaks the streak
-            
-            if(consecutiveLosses >= MaxConsecutiveLosses) {
-               cooldownUntil = TimeCurrent() + CooldownMinutes * 60;
-               Print("🛑 Cooldown active — resuming at ", TimeToString(cooldownUntil));
-               break;
-            }
-         }
-      }
-   }
-   
-   lastPositionsTotal = currentPositionsTotal;
+   // Handled by OnTradeTransaction instead
 }
 
 //+------------------------------------------------------------------+
@@ -814,6 +794,20 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       Print("📋 Deal executed | Ticket: ", trans.deal,
             " | Volume: ", trans.volume,
             " | Price: ", trans.price);
+            
+      if(HistoryDealSelect(trans.deal))
+      {
+         long magic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         if(magic == MagicNumber)
+         {
+            long deal_entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+            if(deal_entry == DEAL_ENTRY_OUT)
+            {
+               ulong position_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+               NotifyTradeClosed(position_id);
+            }
+         }
+      }
    }
 }
 //+------------------------------------------------------------------+
