@@ -20,7 +20,7 @@
 
 // --- LICENSE & CONNECTION ---
 input string   ApiKey            = "FXSK-DEFAULT-KEY-2025"; // Your API Key (from FxScalpKing App)
-input string   ServerURL         = "https://fancy-days-wonder.loca.lt"; // Backend Server URL (NO trailing slash)
+input string   ServerURL         = "https://soft-singers-drop.loca.lt"; // FxScalpKing Backend URL (NO trailing slash)
 
 // --- TRADE SETTINGS ---
 input double   LotSize           = 0.01;        // Fixed Lot Size
