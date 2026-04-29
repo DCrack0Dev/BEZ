@@ -19,8 +19,8 @@
 //+------------------------------------------------------------------+
 
 // --- LICENSE & CONNECTION ---
-input string   ApiKey            = "FXSK-DEFAULT-KEY-2025"; // Your API Key (from FxScalpKing App)
-input string   ServerURL         = "https://soft-singers-drop.loca.lt"; // FxScalpKing Backend URL (NO trailing slash)
+input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541"; // Your API Key (from FxScalpKing App)
+input string   ServerURL         = "https://liquibot-back.onrender.com"; // FxScalpKing Backend URL (NO trailing slash)
 
 // --- TRADE SETTINGS ---
 input double   LotSize           = 0.01;        // Fixed Lot Size
