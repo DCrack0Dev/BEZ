@@ -278,6 +278,13 @@ const buildStructures = (chart) => {
 
   console.log(`[STRUCTURES] Candle counts - M5: ${m5.length}, M15: ${m15.length}, H1: ${h1.length}, H4: ${h4.length}`);
 
+  // Check if we have minimum data for structure detection
+  const minCandles = { M5: 50, M15: 30, H1: 25, H4: 20 };
+  if (m5.length < minCandles.M5 || m15.length < minCandles.M15 || h1.length < minCandles.H1 || h4.length < minCandles.H4) {
+    console.log(`[STRUCTURES] Insufficient data for reliable structure detection`);
+    return { orderBlocks: [], fvgs: [], keyLevels: [], marketStructure: [], trend: 'NEUTRAL' };
+  }
+
   const msH4 = analyzeMarketStructure(h4, 'H4');
   const msH1 = analyzeMarketStructure(h1, 'H1');
   const msM15 = analyzeMarketStructure(m15, 'M15');
@@ -438,7 +445,13 @@ app.post('/api/ea/update', (req, res) => {
   // Force Backend to calculate structures for the Brain to use
   const backendStructures = buildStructures(updatedChart);
 
-  console.log(`[HEARTBEAT] EA API Key: ${apiKey} | Chart TFs: ${Object.keys(updatedChart).join(', ')} | Structures: ${backendStructures.orderBlocks.length}ob, ${backendStructures.fvgs.length}fvg, ${backendStructures.keyLevels.length}kl`);
+  // Debug: Show detailed chart data information
+  console.log(`[HEARTBEAT] EA API Key: ${apiKey} | Chart TFs: ${Object.keys(updatedChart).join(', ')}`);
+  Object.keys(updatedChart).forEach(tf => {
+    const candles = updatedChart[tf];
+    console.log(`[HEARTBEAT] ${tf}: ${candles.length} candles | Range: ${candles.length > 0 ? `${candles[0].x} - ${candles[candles.length-1].x}` : 'N/A'}`);
+  });
+  console.log(`[HEARTBEAT] Structures: ${backendStructures.orderBlocks.length}ob, ${backendStructures.fvgs.length}fvg, ${backendStructures.keyLevels.length}kl`);
 
   // Update account state
   db.accountStates[apiKey] = {
@@ -950,16 +963,146 @@ app.post('/api/order', (req, res) => {
   });
 });
 
+// Test endpoint to simulate market data
+app.get('/api/test/signal', (req, res) => {
+  const { symbol, tf } = req.query;
+  
+  // Create mock market data with structures
+  const mockPrice = 2300 + Math.random() * 50; // Gold price around $2300
+  
+  // Mock structures for testing
+  const mockStructures = {
+    orderBlocks: [
+      { type: 'BULLISH_ORDER_BLOCK', price: mockPrice - 10, strength: 8 },
+      { type: 'BEARISH_ORDER_BLOCK', price: mockPrice + 15, strength: 7 }
+    ],
+    fvgs: [
+      { top: mockPrice - 5, bottom: mockPrice + 5, type: 'BULLISH_FVG' }
+    ],
+    keyLevels: [
+      { price: mockPrice - 20, type: 'SUPPORT' },
+      { price: mockPrice + 25, type: 'RESISTANCE' }
+    ]
+  };
+  
+  // Generate test signal
+  let signal = 'HOLD';
+  let reason = 'Test signal generated';
+  
+  // Simple logic for demo
+  if (Math.random() > 0.7) {
+    signal = Math.random() > 0.5 ? 'BUY' : 'SELL';
+    reason = `Test ${signal} signal at price $${mockPrice.toFixed(2)}`;
+  }
+  
+  res.json({
+    symbol: symbol || 'XAUUSD',
+    tf: tf || 'M5',
+    signal,
+    reason,
+    price: mockPrice,
+    timestamp: Date.now(),
+    structures: {
+      orderBlocks: mockStructures.orderBlocks.length,
+      fvgs: mockStructures.fvgs.length,
+      keyLevels: mockStructures.keyLevels.length
+    },
+    testMode: true
+  });
+});
+
 // Get signal (for mobile app chart)
 app.get('/api/signal', (req, res) => {
   const { symbol, tf } = req.query;
   
-  // Return mock signal for now
-  res.json({
-    symbol: symbol || 'XAUUSD',
-    tf: tf || 'M5',
-    signal: Math.random() > 0.5 ? 'BUY' : 'SELL'
-  });
+  try {
+    // Get current chart data from account state
+    const state = db.accountStates['default'] || Object.values(db.accountStates)[0];
+    if (!state || !state.chart || !state.structures) {
+      return res.json({
+        symbol: symbol || 'XAUUSD',
+        tf: tf || 'M5',
+        signal: 'HOLD',
+        reason: 'No market data available - EA not connected',
+        suggestion: 'Use /api/test/signal for testing, or connect EA to MT5'
+      });
+    }
+    
+    const chartData = state.chart[tf] || [];
+    const structures = state.structures;
+    
+    if (chartData.length < 20) {
+      return res.json({
+        symbol: symbol || 'XAUUSD',
+        tf: tf || 'M5',
+        signal: 'HOLD',
+        reason: 'Insufficient data'
+      });
+    }
+    
+    // Generate signal based on structures and price action
+    const latestPrice = chartData[chartData.length - 1]?.close || 0;
+    const orderBlocks = structures.orderBlocks.filter(ob => ob.type.includes('BULL'));
+    const fvgs = structures.fvgs;
+    
+    let signal = 'HOLD';
+    let reason = 'No clear signal';
+    
+    // Bullish signal logic
+    if (orderBlocks.length > 0 && fvgs.length > 0) {
+      const latestOB = orderBlocks[0];
+      const latestFVG = fvgs[0];
+      
+      // Check if price is above recent bullish order block
+      if (latestPrice > latestOB.price * 1.002) {
+        signal = 'BUY';
+        reason = `Price above bullish OB at ${latestOB.price}`;
+      }
+      // Check if price is in fair value gap
+      else if (latestFVG && latestPrice >= latestFVG.top && latestPrice <= latestFVG.bottom) {
+        signal = 'BUY';
+        reason = 'Price in FVG - buying opportunity';
+      }
+    }
+    
+    // Bearish signal logic
+    const bearishOBs = structures.orderBlocks.filter(ob => ob.type.includes('BEAR'));
+    if (bearishOBs.length > 0 && fvgs.length > 0) {
+      const latestBearishOB = bearishOBs[0];
+      
+      // Check if price is below recent bearish order block
+      if (latestPrice < latestBearishOB.price * 0.998) {
+        signal = 'SELL';
+        reason = `Price below bearish OB at ${latestBearishOB.price}`;
+      }
+    }
+    
+    console.log(`[SIGNAL] Generated ${signal} for ${symbol} ${tf}: ${reason}`);
+    
+    res.json({
+      symbol: symbol || 'XAUUSD',
+      tf: tf || 'M5',
+      signal,
+      reason,
+      price: latestPrice,
+      timestamp: Date.now(),
+      structures: {
+        orderBlocks: structures.orderBlocks.length,
+        fvgs: structures.fvgs.length,
+        keyLevels: structures.keyLevels.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('[SIGNAL] Error generating signal:', error);
+    res.json({
+      symbol: symbol || 'XAUUSD',
+      tf: tf || 'M5',
+      signal: 'HOLD',
+      reason: 'Error generating signal',
+      error: error.message
+    });
+  }
 });
 
 app.listen(PORT, () => {
