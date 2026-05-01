@@ -21,14 +21,17 @@ app.get('/test', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData } = req.body;
   
+  console.log(`[HEARTBEAT] Received update from EA - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
+  
   // Create forced test structures
+  const currentPrice = accountData?.price || 4565.58;
   const testStructures = {
     orderBlocks: [
       {
         type: 'BULLISH',
         zoneType: 'OB_BULLISH',
-        top: 4560,
-        bottom: 4555,
+        top: currentPrice - 10,
+        bottom: currentPrice - 15,
         timeframe: 'M5',
         time: Date.now() / 1000 - 300,
         label: 'M5 TEST OB'
@@ -38,8 +41,8 @@ app.post('/api/ea/update', (req, res) => {
       {
         type: 'BULLISH',
         zoneType: 'FVG_BULLISH',
-        top: 4565,
-        bottom: 4560,
+        top: currentPrice - 5,
+        bottom: currentPrice + 5,
         timeframe: 'M5',
         time: Date.now() / 1000 - 600,
         label: 'M5 TEST FVG'
@@ -49,7 +52,7 @@ app.post('/api/ea/update', (req, res) => {
       {
         type: 'SUPPORT',
         zoneType: 'KEY_SUPPORT',
-        price: 4550,
+        price: currentPrice - 20,
         timeframe: 'H1',
         time: Date.now() / 1000 - 3600,
         label: 'H1 TEST KL'
@@ -69,6 +72,7 @@ app.post('/api/ea/update', (req, res) => {
       time: ob.time,
       label: ob.label
     });
+    console.log(`[DRAW] Converting OB to command: ${ob.label}`);
   });
   
   testStructures.fvgs.forEach((fvg) => {
@@ -80,6 +84,7 @@ app.post('/api/ea/update', (req, res) => {
       time: fvg.time,
       label: fvg.label
     });
+    console.log(`[DRAW] Converting FVG to command: ${fvg.label}`);
   });
   
   testStructures.keyLevels.forEach((kl) => {
@@ -91,9 +96,10 @@ app.post('/api/ea/update', (req, res) => {
       time: kl.time,
       label: kl.label
     });
+    console.log(`[DRAW] Converting KL to command: ${kl.label}`);
   });
   
-  console.log(`[HEARTBEAT] Generated ${drawCommands.length} DRAW commands`);
+  console.log(`[HEARTBEAT] Generated ${drawCommands.length} DRAW commands for EA`);
   
   res.json({
     success: true,
@@ -105,13 +111,14 @@ app.post('/api/ea/update', (req, res) => {
 
 // Account endpoint
 app.get('/api/account', (req, res) => {
+  const currentPrice = 4565.58;
   const testStructures = {
     orderBlocks: [
       {
         type: 'BULLISH',
         zoneType: 'OB_BULLISH',
-        top: 4560,
-        bottom: 4555,
+        top: currentPrice - 10,
+        bottom: currentPrice - 15,
         timeframe: 'M5',
         time: Date.now() / 1000 - 300,
         label: 'M5 TEST OB'
@@ -121,8 +128,8 @@ app.get('/api/account', (req, res) => {
       {
         type: 'BULLISH',
         zoneType: 'FVG_BULLISH',
-        top: 4565,
-        bottom: 4560,
+        top: currentPrice - 5,
+        bottom: currentPrice + 5,
         timeframe: 'M5',
         time: Date.now() / 1000 - 600,
         label: 'M5 TEST FVG'
@@ -132,7 +139,7 @@ app.get('/api/account', (req, res) => {
       {
         type: 'SUPPORT',
         zoneType: 'KEY_SUPPORT',
-        price: 4550,
+        price: currentPrice - 20,
         timeframe: 'H1',
         time: Date.now() / 1000 - 3600,
         label: 'H1 TEST KL'
@@ -149,4 +156,5 @@ app.get('/api/account', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Minimal backend running on port ${PORT}`);
+  console.log(`EA Endpoints ready for MT5 connection`);
 });
