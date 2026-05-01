@@ -326,13 +326,57 @@ const findApiKey = (key) => {
     db.apiKeys.push(keyEntry);
     console.log(`Auto-registered new API Key: ${key}`);
   }
-  
   return keyEntry;
 };
 
+// --- TEST ENDPOINT ---
+app.get('/test-structures', (req, res) => {
+  console.log('[TEST] Testing structure calculation with sample data...');
+  
+  const sampleChart = {
+    M5: [
+      { x: 1, open: 100, high: 105, low: 95, close: 103 },
+      { x: 2, open: 103, high: 108, low: 98, close: 97 },
+      { x: 3, open: 97, high: 102, low: 93, close: 95 },
+      { x: 4, open: 95, high: 100, low: 90, close: 92 },
+      { x: 5, open: 92, high: 97, low: 88, close: 94 }
+    ],
+    M15: [
+      { x: 1, open: 100, high: 105, low: 95, close: 103 },
+      { x: 2, open: 103, high: 108, low: 98, close: 97 },
+      { x: 3, open: 97, high: 102, low: 93, close: 95 }
+    ],
+    H1: [
+      { x: 1, open: 100, high: 105, low: 95, close: 103 },
+      { x: 2, open: 103, high: 108, low: 98, close: 97 }
+    ],
+    H4: [
+      { x: 1, open: 100, high: 105, low: 95, close: 103 },
+      { x: 2, open: 103, high: 108, low: 98, close: 97 }
+    ]
+  };
+  
+  const structures = buildStructures(sampleChart);
+  
+  console.log(`[TEST] Results - OBs: ${structures.orderBlocks.length}, FVGs: ${structures.fvgs.length}, Key Levels: ${structures.keyLevels.length}`);
+  
+  res.json({
+    success: true,
+    structures,
+    debug: {
+      candleCounts: {
+        M5: sampleChart.M5.length,
+        M15: sampleChart.M15.length,
+        H1: sampleChart.H1.length,
+        H4: sampleChart.H4.length
+      }
+    }
+  });
+});
+
 // --- BASE ENDPOINT ---
 app.get('/', (req, res) => {
-  res.send('FxScalpKing Backend is Running Successfully!');
+  res.json({ status: 'FxScalpKing Backend API', version: '1.0.0' });
 });
 
 // --- MT5 EA ENDPOINTS ---
@@ -606,6 +650,16 @@ app.get('/api/account', (req, res) => {
   }
   
   console.log(`[ACCOUNT] State exists: ${!!state} | Structures: ${state?.structures ? JSON.stringify(state.structures).substring(0, 200) + '...' : 'none'}`);
+
+  // TEST: Force structure calculation to test the functions
+  if (state && state.chart) {
+    console.log(`[ACCOUNT] Testing structure calculation with existing chart data...`);
+    const testStructures = buildStructures(state.chart);
+    console.log(`[ACCOUNT] Test result - OBs: ${testStructures.orderBlocks.length}, FVGs: ${testStructures.fvgs.length}, Key Levels: ${testStructures.keyLevels.length}`);
+    
+    // Update state with test results
+    state.structures = testStructures;
+  }
 
   if (!state) {
     return res.json({
