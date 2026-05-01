@@ -17,6 +17,35 @@ app.get('/test', (req, res) => {
   });
 });
 
+// License validation endpoint (EA calls this on startup)
+app.post('/api/ea/validate', (req, res) => {
+  const { apiKey, accountId } = req.body;
+  
+  console.log(`[LICENSE] Validation request for API Key: ${apiKey || 'none'} - Account: ${accountId || 'none'}`);
+  
+  // Temporarily accept any API key that starts with FXSK-
+  if (!apiKey || !apiKey.toLowerCase().startsWith('fxsk-')) {
+    console.log(`[LICENSE] Invalid API Key format: ${apiKey}`);
+    return res.status(401).json({
+      valid: false,
+      error: 'Invalid API Key'
+    });
+  }
+  
+  console.log(`[LICENSE] API Key validated successfully`);
+  
+  res.json({
+    valid: true,
+    expiry: '2026-12-31',
+    plan: 'PAID',
+    features: {
+      maxTrades: 30,
+      trailingStop: true,
+      sessionFilter: true
+    }
+  });
+});
+
 // Basic heartbeat endpoint
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData } = req.body;
