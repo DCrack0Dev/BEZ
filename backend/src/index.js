@@ -73,6 +73,8 @@ const normalizeTfCandles = (chart, tf) => {
 
 const detectOrderBlocks = (candles, timeframe) => {
   const result = [];
+  console.log(`[DETECT_OB] ${timeframe}: Processing ${candles.length} candles`);
+  
   for (let i = 1; i < candles.length - 2; i++) {
     const c = candles[i];
     const p1 = candles[i + 1];
@@ -80,6 +82,7 @@ const detectOrderBlocks = (candles, timeframe) => {
     const body = Math.abs(c.close - c.open);
     const range = Math.max(c.high - c.low, 0.00001);
     const displacement = (body / range) >= 0.7;
+    
     if (!displacement) continue;
 
     if (c.close > c.open && p1.close < p1.open) {
@@ -92,6 +95,7 @@ const detectOrderBlocks = (candles, timeframe) => {
         time: p1.x,
         label: `${timeframe} BULL OB`,
       });
+      console.log(`[DETECT_OB] ${timeframe}: Found BULLISH OB at index ${i}`);
     } else if (c.close < c.open && p1.close > p1.open) {
       result.push({
         type: 'BEARISH',
@@ -102,6 +106,7 @@ const detectOrderBlocks = (candles, timeframe) => {
         time: p1.x,
         label: `${timeframe} BEAR OB`,
       });
+      console.log(`[DETECT_OB] ${timeframe}: Found BEARISH OB at index ${i}`);
     } else if (c.close > c.open && p2.close < p2.open) {
       result.push({
         type: 'BULLISH',
@@ -112,6 +117,7 @@ const detectOrderBlocks = (candles, timeframe) => {
         time: p2.x,
         label: `${timeframe} BULL OB`,
       });
+      console.log(`[DETECT_OB] ${timeframe}: Found BULLISH OB (p2) at index ${i}`);
     } else if (c.close < c.open && p2.close > p2.open) {
       result.push({
         type: 'BEARISH',
@@ -122,8 +128,11 @@ const detectOrderBlocks = (candles, timeframe) => {
         time: p2.x,
         label: `${timeframe} BEAR OB`,
       });
+      console.log(`[DETECT_OB] ${timeframe}: Found BEARISH OB (p2) at index ${i}`);
     }
   }
+  
+  console.log(`[DETECT_OB] ${timeframe}: Found ${result.length} order blocks`);
   return result.slice(0, 12);
 };
 
