@@ -507,6 +507,51 @@ app.post('/api/ea/update', (req, res) => {
 
   // Force Backend to calculate structures for the Brain to use
   const backendStructures = buildStructures(updatedChart);
+  
+  // FORCE TEST STRUCTURES for immediate DRAW command testing
+  console.log(`[TEST] Forcing test structures for DRAW command verification`);
+  const currentPrice = accountData?.price || 4565.58;
+  
+  // Add guaranteed test structures if none detected
+  if(backendStructures.orderBlocks.length === 0) {
+    backendStructures.orderBlocks.push({
+      type: 'BULLISH',
+      zoneType: 'OB_BULLISH',
+      top: currentPrice - 10,
+      bottom: currentPrice - 15,
+      timeframe: 'M5',
+      time: Date.now() / 1000 - 300,
+      label: 'M5 TEST OB'
+    });
+    console.log(`[TEST] Added test Order Block`);
+  }
+  
+  if(backendStructures.fvgs.length === 0) {
+    backendStructures.fvgs.push({
+      type: 'BULLISH',
+      zoneType: 'FVG_BULLISH',
+      top: currentPrice - 5,
+      bottom: currentPrice + 5,
+      timeframe: 'M5',
+      time: Date.now() / 1000 - 600,
+      label: 'M5 TEST FVG'
+    });
+    console.log(`[TEST] Added test FVG`);
+  }
+  
+  if(backendStructures.keyLevels.length === 0) {
+    backendStructures.keyLevels.push({
+      type: 'SUPPORT',
+      zoneType: 'KEY_SUPPORT',
+      price: currentPrice - 20,
+      timeframe: 'H1',
+      time: Date.now() / 1000 - 3600,
+      label: 'H1 TEST KL'
+    });
+    console.log(`[TEST] Added test Key Level`);
+  }
+  
+  console.log(`[TEST] Final structure counts: OB=${backendStructures.orderBlocks.length}, FVG=${backendStructures.fvgs.length}, KL=${backendStructures.keyLevels.length}`);
 
   // Debug: Show detailed chart data information
   console.log(`[HEARTBEAT] EA API Key: ${apiKey} | Chart TFs: ${Object.keys(updatedChart).join(', ')}`);
