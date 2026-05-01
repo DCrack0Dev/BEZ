@@ -55,7 +55,7 @@ app.post('/api/ea/update', (req, res) => {
   
   // TODO: Re-enable proper API key validation once EA is working
   
-  console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
+  console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'} - SIMPLIFIED STRUCTURES`);
   
   // Create clean simple structures: 1hr HH/LL, 15min OB, 5min FVG
   const currentPrice = accountData?.price || 4565.58;
