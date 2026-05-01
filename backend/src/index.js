@@ -1110,3 +1110,5 @@ app.listen(PORT, () => {
   console.log(`EA Endpoints ready for MT5 connection`);
   console.log(`Structure calculation fixed - v2.0`);
 });
+/ /   F r e s h   d e p l o y   0 5 / 0 1 / 2 0 2 6   1 6 : 3 3 : 1 2  
+ 
