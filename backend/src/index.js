@@ -21,7 +21,13 @@ app.get('/test', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData } = req.body;
   
-  console.log(`[HEARTBEAT] Received update from EA - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
+  // Validate API key
+  if (!apiKey || !apiKey.startsWith('FXSK-')) {
+    console.log(`[HEARTBEAT] Invalid API Key: ${apiKey}`);
+    return res.status(401).json({ error: 'Invalid API Key' });
+  }
+  
+  console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
   
   // Create forced test structures
   const currentPrice = accountData?.price || 4565.58;
@@ -111,6 +117,13 @@ app.post('/api/ea/update', (req, res) => {
 
 // Account endpoint
 app.get('/api/account', (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  
+  // Validate API key
+  if (!apiKey || !apiKey.startsWith('FXSK-')) {
+    return res.status(401).json({ error: 'Invalid API Key' });
+  }
+  
   const currentPrice = 4565.58;
   const testStructures = {
     orderBlocks: [
