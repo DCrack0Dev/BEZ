@@ -57,50 +57,68 @@ app.post('/api/ea/update', (req, res) => {
   
   console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
   
-  // Create minimal important structures only for H1 and M15
+  // Create clean simple structures: 1hr HH/LL, 15min OB, 5min FVG
   const currentPrice = accountData?.price || 4565.58;
   const testStructures = {
     orderBlocks: [
-      // Only 1 important H1 Order Block
+      // Only 15 Min Order Blocks (2 recent ones)
       {
         type: 'BULLISH',
         zoneType: 'OB_BULLISH',
-        top: currentPrice - 15,
-        bottom: currentPrice - 25,
-        timeframe: 'H1',
+        top: currentPrice - 12,
+        bottom: currentPrice - 20,
+        timeframe: 'M15',
+        time: Date.now() / 1000 - 1800,
+        label: 'M15 OB'
+      },
+      {
+        type: 'BEARISH',
+        zoneType: 'OB_BEARISH',
+        top: currentPrice + 20,
+        bottom: currentPrice + 12,
+        timeframe: 'M15',
         time: Date.now() / 1000 - 3600,
-        label: 'H1 KEY OB'
+        label: 'M15 OB'
       }
     ],
     fvgs: [
-      // Only 1 important M15 FVG
+      // Only 5 Min FVGs (2 recent ones)
       {
         type: 'BULLISH',
         zoneType: 'FVG_BULLISH',
-        top: currentPrice - 8,
-        bottom: currentPrice + 8,
-        timeframe: 'M15',
+        top: currentPrice - 6,
+        bottom: currentPrice + 6,
+        timeframe: 'M5',
+        time: Date.now() / 1000 - 900,
+        label: 'M5 FVG'
+      },
+      {
+        type: 'BEARISH',
+        zoneType: 'FVG_BEARISH',
+        top: currentPrice + 6,
+        bottom: currentPrice - 6,
+        timeframe: 'M5',
         time: Date.now() / 1000 - 1800,
-        label: 'M15 KEY FVG'
+        label: 'M5 FVG'
       }
     ],
     keyLevels: [
-      // Only 2 important Key Levels (1 support, 1 resistance)
+      // Only 1hr HH and LL (Higher High and Lower Low)
       {
-        type: 'SUPPORT',
-        zoneType: 'KEY_SUPPORT',
-        price: currentPrice - 30,
+        type: 'HIGHER_HIGH',
+        zoneType: 'HH_H1',
+        price: currentPrice + 35,
         timeframe: 'H1',
         time: Date.now() / 1000 - 7200,
-        label: 'H1 KEY SUP'
+        label: 'H1 HH'
       },
       {
-        type: 'RESISTANCE',
-        zoneType: 'KEY_RESISTANCE',
-        price: currentPrice + 25,
+        type: 'LOWER_LOW',
+        zoneType: 'LL_H1',
+        price: currentPrice - 40,
         timeframe: 'H1',
         time: Date.now() / 1000 - 7200,
-        label: 'H1 KEY RES'
+        label: 'H1 LL'
       }
     ]
   };
