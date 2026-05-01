@@ -21,11 +21,18 @@ app.get('/test', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData } = req.body;
   
-  // Validate API key
-  if (!apiKey || !apiKey.startsWith('FXSK-')) {
-    console.log(`[HEARTBEAT] Invalid API Key: ${apiKey}`);
-    return res.status(401).json({ error: 'Invalid API Key' });
+  // Debug API key validation
+  console.log(`[HEARTBEAT] Received API Key: "${apiKey}"`);
+  console.log(`[HEARTBEAT] API Key type: ${typeof apiKey}`);
+  console.log(`[HEARTBEAT] API Key length: ${apiKey ? apiKey.length : 'null'}`);
+  
+  // Temporarily accept all API keys for debugging
+  if (!apiKey) {
+    console.log(`[HEARTBEAT] No API Key provided`);
+    return res.status(401).json({ error: 'No API Key provided' });
   }
+  
+  console.log(`[HEARTBEAT] API Key accepted for debugging`);
   
   console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
   
