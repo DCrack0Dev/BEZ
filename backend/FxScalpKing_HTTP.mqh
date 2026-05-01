@@ -13,7 +13,7 @@
 // UPDATE THIS TO YOUR BACKEND URL
 // For local development: use your computer's local IP address
 // Example: "http://192.168.8.151:5000"
-#define API_BASE_URL "http://YOUR_SERVER_IP:5000"
+#define API_BASE_URL "https://liquibot-back.onrender.com"
 
 //+------------------------------------------------------------------+
 //| HTTP CLIENT CLASS                                                |
@@ -36,6 +36,8 @@ private:
    double      m_vwap;
    int         m_spread;
    long        m_tickVolume;
+   string      m_requestedTf;
+   string      m_structuresJson;
    
 public:
    // Constructor
@@ -43,7 +45,7 @@ public:
    {
       m_apiKey = "";
       m_serverUrl = API_BASE_URL;
-      m_timeout = 5000; // 5 second timeout
+      m_timeout = 30000; // Increased to 30s for Render cold starts
       m_lastPrice = 0.0;
       m_fastEMA = 0.0;
       m_slowEMA = 0.0;
@@ -54,7 +56,14 @@ public:
       m_vwap = 0.0;
       m_spread = 0;
       m_tickVolume = 0;
+      m_requestedTf = "M5"; // Default
+      m_structuresJson = "{\"orderBlocks\":[],\"fvgs\":[],\"keyLevels\":[],\"marketStructure\":[]}";
    }
+   
+   void SetStructures(string json) { m_structuresJson = json; }
+   
+   void SetRequestedTf(string tf) { m_requestedTf = tf; }
+   string GetRequestedTf() { return m_requestedTf; }
    
    // Set Market Data to send in heartbeat
    void SetMarketData(double price, double fastEMA, double slowEMA, double bbUpper, double bbLower, double rsi = 0.0, double atr = 0.0, double vwap = 0.0, int spread = 0, long tickVolume = 0)
@@ -81,6 +90,9 @@ public:
    void SetServerUrl(string url)
    {
       m_serverUrl = url;
+      // Remove trailing slash if present
+      if(StringSubstr(m_serverUrl, StringLen(m_serverUrl) - 1) == "/")
+         m_serverUrl = StringSubstr(m_serverUrl, 0, StringLen(m_serverUrl) - 1);
    }
 
    //+------------------------------------------------------------------+
@@ -125,18 +137,22 @@ public:
       }
       
       // Parse JSON response (simple string parsing)
-      if(StringFind(response, "\"valid\":true") >= 0)
+      if(StringFind(response, "\"valid\":true") >= 0 || StringFind(response, "\"valid\": true") >= 0)
       {
          // Extract expiry date
          int expStart = StringFind(response, "\"expiry\":\"") + 10;
+         if(expStart < 10) expStart = StringFind(response, "\"expiry\": \"") + 11;
+         
          int expEnd = StringFind(response, "\"", expStart);
-         if(expStart > 9)
+         if(expStart > 9 && expEnd > expStart)
             expiry = StringSubstr(response, expStart, expEnd - expStart);
          
          // Extract plan type
          int planStart = StringFind(response, "\"plan\":\"") + 8;
+         if(planStart < 8) planStart = StringFind(response, "\"plan\": \"") + 9;
+         
          int planEnd = StringFind(response, "\"", planStart);
-         if(planStart > 7)
+         if(planStart > 7 && planEnd > planStart)
             plan = StringSubstr(response, planStart, planEnd - planStart);
          
          Print("✅ FXScalpKing: License valid! Plan: ", plan, " | Expires: ", expiry);
@@ -162,6 +178,10 @@ public:
       double profit = AccountInfoDouble(ACCOUNT_PROFIT);
       double margin = AccountInfoDouble(ACCOUNT_MARGIN);
       double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
       
       string json = "{"
          "\"apiKey\":\"" + m_apiKey + "\","
@@ -173,6 +193,10 @@ public:
             "\"freeMargin\":" + DoubleToString(freeMargin, 2) + ","
             "\"accountId\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
             "\"eaSymbol\":\"" + _Symbol + "\","
+            "\"digits\":" + IntegerToString(digits) + ","
+            "\"point\":" + DoubleToString(point, 10) + ","
+            "\"tickSize\":" + DoubleToString(tickSize, 10) + ","
+            "\"tickValue\":" + DoubleToString(tickValue, 10) + ","
             "\"price\":" + DoubleToString(m_lastPrice, 5) + ","
             "\"fastEMA\":" + DoubleToString(m_fastEMA, 5) + ","
             "\"slowEMA\":" + DoubleToString(m_slowEMA, 5) + ","
@@ -184,22 +208,30 @@ public:
             "\"spread\":" + IntegerToString(m_spread) + ","
             "\"tickVolume\":" + IntegerToString(m_tickVolume) +
          "},"
+         "\"structures\":" + m_structuresJson + ","
          "\"chart\":{";
 
-      // Helper function to build chart JSON for a specific timeframe
-      ENUM_TIMEFRAMES tfs[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1};
-      string tfNames[] = {"M1", "M5", "M15", "M30", "H1"};
+      // Optimization: Send the requested timeframe AND HTF data for Brain analysis
+      ENUM_TIMEFRAMES tfs[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4};
+      string tfNames[] = {"M1", "M5", "M15", "M30", "H1", "H4"};
+      int tfCounts[] = {1440, 288, 96, 48, 48, 48}; // Sufficient history for structure
       
+      bool tfFound = false;
       for(int t = 0; t < ArraySize(tfs); t++)
       {
-         if(t > 0) json += ",";
+         // Always send HTF (M15, H1, H4) for Brain analysis, plus the requested TF
+         bool isHTF = (tfNames[t] == "M15" || tfNames[t] == "H1" || tfNames[t] == "H4");
+         if(tfNames[t] != m_requestedTf && !isHTF) continue;
+         
+         if(tfFound) json += ",";
+         tfFound = true;
+         
          json += "\"" + tfNames[t] + "\":[";
          
          double open[], high[], low[], close[];
          long tickVol[];
          
-         // To properly identify HTF structures, we need more candles. 100 should be safe.
-         int numCandles = 100;
+         int numCandles = tfCounts[t];
          int copied = CopyOpen(_Symbol, tfs[t], 0, numCandles, open);
          int copiedH = CopyHigh(_Symbol, tfs[t], 0, numCandles, high);
          int copiedL = CopyLow(_Symbol, tfs[t], 0, numCandles, low);
@@ -217,11 +249,16 @@ public:
             ArraySetAsSeries(close, true);
             ArraySetAsSeries(tickVol, true);
             
-            for(int i = limit - 1; i >= 0; i--)
+            // Limit to last 24h based on timestamp
+            datetime dayAgo = TimeCurrent() - 86400;
+            int actualSent = 0;
+            
+            for(int i = 0; i < limit; i++)
             {
-               if(i < limit - 1) json += ",";
-               
                datetime time = iTime(_Symbol, tfs[t], i);
+               if(time < dayAgo) break;
+               
+               if(actualSent > 0) json += ",";
                
                json += "{";
                json += "\"x\":" + IntegerToString(time) + ",";
@@ -231,6 +268,7 @@ public:
                json += "\"close\":" + DoubleToString(close[i], 5) + ",";
                json += "\"tick_volume\":" + IntegerToString(tickVol[i]);
                json += "}";
+               actualSent++;
             }
          }
          json += "]";
@@ -317,6 +355,16 @@ public:
          int actionStart = StringFind(cmdObj, "\"action\":\"") + 10;
          int actionEnd = StringFind(cmdObj, "\"", actionStart);
          string action = StringSubstr(cmdObj, actionStart, actionEnd - actionStart);
+
+         // Extract timeframe (for SET_TF)
+         int tfStart = StringFind(cmdObj, "\"timeframe\":\"");
+         string tfStr = "";
+         if(tfStart >= 0)
+         {
+            tfStart += 13;
+            int tfEnd = StringFind(cmdObj, "\"", tfStart);
+            if(tfEnd > tfStart) tfStr = StringSubstr(cmdObj, tfStart, tfEnd - tfStart);
+         }
          
          // Extract sl
          int slStart = StringFind(cmdObj, "\"sl\":") + 5;
@@ -356,7 +404,10 @@ public:
          // Add to commands array (Format: ACTION|SL|TP|TOP|BOTTOM|TYPE|TIME)
          int idx = ArraySize(commands);
          ArrayResize(commands, idx + 1);
-         if(StringFind(action, "DRAW_") == 0) {
+         if(action == "SET_TF" && tfStr != "") {
+            commands[idx] = action + "|" + tfStr;
+            Print("Parsed timeframe command: ", commands[idx]);
+         } else if(StringFind(action, "DRAW_") == 0) {
             commands[idx] = action + "|" + topStr + "|" + botStr + "|" + typeStr + "|" + timeStr;
             Print("Parsed drawing command: ", commands[idx]);
          } else {
@@ -407,6 +458,27 @@ public:
       
       return success && respCode == 200;
    }
+
+   //+------------------------------------------------------------------+
+   //| SYNC CLOSED TRADES HISTORY                                       |
+   //+------------------------------------------------------------------+
+   bool SyncHistory(string json)
+   {
+      if(m_apiKey == "") return false;
+      
+      string headers = "Content-Type: application/json";
+      string response;
+      int respCode;
+      
+      return HttpRequest(
+         "POST",
+         m_serverUrl + "/api/ea/sync-history",
+         headers,
+         json,
+         response,
+         respCode
+      );
+   }
    
    //+------------------------------------------------------------------+
    //| HTTP REQUEST HELPER                                              |
@@ -450,4 +522,3 @@ public:
 CFxScalpKingHTTP FxScalpKing;
 
 #endif // FXSCALPKING_HTTP_MQH
-//+------------------------------------------------------------------+

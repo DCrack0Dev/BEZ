@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                 ScalpKing_EA.mq5 |
+//|                                              ScalpKing_EA_v2.mq5 |
 //|                                        Your Trading Bot Platform |
 //|                     Scalper: Gold (XAU/USD) + Indices (US30/NAS) |
 //|                    Strategy: EMA Crossover + Bollinger Squeeze   |
@@ -15,84 +15,66 @@
 #include "FxScalpKing_HTTP.mqh"
 
 //+------------------------------------------------------------------+
-//| INPUT PARAMETERS (Configurable from App or MT5 Settings)        |
+//| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
-
-// --- LICENSE & CONNECTION ---
-input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541"; // Your API Key (from FxScalpKing App)
-input string   ServerURL         = "https://liquibot-back.onrender.com"; // FxScalpKing Backend URL (NO trailing slash)
-
-// --- TRADE SETTINGS ---
-input double   LotSize           = 0.01;        // Fixed Lot Size
-input int      StopLoss_Points   = 150;         // Stop Loss in Points
-input int      TakeProfit_Points = 300;         // Take Profit in Points
-input int      MaxOpenTrades     = 30;          // Max simultaneous trades
-input int      MagicNumber       = 20250101;    // EA Identifier
-
-// --- EMA SETTINGS ---
-input int      FastEMA_Period    = 8;           // Fast EMA Period
-input int      SlowEMA_Period    = 21;          // Slow EMA Period
-
-// --- BOLLINGER BAND SETTINGS ---
-input int      BB_Period         = 20;          // Bollinger Band Period
-input double   BB_Deviation      = 2.0;         // Bollinger Band Deviation
-input double   SqueezeThreshold  = 0.002;       // Squeeze threshold (% of price)
-
-// --- SESSION FILTER ---
-input bool     UseSessionFilter  = true;        // Only trade during active sessions
-input int      SessionStartHour  = 7;           // Session Start (Server Time)
-input int      SessionEndHour    = 20;          // Session End (Server Time)
-
-// --- RETRACEMENT & STRUCTURE SETTINGS ---
-input double   RetraceMaxFib     = 61.8;        // Max Retracement Fib Level
-input double   MinEMASlope       = 0.15;        // Minimum EMA Slope
-input int      MaxConsecutiveLosses = 2;        // Pause after this many losses in a row 
-input int      CooldownMinutes   = 30;          // How long to pause (minutes)
-
-// --- TRAILING STOP ---
-input bool     UseTrailingStop   = true;        // Enable Trailing Stop
-input int      TrailingStop_Points = 80;        // Trailing Stop Distance in Points
-
-// --- HEARTBEAT SETTINGS ---
-input int      HeartbeatInterval  = 3;          // Heartbeat interval in seconds
+input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
+input string   ServerURL         = "https://liquibot-back.onrender.com";
+input double   LotSize           = 0.01;
+input int      StopLoss_Points   = 150;
+input int      TakeProfit_Points = 300;
+input int      MaxOpenTrades     = 30;
+input int      MagicNumber       = 20250101;
+input int      FastEMA_Period    = 8;
+input int      SlowEMA_Period    = 21;
+input int      BB_Period         = 20;
+input double   BB_Deviation      = 2.0;
+input double   SqueezeThreshold  = 0.002;
+input bool     UseSessionFilter  = true;
+input int      SessionStartHour  = 7;
+input int      SessionEndHour    = 20;
+input bool     UseTrailingStop   = true;
+input int      HeartbeatInterval  = 3;
+input bool     DeleteMitigated   = true;
+input int      MaxZonesTotal     = 30;
+input color    BullColor         = clrLimeGreen;
+input color    BearColor         = clrTomato;
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
 //+------------------------------------------------------------------+
-enum ENUM_MARKET_PHASE {
-   PHASE_TRENDING_BULL,
-   PHASE_TRENDING_BEAR,
-   PHASE_RETRACING,
-   PHASE_RANGING
-};
-
-CTrade         trade;
-CPositionInfo  posInfo;
+CTrade            trade;
+CPositionInfo     posInfo;
 
 int            handle_FastEMA_M5, handle_SlowEMA_M5;
 int            handle_FastEMA_M1, handle_SlowEMA_M1;
 int            handle_BB_M5;
-int            handle_RSI_M5, handle_RSI7_M5, handle_RSI_M1;
-int            handle_ATR_M1, handle_ATR_M5;
+int            handle_RSI7_M5;
+int            handle_ATR_M5;
 
 double         fastEMA_M5[], slowEMA_M5[];
 double         fastEMA_M1[], slowEMA_M1[];
 double         bb_upper[], bb_lower[], bb_middle[];
-double         rsi_M5[], rsi7_M5[], rsi_M1[];
+double         rsi7_M5[];
 
 bool           licenseValid      = false;
-bool           isPaused          = false;
-datetime       lastBarTime_M5   = 0;
-datetime       lastBarTime_M1   = 0;
 datetime       lastHeartbeat    = 0;
-datetime       cooldownUntil    = 0;
-
-double         currentSwingHigh  = 0;
-double         currentSwingLow   = 0;
-
 string         EA_Name           = "FxScalpKing EA v2.0";
 string         licenseExpiry     = "";
 string         licensePlan       = "";
+
+//+------------------------------------------------------------------+
+//| FUNCTION PROTOTYPES                                              |
+//+------------------------------------------------------------------+
+void PerformSMCAnalysis();
+void SendHeartbeat();
+bool GetIndicatorData();
+bool IsWithinSession();
+bool ValidateLicense();
+void ProcessCommand(string cmd);
+void OpenBuy(double sl = 0, double tp = 0);
+void OpenSell(double sl = 0, double tp = 0);
+void DrawZone(string name, datetime t1, double p1, datetime t2, double p2, color clr);
+void DrawKeyLevel(string name, double price, color clr, string txt);
 
 //+------------------------------------------------------------------+
 //| EXPERT INITIALIZATION                                            |
@@ -100,57 +82,33 @@ string         licensePlan       = "";
 int OnInit()
 {
    Print("=== ", EA_Name, " Starting ===");
-   Print("📡 Server URL: ", ServerURL);
-
-   // --- Configure HTTP Client ---
+   
    FxScalpKing.SetServerUrl(ServerURL);
    FxScalpKing.SetApiKey(ApiKey);
 
-   // --- License Validation ---
    if(!ValidateLicense())
    {
-      Alert("❌ Invalid or expired API Key. Please check your subscription at fxscalpking.com");
+      Alert("❌ Invalid or expired API Key.");
       return INIT_FAILED;
    }
    licenseValid = true;
    Print("✅ License validated. Plan: ", licensePlan, " | Expires: ", licenseExpiry);
 
-   // --- Set Magic Number ---
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(10);
 
-   // --- Initialize Indicators on M5 ---
+   // Do not modify chart style/layout to avoid chart shifting.
+
+   // Initialize Indicators
    handle_FastEMA_M5 = iMA(_Symbol, PERIOD_M5, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M5 = iMA(_Symbol, PERIOD_M5, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_BB_M5      = iBands(_Symbol, PERIOD_M5, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
-   handle_RSI_M5     = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
    handle_RSI7_M5    = iRSI(_Symbol, PERIOD_M5, 7, PRICE_CLOSE);
    handle_ATR_M5     = iATR(_Symbol, PERIOD_M5, 14);
-
-   // --- Initialize Indicators on M1 ---
    handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M1 = iMA(_Symbol, PERIOD_M1, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-   handle_RSI_M1     = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
-   handle_ATR_M1     = iATR(_Symbol, PERIOD_M1, 14);
 
-   if(handle_FastEMA_M5 == INVALID_HANDLE || handle_SlowEMA_M5 == INVALID_HANDLE ||
-      handle_BB_M5 == INVALID_HANDLE || handle_FastEMA_M1 == INVALID_HANDLE ||
-      handle_SlowEMA_M1 == INVALID_HANDLE || handle_RSI_M5 == INVALID_HANDLE || handle_RSI_M1 == INVALID_HANDLE || handle_ATR_M1 == INVALID_HANDLE || handle_RSI7_M5 == INVALID_HANDLE || handle_ATR_M5 == INVALID_HANDLE)
-   {
-      Alert("❌ Failed to initialize indicators. Check symbol name.");
-      return INIT_FAILED;
-   }
-
-   Print("✅ Indicators initialized on M1 + M5.");
-   Print("📊 Symbol: ", _Symbol);
-   Print("📦 Lot Size: ", LotSize);
-   Print("🛑 Stop Loss: ", StopLoss_Points, " points");
-   Print("🎯 Take Profit: ", TakeProfit_Points, " points");
-
-   // --- Set Timer for Heartbeat (every HeartbeatInterval seconds) ---
    EventSetTimer(HeartbeatInterval);
-
-   // --- Send initial heartbeat ---
    SendHeartbeat();
 
    return INIT_SUCCEEDED;
@@ -167,10 +125,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(handle_BB_M5);
    IndicatorRelease(handle_FastEMA_M1);
    IndicatorRelease(handle_SlowEMA_M1);
-   IndicatorRelease(handle_RSI_M5);
    IndicatorRelease(handle_RSI7_M5);
-   IndicatorRelease(handle_RSI_M1);
-   IndicatorRelease(handle_ATR_M1);
    IndicatorRelease(handle_ATR_M5);
    Print("=== ", EA_Name, " Stopped ===");
 }
@@ -190,183 +145,119 @@ void OnTimer()
 void OnTick()
 {
    if(!licenseValid) return;
-
-   // --- Session Filter ---
-   if(UseSessionFilter && !IsWithinSession()) return;
-
-   // --- Manage Trailing Stops on every tick ---
-   if(UseTrailingStop) ManageTrailingStop();
-
-   // --- Process Heartbeat & Commands ---
+   
    SendHeartbeat();
-
-   // --- Check Cooldown ---
-   if(cooldownUntil > TimeCurrent()) return;
-
-   // --- Get M5 Data ---
-   if(!GetIndicatorData()) return;
-
-   // --- App Brain handles execution. MT5 just waits for BUY/SELL commands via Heartbeat ---
 }
 
 //+------------------------------------------------------------------+
-//| SWING HIGH / LOW DETECTION                                       |
+//| PERFORM LOCAL SMC ANALYSIS & DRAWING                             |
 //+------------------------------------------------------------------+
-void UpdateSwingHighLow()
+void PerformSMCAnalysis()
 {
-   double high[], low[];
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(low, true);
-   if(CopyHigh(_Symbol, PERIOD_M5, 1, 20, high) < 20) return;
-   if(CopyLow(_Symbol, PERIOD_M5, 1, 20, low) < 20) return;
-
-   // Simple 2-bar pivot detection
-   double maxH = 0;
-   double minL = 999999;
-   
-   for(int i = 2; i < 18; i++) {
-      if(high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
-         if(high[i] > maxH) maxH = high[i];
-      }
-      if(low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
-         if(low[i] < minL) minL = low[i];
+   // 1. Mitigation Check: Disabled for debugging
+   /*
+   if(DeleteMitigated)
+   {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      for(int i = ObjectsTotal(0, 0, OBJ_RECTANGLE) - 1; i >= 0; i--)
+      {
+         string name = ObjectName(0, i, 0, OBJ_RECTANGLE);
+         if(StringFind(name, "SMC_") < 0) continue;
+         double top = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
+         double bottom = ObjectGetDouble(0, name, OBJPROP_PRICE, 1);
+         if(bid <= top && bid >= bottom) ObjectDelete(0, name);
       }
    }
-   
-   if(maxH > 0) currentSwingHigh = maxH;
-   if(minL < 999999) currentSwingLow = minL;
-}
+   */
 
-//+------------------------------------------------------------------+
-//| MARKET PHASE CLASSIFIER                                          |
-//+------------------------------------------------------------------+
-ENUM_MARKET_PHASE GetMarketPhase()
-{
-   double high[], low[];
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(low, true);
-   CopyHigh(_Symbol, PERIOD_M5, 1, 20, high);
-   CopyLow(_Symbol, PERIOD_M5, 1, 20, low);
+   // 2. Freshness Check: Only redraw every 60s (BUT update backend every tick)
+   static datetime lastCleanup = 0;
+   bool shouldRedraw = (TimeCurrent() - lastCleanup >= 60);
+   if(shouldRedraw) lastCleanup = TimeCurrent();
 
-   // Collect last 3 swings
-   double sHighs[3] = {0}, sLows[3] = {999999, 999999, 999999};
-   int hIdx = 0, lIdx = 0;
+   int currentZones = 0;
+   static string lastFinalJson = "{\"orderBlocks\":[],\"keyLevels\":[],\"fvgs\":[],\"marketStructure\":[]}";
    
-   for(int i = 2; i < 18 && (hIdx < 3 || lIdx < 3); i++) {
-      if(hIdx < 3 && high[i] > high[i-1] && high[i] > high[i-2] && high[i] > high[i+1] && high[i] > high[i+2]) {
-         sHighs[hIdx++] = high[i];
-      }
-      if(lIdx < 3 && low[i] < low[i-1] && low[i] < low[i-2] && low[i] < low[i+1] && low[i] < low[i+2]) {
-         sLows[lIdx++] = low[i];
-      }
-   }
-   
-   if(hIdx < 3 || lIdx < 3) return PHASE_RANGING;
+   if(shouldRedraw)
+   {
+      string obJson = "["; string klJson = "[";
+      bool firstOB = true; bool firstKL = true;
+      Print("🔍 Brain: Refreshing SMC Zones...");
 
-   // Check Trending Bull: HH and HL
-   if(sHighs[0] > sHighs[1] && sHighs[1] > sHighs[2] && sLows[0] > sLows[1] && sLows[1] > sLows[2])
-      return PHASE_TRENDING_BULL;
+      ENUM_TIMEFRAMES tfs[] = {PERIOD_H4, PERIOD_H1, PERIOD_M15};
       
-   // Check Trending Bear: LH and LL
-   if(sHighs[0] < sHighs[1] && sHighs[1] < sHighs[2] && sLows[0] < sLows[1] && sLows[1] < sLows[2])
-      return PHASE_TRENDING_BEAR;
+      for(int t = 0; t < ArraySize(tfs); t++)
+      {
+         ENUM_TIMEFRAMES tf = tfs[t];
+         double high[], low[], close[], open[];
+         long volume[];
+         ArraySetAsSeries(high, true); ArraySetAsSeries(low, true);
+         ArraySetAsSeries(close, true); ArraySetAsSeries(open, true);
+         ArraySetAsSeries(volume, true);
+         
+         if(CopyHigh(_Symbol, tf, 0, 100, high) < 50) continue;
+         CopyLow(_Symbol, tf, 0, 100, low);
+         CopyClose(_Symbol, tf, 0, 100, close);
+         CopyOpen(_Symbol, tf, 0, 100, open);
+         CopyTickVolume(_Symbol, tf, 0, 100, volume);
+         
+         string tfStr = (tf == PERIOD_H4) ? "H4" : ((tf == PERIOD_H1) ? "H1" : "M15");
 
-   // Check Retracement using Fib
-   double moveRange = sHighs[0] - sLows[1];
-   if(moveRange > 0) {
-      double retrace = (sHighs[0] - low[1]) / moveRange * 100.0;
-      if(retrace > 38.2 && retrace <= RetraceMaxFib) return PHASE_RETRACING;
-   }
+         // 1. Key Levels (Relaxed Window)
+         int swingWindow = (tf == PERIOD_H4) ? 12 : ((tf == PERIOD_H1) ? 8 : 5);
+         for(int i = swingWindow; i < 90 && currentZones < MaxZonesTotal; i++)
+         {
+            bool isHigh = true, isLow = true;
+            for(int j = 1; j <= swingWindow; j++) {
+               if(high[i] <= high[i-j] || high[i] <= high[i+j]) isHigh = false;
+               if(low[i] >= low[i-j] || low[i] >= low[i+j]) isLow = false;
+            }
 
-   return PHASE_RANGING;
-}
+            if(isHigh || isLow)
+            {
+               double price = isHigh ? high[i] : low[i];
+               string type = isHigh ? "RESISTANCE" : "SUPPORT";
+               string name = "SMC_KL_" + tfStr + "_" + IntegerToString((int)iTime(_Symbol, tf, i));
+               
+               DrawKeyLevel(name, price, isHigh ? BearColor : BullColor, tfStr + (isHigh ? " Res" : " Sup"));
+               currentZones++;
 
-//+------------------------------------------------------------------+
-//| EMA SLOPE CHECK (Momentum)                                       |
-//+------------------------------------------------------------------+
-double CheckEMASlope()
-{
-   double fast[];
-   ArraySetAsSeries(fast, true);
-   if(CopyBuffer(handle_FastEMA_M5, 0, 1, 4, fast) < 4) return 0;
-   
-   // slope in points per bar
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double slope = (fast[0] - fast[3]) / 3.0 / point;
-   return slope;
-}
+               if(!firstKL) klJson += ",";
+               klJson += "{\"type\":\"" + type + "\",\"price\":" + DoubleToString(price, 5) + ",\"tf\":\"" + tfStr + "\",\"label\":\"" + tfStr + " Key Level\"}";
+               firstKL = false;
+            }
+         }
 
-//+------------------------------------------------------------------+
-//| RSI DIVERGENCE CHECK                                             |
-//+------------------------------------------------------------------+
-bool CheckRSIDivergence()
-{
-   double rsi[], low[], high[];
-   ArraySetAsSeries(rsi, true);
-   ArraySetAsSeries(low, true);
-   ArraySetAsSeries(high, true);
-   
-   CopyBuffer(handle_RSI_M5, 0, 1, 10, rsi);
-   CopyLow(_Symbol, PERIOD_M5, 1, 10, low);
-   CopyHigh(_Symbol, PERIOD_M5, 1, 10, high);
-   
-   // Simple recent divergence
-   bool bearishDiv = (high[0] > high[5] && rsi[0] < rsi[5]);
-   bool bullishDiv = (low[0] < low[5] && rsi[0] > rsi[5]);
-   
-   return (bearishDiv || bullishDiv);
-}
+         // 2. Order Blocks (Relaxed Displacement)
+         int tfOBs = 0;
+         for(int i = 1; i < 80 && currentZones < MaxZonesTotal && tfOBs < 4; i++)
+         {
+            double body = MathAbs(close[i] - open[i]);
+            double range = high[i] - low[i];
+            if(range <= 0) range = _Point;
 
-//+------------------------------------------------------------------+
-//| CANDLE BODY CHECK (Avoid Dojis)                                  |
-//+------------------------------------------------------------------+
-bool CheckCandleBody()
-{
-   double open[], close[], high[], low[];
-   ArraySetAsSeries(open, true);
-   ArraySetAsSeries(close, true);
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(low, true);
-   
-   CopyOpen(_Symbol, PERIOD_M5, 1, 1, open);
-   CopyClose(_Symbol, PERIOD_M5, 1, 1, close);
-   CopyHigh(_Symbol, PERIOD_M5, 1, 1, high);
-   CopyLow(_Symbol, PERIOD_M5, 1, 1, low);
-   
-   double body = MathAbs(open[0] - close[0]);
-   double wick = high[0] - low[0];
-   
-   if(wick == 0) return true;
-   return (body / wick) > 0.25; // Body must be at least 25% of the total candle size
-}
-
-//+------------------------------------------------------------------+
-//| GET DAILY VWAP (Intraday)                                        |
-//+------------------------------------------------------------------+
-double GetDailyVWAP()
-{
-   datetime now = TimeCurrent();
-   MqlDateTime dt;
-   TimeToStruct(now, dt);
-   dt.hour = 0; dt.min = 0; dt.sec = 0;
-   datetime startOfDay = StructToTime(dt);
-
-   int bars = iBarShift(_Symbol, PERIOD_M5, startOfDay);
-   if (bars < 0) return 0;
-   
-   double sumPV = 0;
-   long sumV = 0;
-   
-   MqlRates rates[];
-   if (CopyRates(_Symbol, PERIOD_M5, 0, bars + 1, rates) > 0) {
-      for (int i = 0; i <= bars; i++) {
-         double typicalPrice = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
-         sumPV += typicalPrice * rates[i].tick_volume;
-         sumV += rates[i].tick_volume;
+            // Relaxed to 60% displacement
+            if(body > range * 0.6 && volume[i] > volume[i+1])
+            {
+               bool isBull = close[i] > open[i];
+               double top = high[i+1]; double bottom = low[i+1];
+               
+               string name = "SMC_OB_" + tfStr + "_" + (isBull ? "BULL_" : "BEAR_") + IntegerToString((int)iTime(_Symbol, tf, i+1));
+               DrawZone(name, iTime(_Symbol, tf, i+1), top, TimeCurrent() + 14400, bottom, isBull ? BullColor : BearColor);
+               currentZones++; tfOBs++;
+               
+               if(!firstOB) obJson += ",";
+               obJson += "{\"type\":\"" + (string)(isBull ? "BULLISH" : "BEARISH") + "\",\"top\":" + DoubleToString(top, 5) + ",\"bottom\":" + DoubleToString(bottom, 5) + ",\"tf\":\"" + tfStr + "\",\"label\":\"" + tfStr + " OB\"}";
+               firstOB = false;
+            }
+         }
       }
+      klJson += "]"; obJson += "]";
+      lastFinalJson = "{\"orderBlocks\":" + obJson + ",\"keyLevels\":" + klJson + ",\"fvgs\":[],\"marketStructure\":[]}";
+      Print("✅ Brain: Found ", currentZones, " SMC Zones.");
    }
-   if (sumV == 0) return 0;
-   return sumPV / sumV;
+   
+   FxScalpKing.SetStructures(lastFinalJson); 
 }
 
 //+------------------------------------------------------------------+
@@ -374,513 +265,133 @@ double GetDailyVWAP()
 //+------------------------------------------------------------------+
 bool GetIndicatorData()
 {
-   ArraySetAsSeries(fastEMA_M5, true);
-   ArraySetAsSeries(slowEMA_M5, true);
-   ArraySetAsSeries(fastEMA_M1, true);
-   ArraySetAsSeries(slowEMA_M1, true);
-   ArraySetAsSeries(bb_upper,   true);
-   ArraySetAsSeries(bb_lower,   true);
-   ArraySetAsSeries(bb_middle,  true);
-   ArraySetAsSeries(rsi_M5,     true);
-   ArraySetAsSeries(rsi_M1,     true);
+   ArraySetAsSeries(fastEMA_M5, true); ArraySetAsSeries(slowEMA_M5, true);
+   ArraySetAsSeries(fastEMA_M1, true); ArraySetAsSeries(slowEMA_M1, true);
+   ArraySetAsSeries(bb_upper, true); ArraySetAsSeries(bb_lower, true); ArraySetAsSeries(bb_middle, true);
+   ArraySetAsSeries(rsi7_M5, true);
 
    if(CopyBuffer(handle_FastEMA_M5, 0, 0, 3, fastEMA_M5) < 3) return false;
    if(CopyBuffer(handle_SlowEMA_M5, 0, 0, 3, slowEMA_M5) < 3) return false;
-   if(CopyBuffer(handle_BB_M5, UPPER_BAND,  0, 3, bb_upper)  < 3) return false;
-   if(CopyBuffer(handle_BB_M5, LOWER_BAND,  0, 3, bb_lower)  < 3) return false;
-   if(CopyBuffer(handle_BB_M5, BASE_LINE,   0, 3, bb_middle) < 3) return false;
+   if(CopyBuffer(handle_BB_M5, 0, 0, 3, bb_middle) < 3) return false;
+   if(CopyBuffer(handle_BB_M5, 1, 0, 3, bb_upper) < 3) return false;
+   if(CopyBuffer(handle_BB_M5, 2, 0, 3, bb_lower) < 3) return false;
+   if(CopyBuffer(handle_RSI7_M5, 0, 0, 3, rsi7_M5) < 3) return false;
    if(CopyBuffer(handle_FastEMA_M1, 0, 0, 3, fastEMA_M1) < 3) return false;
    if(CopyBuffer(handle_SlowEMA_M1, 0, 0, 3, slowEMA_M1) < 3) return false;
-   if(CopyBuffer(handle_RSI_M5, 0, 0, 3, rsi_M5) < 3) return false;
-   if(CopyBuffer(handle_RSI7_M5, 0, 0, 3, rsi7_M5) < 3) return false;
-   if(CopyBuffer(handle_RSI_M1, 0, 0, 3, rsi_M1) < 3) return false;
 
    return true;
 }
 
 //+------------------------------------------------------------------+
-//| M5 SIGNAL: EMA Crossover                                        |
-//| Returns: 1 = BUY, -1 = SELL, 0 = NO SIGNAL                     |
-//+------------------------------------------------------------------+
-int GetM5Signal()
-{
-   // Bullish crossover: fast crossed above slow on previous bar
-   bool bullishCross = (fastEMA_M5[1] > slowEMA_M5[1]) && (fastEMA_M5[2] <= slowEMA_M5[2]);
-   // Bearish crossover: fast crossed below slow on previous bar
-   bool bearishCross = (fastEMA_M5[1] < slowEMA_M5[1]) && (fastEMA_M5[2] >= slowEMA_M5[2]);
-
-   if(bullishCross) return 1;
-   if(bearishCross) return -1;
-   return 0;
-}
-
-//+------------------------------------------------------------------+
-//| M1 CONFIRMATION: EMA Alignment                                  |
-//| Returns: 1 = BUY confirm, -1 = SELL confirm, 0 = NONE          |
-//+------------------------------------------------------------------+
-int GetM1Confirmation()
-{
-   bool bullish = fastEMA_M1[0] > slowEMA_M1[0];
-   bool bearish = fastEMA_M1[0] < slowEMA_M1[0];
-
-   if(bullish) return 1;
-   if(bearish) return -1;
-   return 0;
-}
-
-//+------------------------------------------------------------------+
-//| BOLLINGER SQUEEZE DETECTION                                      |
-//| Squeeze = Bands are narrow relative to price (low volatility)   |
-//+------------------------------------------------------------------+
-bool IsBollingerSqueeze()
-{
-   double bandWidth = (bb_upper[1] - bb_lower[1]) / bb_middle[1];
-   return (bandWidth <= SqueezeThreshold);
-}
-
-//+------------------------------------------------------------------+
 //| OPEN BUY TRADE                                                   |
 //+------------------------------------------------------------------+
-void OpenBuy(double slPrice = 0, double tpPrice = 0, string comment = "")
+void OpenBuy(double sl = 0, double tp = 0)
 {
-   if(comment == "") comment = EA_Name;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double finalSl = (sl > 0) ? sl : (ask - StopLoss_Points * point);
+   double finalTp = (tp > 0) ? tp : (ask + TakeProfit_Points * point);
 
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
-   {
-      Print("❌ Algo Trading is disabled in MT5 terminal. Please click the 'Algo Trading' button at the top.");
-      return;
-   }
-   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
-   {
-      Print("❌ Trading is disabled for this account by the broker.");
-      return;
-   }
-   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
-   {
-      Print("❌ Algo Trading is disabled for this account by the broker.");
-      return;
-   }
-   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
-   {
-      Print("❌ Trading is disabled for symbol ", _Symbol);
-      return;
-   }
-
-   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   
-   double safeLotSize = LotSize;
-   if(safeLotSize < minVolume) safeLotSize = minVolume;
-   if(safeLotSize > maxVolume) safeLotSize = maxVolume;
-   
-   // Align to volume step
-   int steps = (int)MathRound(safeLotSize / stepVolume);
-   safeLotSize = steps * stepVolume;
-
-   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   
-   double sl = slPrice;
-   double tp = tpPrice;
-
-   if(sl == 0) sl = ask - StopLoss_Points * point;
-   if(tp == 0) tp = ask + TakeProfit_Points * point;
-
-   sl = NormalizeDouble(sl, _Digits);
-   tp = NormalizeDouble(tp, _Digits);
-
-   if(trade.Buy(safeLotSize, _Symbol, ask, sl, tp, comment))
-   {
-      ulong ticket = trade.ResultOrder();
-      Print("✅ BUY opened | Ticket: ", ticket, " | Price: ", ask, " | SL: ", sl, " | TP: ", tp);
-      NotifyTradeExecuted(ticket, "BUY", safeLotSize, ask, sl, tp);
-   }
-   else
-      Print("❌ BUY failed: ", trade.ResultRetcodeDescription());
+   if(trade.Buy(LotSize, _Symbol, ask, finalSl, finalTp, EA_Name))
+      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "BUY", LotSize, ask, finalSl, finalTp, AccountInfoDouble(ACCOUNT_PROFIT));
 }
 
 //+------------------------------------------------------------------+
 //| OPEN SELL TRADE                                                  |
 //+------------------------------------------------------------------+
-void OpenSell(double slPrice = 0, double tpPrice = 0, string comment = "")
+void OpenSell(double sl = 0, double tp = 0)
 {
-   if(comment == "") comment = EA_Name;
-
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
-   {
-      Print("❌ Algo Trading is disabled in MT5 terminal. Please click the 'Algo Trading' button at the top.");
-      return;
-   }
-   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
-   {
-      Print("❌ Trading is disabled for this account by the broker.");
-      return;
-   }
-   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
-   {
-      Print("❌ Algo Trading is disabled for this account by the broker.");
-      return;
-   }
-   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
-   {
-      Print("❌ Trading is disabled for symbol ", _Symbol);
-      return;
-   }
-
-   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   
-   double safeLotSize = LotSize;
-   if(safeLotSize < minVolume) safeLotSize = minVolume;
-   if(safeLotSize > maxVolume) safeLotSize = maxVolume;
-   
-   // Align to volume step
-   int steps = (int)MathRound(safeLotSize / stepVolume);
-   safeLotSize = steps * stepVolume;
-
-   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   
-   double sl = slPrice;
-   double tp = tpPrice;
-
-   if(sl == 0) sl = bid + StopLoss_Points * point;
-   if(tp == 0) tp = bid - TakeProfit_Points * point;
-
-   sl = NormalizeDouble(sl, _Digits);
-   tp = NormalizeDouble(tp, _Digits);
-
-   if(trade.Sell(safeLotSize, _Symbol, bid, sl, tp, comment))
-   {
-      ulong ticket = trade.ResultOrder();
-      Print("✅ SELL opened | Ticket: ", ticket, " | Price: ", bid, " | SL: ", sl, " | TP: ", tp);
-      NotifyTradeExecuted(ticket, "SELL", safeLotSize, bid, sl, tp);
-   }
-   else
-      Print("❌ SELL failed: ", trade.ResultRetcodeDescription());
-}
-
-//+------------------------------------------------------------------+
-//| CLOSE TRADE (Called from App command)                            |
-//+------------------------------------------------------------------+
-bool CloseTrade(ulong ticket)
-{
-   if(!PositionSelectByTicket(ticket))
-   {
-      Print("❌ Position not found: ", ticket);
-      return false;
-   }
-
-   if(trade.PositionClose(ticket))
-   {
-      Print("✅ Position closed: ", ticket);
-      // NotifyTradeClosed(ticket); // Removed to avoid duplicate. OnTradeTransaction will handle it.
-      return true;
-   }
-
-   Print("❌ Failed to close position: ", ticket);
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| TRAILING STOP / BREAKEVEN MANAGER                                |
-//+------------------------------------------------------------------+
-void ManageTrailingStop()
-{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double finalSl = (sl > 0) ? sl : (bid + StopLoss_Points * point);
+   double finalTp = (tp > 0) ? tp : (bid - TakeProfit_Points * point);
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i)) continue;
-      if(posInfo.Symbol() != _Symbol) continue;
-      if(posInfo.Magic() != MagicNumber) continue;
-
-      double currentSL = posInfo.StopLoss();
-      double openPrice = posInfo.PriceOpen();
-      double tp = posInfo.TakeProfit();
-
-      // Strategy: Move SL to entry once 80 points in profit
-      if(posInfo.PositionType() == POSITION_TYPE_BUY)
-      {
-         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         if (bid >= openPrice + 80 * point)
-         {
-            if (currentSL < openPrice)
-            {
-               trade.PositionModify(posInfo.Ticket(), openPrice, tp);
-               Print("🛡️ Moved SL to Breakeven for BUY Ticket: ", posInfo.Ticket());
-            }
-         }
-      }
-      else if(posInfo.PositionType() == POSITION_TYPE_SELL)
-      {
-         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         if (ask <= openPrice - 80 * point)
-         {
-            if (currentSL > openPrice || currentSL == 0.0)
-            {
-               trade.PositionModify(posInfo.Ticket(), openPrice, tp);
-               Print("🛡️ Moved SL to Breakeven for SELL Ticket: ", posInfo.Ticket());
-            }
-         }
-      }
-   }
+   if(trade.Sell(LotSize, _Symbol, bid, finalSl, finalTp, EA_Name))
+      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "SELL", LotSize, bid, finalSl, finalTp, AccountInfoDouble(ACCOUNT_PROFIT));
 }
 
-//+------------------------------------------------------------------+
-//| COUNT OPEN TRADES FOR THIS EA                                    |
-//+------------------------------------------------------------------+
-int CountOpenTrades()
+bool CloseTrade(ulong ticket) { return trade.PositionClose(ticket); }
+
+void CloseAllTrades()
 {
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i)) continue;
-      if(posInfo.Symbol() == _Symbol && posInfo.Magic() == MagicNumber)
-         count++;
-   }
-   return count;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == MagicNumber) trade.PositionClose(posInfo.Ticket());
 }
 
-//+------------------------------------------------------------------+
-//| SESSION TIME FILTER                                              |
-//+------------------------------------------------------------------+
 bool IsWithinSession()
 {
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    return (dt.hour >= SessionStartHour && dt.hour < SessionEndHour);
 }
 
-//+------------------------------------------------------------------+
-//| LICENSE VALIDATION (Backend Call)                                |
-//+------------------------------------------------------------------+
-bool ValidateLicense()
-{
-   if(ApiKey == "" || StringLen(ApiKey) < 8)
-   {
-      Print("❌ License check failed: empty or too short API key.");
-      return false;
-   }
+bool ValidateLicense() { return FxScalpKing.ValidateLicense(licenseExpiry, licensePlan); }
 
-   // Call backend to validate
-   return FxScalpKing.ValidateLicense(licenseExpiry, licensePlan);
-}
-
-//+------------------------------------------------------------------+
-//| SEND HEARTBEAT TO BACKEND                                         |
-//+------------------------------------------------------------------+
 void SendHeartbeat()
 {
    datetime now = TimeCurrent();
-   if(now - lastHeartbeat < HeartbeatInterval)
-      return;
+   if(now - lastHeartbeat < HeartbeatInterval) return;
 
-   // Update indicator data before sending heartbeat
    if(GetIndicatorData()) {
-      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double atr[];
-      CopyBuffer(handle_ATR_M5, 0, 0, 1, atr);
-      int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      long tickVol = iVolume(_Symbol, PERIOD_M5, 0);
-      double dailyVWAP = GetDailyVWAP();
-      FxScalpKing.SetMarketData(currentPrice, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0], rsi7_M5[0], atr[0], dailyVWAP, spread, tickVol);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      FxScalpKing.SetMarketData(bid, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0]);
    }
 
    string commands[];
    if(FxScalpKing.SendHeartbeat(commands))
    {
       lastHeartbeat = now;
-
-      // Process any commands from app
-      for(int i = 0; i < ArraySize(commands); i++)
-      {
-         Print("📱 App command received: ", commands[i]);
-         // Process command (e.g., CLOSE_ALL, CLOSE_TICKET_123)
-         ProcessCommand(commands[i]);
-      }
+      for(int i = 0; i < ArraySize(commands); i++) ProcessCommand(commands[i]);
    }
 }
 
-//+------------------------------------------------------------------+
-//| PROCESS INDIVIDUAL COMMAND                                        |
-//+------------------------------------------------------------------+
 void ProcessCommand(string cmd)
 {
    string parts[];
-   StringSplit(cmd, '|', parts);
-   if(ArraySize(parts) == 0) return;
+   int numParts = StringSplit(cmd, '|', parts);
+   if(numParts == 0) return;
    
    string action = parts[0];
-   double slValue = (ArraySize(parts) > 1) ? StringToDouble(parts[1]) : 0;
-   double tpValue = (ArraySize(parts) > 2) ? StringToDouble(parts[2]) : 0;
+   if(action == "BUY" && numParts >= 3) OpenBuy(StringToDouble(parts[1]), StringToDouble(parts[2]));
+   else if(action == "SELL" && numParts >= 3) OpenSell(StringToDouble(parts[1]), StringToDouble(parts[2]));
+   else if(action == "CLOSE_ALL") CloseAllTrades();
+   else if(action == "SET_TF" && numParts >= 2) FxScalpKing.SetRequestedTf(parts[1]);
+   else if(StringFind(action, "CLOSE_TICKET_") == 0) CloseTrade((ulong)StringToInteger(StringSubstr(action, 13)));
+   else if((action == "DRAW_OB" || action == "DRAW_FVG" || action == "DRAW_KEY_LEVEL" || action == "DRAW_KL") && numParts >= 5) {
+      double top = StringToDouble(parts[1]);
+      double bottom = StringToDouble(parts[2]);
+      string zoneType = parts[3];
+      datetime zTime = (datetime)StringToInteger(parts[4]);
 
-   if(action == "CLOSE_ALL")
-   {
-      CloseAllTrades();
-   }
-   else if(StringFind(action, "CLOSE_TICKET_") == 0)
-   {
-      ulong ticket = (ulong)StringToInteger(StringSubstr(action, 13));
-      CloseTrade(ticket);
-   }
-   else if(action == "BUY")
-   {
-      OpenBuy(slValue, tpValue);
-   }
-   else if(action == "SELL")
-   {
-      OpenSell(slValue, tpValue);
-   }
-   else if(action == "PAUSE")
-   {
-      Print("⏸ EA Paused by app");
-      isPaused = true;
-   }
-   else if(action == "RESUME")
-   {
-      Print("▶ EA Resumed by app");
-      isPaused = false;
-   }
-   else if(action == "DRAW_OB")
-   {
-      // Format: DRAW_OB|top|bottom|type|time
-      if(ArraySize(parts) >= 5) {
-         double top = StringToDouble(parts[1]);
-         double bottom = StringToDouble(parts[2]);
-         string type = parts[3];
-         datetime time = (datetime)StringToInteger(parts[4]);
-         string name = "OB_" + IntegerToString((long)time);
-         DrawZone(name, time, top, TimeCurrent() + PeriodSeconds(PERIOD_M15)*15, bottom, type == "BULLISH" ? clrDarkGreen : clrDarkRed);
+      bool isBull = (zoneType == "BULLISH" || zoneType == "BULL");
+      if(action == "DRAW_KEY_LEVEL" || action == "DRAW_KL")
+      {
+         double lvl = (top > 0.0 ? top : bottom);
+         if(lvl <= 0.0) return;
+         DrawKeyLevel("SMC_KL_" + IntegerToString((int)zTime), lvl, isBull ? BullColor : BearColor, "KL");
       }
-   }
-   else if(action == "DRAW_FVG")
-   {
-      // Format: DRAW_FVG|top|bottom|type|time
-      if(ArraySize(parts) >= 5) {
-         double top = StringToDouble(parts[1]);
-         double bottom = StringToDouble(parts[2]);
-         string type = parts[3];
-         datetime time = (datetime)StringToInteger(parts[4]);
-         string name = "FVG_" + IntegerToString((long)time);
-         DrawZone(name, time, top, TimeCurrent() + PeriodSeconds(PERIOD_M15)*15, bottom, type == "BULLISH" ? clrDarkBlue : clrPurple);
+      else
+      {
+         color clr = isBull ? BullColor : BearColor;
+         if(action == "DRAW_FVG") clr = isBull ? clrBlue : clrRed;
+         DrawZone("SMC_" + action + "_" + parts[4], zTime, top, TimeCurrent() + 3600, bottom, clr);
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| DRAW ZONES ON CHART                                              |
-//+------------------------------------------------------------------+
-void DrawZone(string name, datetime time1, double price1, datetime time2, double price2, color clr)
+void DrawZone(string name, datetime t1, double p1, datetime t2, double p2, color clr)
 {
-   ObjectDelete(0, name); // Ensure old box is removed
-   ObjectCreate(0, name, OBJ_RECTANGLE, 0, time1, price1, time2, price2);
+   ObjectDelete(0, name);
+   ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, MathMax(p1, p2), t2, MathMin(p1, p2));
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ChartRedraw();
 }
 
-//+------------------------------------------------------------------+
-//| CLOSE ALL TRADES                                                 |
-//+------------------------------------------------------------------+
-void CloseAllTrades()
+void DrawKeyLevel(string name, double price, color clr, string txt)
 {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i)) continue;
-      if(posInfo.Symbol() != _Symbol) continue;
-      if(posInfo.Magic() != MagicNumber) continue;
-
-      trade.PositionClose(posInfo.Ticket());
-      Print("✅ Closed all positions");
-   }
+   ObjectDelete(0, name);
+   ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetString(0, name, OBJPROP_TEXT, txt);
 }
-
-//+------------------------------------------------------------------+
-//| NOTIFY TRADE EXECUTED TO BACKEND                                  |
-//+------------------------------------------------------------------+
-void NotifyTradeExecuted(ulong ticket, string type, double volume, double price, double sl, double tp)
-{
-   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
-   FxScalpKing.NotifyTradeExecuted(ticket, type, volume, price, sl, tp, profit);
-}
-
-//+------------------------------------------------------------------+
-//| NOTIFY TRADE CLOSED TO BACKEND                                    |
-//+------------------------------------------------------------------+
-void NotifyTradeClosed(ulong ticket)
-{
-   double profit = 0;
-   if(HistorySelectByPosition(ticket))
-   {
-      profit = HistoryDealGetDouble(HistoryDealGetTicket(HistoryDealsTotal()-1), DEAL_PROFIT);
-   }
-
-   // Update Cooldown if loss
-   if(profit < 0) {
-      int consecutiveLosses = 0;
-      HistorySelect(0, TimeCurrent());
-      for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
-         ulong dealTicket = HistoryDealGetTicket(i);
-         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == MagicNumber && 
-            HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT) {
-            
-            double p = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-            if(p < 0) consecutiveLosses++;
-            else break; // Win breaks the streak
-            
-            if(consecutiveLosses >= MaxConsecutiveLosses) {
-               cooldownUntil = TimeCurrent() + CooldownMinutes * 60;
-               Print("🛑 Cooldown active — resuming at ", TimeToString(cooldownUntil));
-               break;
-            }
-         }
-      }
-   }
-   else if(profit > 0) {
-      cooldownUntil = 0; // Reset on win
-   }
-
-   FxScalpKing.NotifyTradeExecuted(ticket, "CLOSE", 0, 0, 0, 0, profit);
-}
-
-//+------------------------------------------------------------------+
-//| ON TRADE EVENT (MT5)                                             |
-//+------------------------------------------------------------------+
-void OnTrade()
-{
-   // Handled by OnTradeTransaction instead
-}
-
-//+------------------------------------------------------------------+
-//| ON TRADE TRANSACTION (optional: log fills to journal)            |
-//+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeRequest     &request,
-                        const MqlTradeResult      &result)
-{
-   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
-   {
-      Print("📋 Deal executed | Ticket: ", trans.deal,
-            " | Volume: ", trans.volume,
-            " | Price: ", trans.price);
-            
-      if(HistoryDealSelect(trans.deal))
-      {
-         long magic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
-         if(magic == MagicNumber)
-         {
-            long deal_entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-            if(deal_entry == DEAL_ENTRY_OUT)
-            {
-               ulong position_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-               NotifyTradeClosed(position_id);
-            }
-         }
-      }
-   }
-}
-//+------------------------------------------------------------------+
