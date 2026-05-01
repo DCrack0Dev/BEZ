@@ -143,6 +143,75 @@ app.post('/api/ea/update', (req, res) => {
   });
 });
 
+// Signal endpoint (mobile app uses this for trading signals)
+app.get('/api/signal', (req, res) => {
+  const { symbol, tf } = req.query;
+  const apiKey = req.headers['x-api-key'];
+  
+  console.log(`[SIGNAL] Signal request for ${symbol || 'XAUUSD'} ${tf || 'M5'} - API Key: ${apiKey || 'none'}`);
+  
+  // Create test signal based on structures
+  const currentPrice = 4565.58;
+  const testStructures = {
+    orderBlocks: [
+      {
+        type: 'BULLISH',
+        zoneType: 'OB_BULLISH',
+        top: currentPrice - 10,
+        bottom: currentPrice - 15,
+        timeframe: 'M5',
+        time: Date.now() / 1000 - 300,
+        label: 'M5 TEST OB'
+      }
+    ],
+    fvgs: [
+      {
+        type: 'BULLISH',
+        zoneType: 'FVG_BULLISH',
+        top: currentPrice - 5,
+        bottom: currentPrice + 5,
+        timeframe: 'M5',
+        time: Date.now() / 1000 - 600,
+        label: 'M5 TEST FVG'
+      }
+    ],
+    keyLevels: [
+      {
+        type: 'SUPPORT',
+        zoneType: 'KEY_SUPPORT',
+        price: currentPrice - 20,
+        timeframe: 'H1',
+        time: Date.now() / 1000 - 3600,
+        label: 'H1 TEST KL'
+      }
+    ]
+  };
+  
+  // Generate test signal
+  let signal = 'HOLD';
+  let reason = 'Market is neutral - waiting for setup';
+  
+  // Simple signal logic based on structures
+  if (testStructures.orderBlocks.length > 0 && testStructures.fvgs.length > 0) {
+    signal = 'BUY';
+    reason = 'Bullish Order Block + FVG detected - buying opportunity';
+  }
+  
+  res.json({
+    symbol: symbol || 'XAUUSD',
+    tf: tf || 'M5',
+    signal,
+    reason,
+    price: currentPrice,
+    timestamp: Date.now(),
+    structures: {
+      orderBlocks: testStructures.orderBlocks.length,
+      fvgs: testStructures.fvgs.length,
+      keyLevels: testStructures.keyLevels.length
+    }
+  });
+});
+
 // Account endpoint
 app.get('/api/account', (req, res) => {
   const apiKey = req.headers['x-api-key'];
