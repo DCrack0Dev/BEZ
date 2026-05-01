@@ -400,47 +400,12 @@ const findApiKey = (key) => {
 };
 
 // --- TEST ENDPOINT ---
-app.get('/test-structures', (req, res) => {
-  console.log('[TEST] Testing structure calculation with sample data...');
-  
-  const sampleChart = {
-    M5: [
-      { x: 1, open: 100, high: 105, low: 95, close: 103 },
-      { x: 2, open: 103, high: 108, low: 98, close: 97 },
-      { x: 3, open: 97, high: 102, low: 93, close: 95 },
-      { x: 4, open: 95, high: 100, low: 90, close: 92 },
-      { x: 5, open: 92, high: 97, low: 88, close: 94 }
-    ],
-    M15: [
-      { x: 1, open: 100, high: 105, low: 95, close: 103 },
-      { x: 2, open: 103, high: 108, low: 98, close: 97 },
-      { x: 3, open: 97, high: 102, low: 93, close: 95 }
-    ],
-    H1: [
-      { x: 1, open: 100, high: 105, low: 95, close: 103 },
-      { x: 2, open: 103, high: 108, low: 98, close: 97 }
-    ],
-    H4: [
-      { x: 1, open: 100, high: 105, low: 95, close: 103 },
-      { x: 2, open: 103, high: 108, low: 98, close: 97 }
-    ]
-  };
-  
-  const structures = buildStructures(sampleChart);
-  
-  console.log(`[TEST] Results - OBs: ${structures.orderBlocks.length}, FVGs: ${structures.fvgs.length}, Key Levels: ${structures.keyLevels.length}`);
-  
+app.get('/test', (req, res) => {
+  console.log('[TEST] Simple backend test - checking if server is working');
   res.json({
     success: true,
-    structures,
-    debug: {
-      candleCounts: {
-        M5: sampleChart.M5.length,
-        M15: sampleChart.M15.length,
-        H1: sampleChart.H1.length,
-        H4: sampleChart.H4.length
-      }
-    }
+    message: 'Backend is working',
+    timestamp: new Date().toISOString()
   });
 });
 
