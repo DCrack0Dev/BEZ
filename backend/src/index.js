@@ -965,4 +965,5 @@ app.get('/api/signal', (req, res) => {
 app.listen(PORT, () => {
   console.log(`FxScalpKing Backend running on http://localhost:${PORT}`);
   console.log(`EA Endpoints ready for MT5 connection`);
+  console.log(`Structure calculation fixed - v2.0`);
 });
