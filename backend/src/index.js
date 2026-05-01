@@ -1217,9 +1217,9 @@ app.get('/api/signal', (req, res) => {
       const latestBearishOB = bearishOBs[0];
       
       // Check if price is below recent bearish order block
-      if (latestPrice < latestBearishOB.price * 0.998) {
+      if (latestPrice < latestBearishOB.top * 0.998) {
         signal = 'SELL';
-        reason = `Price below bearish OB at ${latestBearishOB.price}`;
+        reason = `Price below bearish OB at ${latestBearishOB.top}`;
       }
     }
     
