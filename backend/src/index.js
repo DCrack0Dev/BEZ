@@ -267,6 +267,8 @@ const buildStructures = (chart) => {
   const h1 = normalizeTfCandles(chart, 'H1');
   const h4 = normalizeTfCandles(chart, 'H4');
 
+  console.log(`[STRUCTURES] Candle counts - M5: ${m5.length}, M15: ${m15.length}, H1: ${h1.length}, H4: ${h4.length}`);
+
   const msH4 = analyzeMarketStructure(h4, 'H4');
   const msH1 = analyzeMarketStructure(h1, 'H1');
   const msM15 = analyzeMarketStructure(m15, 'M15');
@@ -274,27 +276,35 @@ const buildStructures = (chart) => {
   // Prioritize higher timeframe for overall trend
   const trend = msH4.trend !== 'NEUTRAL' ? msH4.trend : (msH1.trend !== 'NEUTRAL' ? msH1.trend : msM15.trend);
 
+  const orderBlocks = [
+    ...detectOrderBlocks(h4, 'H4'),
+    ...detectOrderBlocks(h1, 'H1'),
+    ...detectOrderBlocks(m15, 'M15'),
+    ...detectOrderBlocks(m5, 'M5'),
+  ].slice(0, 30);
+
+  const fvgs = [
+    ...detectFvgs(h1, 'H1'),
+    ...detectFvgs(m15, 'M15'),
+    ...detectFvgs(m5, 'M5'),
+  ].slice(0, 30);
+
+  const keyLevels = [
+    ...detectKeyLevels(h4, 'H4', 5),
+    ...detectKeyLevels(h1, 'H1', 4),
+    ...detectKeyLevels(m15, 'M15', 4),
+    ...detectKeyLevels(m5, 'M5', 3),
+  ].slice(0, 40);
+
+  console.log(`[STRUCTURES] Detection results - OBs: ${orderBlocks.length}, FVGs: ${fvgs.length}, Key Levels: ${keyLevels.length}`);
+
   return {
     trend,
     marketStructure: [...msH1.structure, ...msM15.structure],
     swings: [...msH1.swings, ...msM15.swings],
-    orderBlocks: [
-      ...detectOrderBlocks(h4, 'H4'),
-      ...detectOrderBlocks(h1, 'H1'),
-      ...detectOrderBlocks(m15, 'M15'),
-      ...detectOrderBlocks(m5, 'M5'),
-    ].slice(0, 30),
-    fvgs: [
-      ...detectFvgs(h1, 'H1'),
-      ...detectFvgs(m15, 'M15'),
-      ...detectFvgs(m5, 'M5'),
-    ].slice(0, 30),
-    keyLevels: [
-      ...detectKeyLevels(h4, 'H4', 5),
-      ...detectKeyLevels(h1, 'H1', 4),
-      ...detectKeyLevels(m15, 'M15', 4),
-      ...detectKeyLevels(m5, 'M5', 3),
-    ].slice(0, 40),
+    orderBlocks,
+    fvgs,
+    keyLevels,
   };
 };
 
