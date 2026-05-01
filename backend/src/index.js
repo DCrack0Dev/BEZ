@@ -68,7 +68,7 @@ const normalizeTfCandles = (chart, tf) => {
       close: toNumber(c.close, 0),
     }))
     .filter((c) => c.x > 0 && c.high >= c.low)
-    .sort((a, b) => b.x - a.x); // newest first
+    .sort((a, b) => a.x - b.x); // chronological order (oldest first)
 };
 
 const detectOrderBlocks = (candles, timeframe) => {
