@@ -1,28 +1,33 @@
 {
   "expo": {
-    "name": "FxScalpKing",
+    "name": "FX ScalpKing",
     "slug": "fx-scalpking-app",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.scalpking.app"
+      "supportsTablet": true
     },
     "android": {
-      "package": "com.scalpking.app"
+      "package": "com.demi.fxscalpking",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      }
     },
-    "updates": {
-      "enabled": false
-    },
-    "web": {
-    },
-    "plugins": [
-      "expo-notifications",
-      "expo-secure-store"
-    ]
+    "extra": {
+      "eas": {
+        "projectId": "fbadec78-98b1-49cb-97b1-c5d46a1cc227"
+      }
+    }
   }
 }
