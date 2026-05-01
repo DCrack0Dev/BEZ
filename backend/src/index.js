@@ -212,6 +212,44 @@ app.get('/api/signal', (req, res) => {
   });
 });
 
+// Order endpoint (mobile app uses this for manual trades)
+app.post('/api/order', (req, res) => {
+  const { apiKey, action, symbol, type, lots, sl, tp, top, bottom, zoneType, time, confidence, reason } = req.body;
+  
+  console.log(`[ORDER] Manual trade request: ${action} ${symbol} lots:${lots}`);
+  
+  // Validate API key
+  if (!apiKey || !apiKey.toLowerCase().startsWith('fxsk-')) {
+    return res.status(401).json({ error: 'Invalid API Key' });
+  }
+  
+  // Queue command for EA
+  const command = {
+    id: Date.now(),
+    action: action || type,
+    symbol,
+    type,
+    lots,
+    sl,
+    tp,
+    top,
+    bottom,
+    zoneType,
+    time,
+    confidence: confidence || 1.0,
+    reason: reason || 'APP_MANUAL',
+    createdAt: new Date().toISOString()
+  };
+  
+  console.log(`[ORDER] Command queued for EA: ${command.action} ${command.symbol}`);
+  
+  res.json({
+    success: true,
+    message: 'Command queued for EA',
+    commandId: command.id
+  });
+});
+
 // Account endpoint
 app.get('/api/account', (req, res) => {
   const apiKey = req.headers['x-api-key'];
