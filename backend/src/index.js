@@ -538,9 +538,47 @@ app.post('/api/ea/update', (req, res) => {
     console.log(`[BRAIN] ⚡ Queuing ${commandObjs.length} commands for EA execution:`, commandObjs.map(c => c.action).join(', '));
   }
   
-  // Convert structures into DRAW commands ONLY if the EA isn't handling them locally
-  // (In this version, we let the EA handle its own drawings, but we can still send specific alerts)
+  // Convert structures into DRAW commands for EA to render on chart
   const drawCommands = [];
+  
+  // Convert Order Blocks to DRAW commands
+  backendStructures.orderBlocks.forEach((ob, index) => {
+    drawCommands.push({
+      action: 'DRAW_OB',
+      top: ob.top,
+      bottom: ob.bottom,
+      zoneType: ob.zoneType,
+      time: ob.time,
+      label: ob.label
+    });
+    console.log(`[DRAW] Converting OB to command: ${ob.label}`);
+  });
+  
+  // Convert FVGs to DRAW commands
+  backendStructures.fvgs.forEach((fvg, index) => {
+    drawCommands.push({
+      action: 'DRAW_FVG',
+      top: fvg.top,
+      bottom: fvg.bottom,
+      zoneType: fvg.zoneType,
+      time: fvg.time,
+      label: fvg.label
+    });
+    console.log(`[DRAW] Converting FVG to command: ${fvg.label}`);
+  });
+  
+  // Convert Key Levels to DRAW commands
+  backendStructures.keyLevels.forEach((kl, index) => {
+    drawCommands.push({
+      action: 'DRAW_KL',
+      top: kl.price,
+      bottom: kl.price,
+      zoneType: kl.zoneType,
+      time: kl.time,
+      label: kl.label
+    });
+    console.log(`[DRAW] Converting KL to command: ${kl.label}`);
+  });
   
   // Add a special command to tell the EA which timeframe we want
   drawCommands.push({
