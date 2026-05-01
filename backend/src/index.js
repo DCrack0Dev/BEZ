@@ -57,39 +57,50 @@ app.post('/api/ea/update', (req, res) => {
   
   console.log(`[HEARTBEAT] ❤️ Received update from EA (${apiKey}) - Symbol: ${accountData?.eaSymbol || '???'} Price: ${accountData?.price || '???'}`);
   
-  // Create forced test structures
+  // Create minimal important structures only for H1 and M15
   const currentPrice = accountData?.price || 4565.58;
   const testStructures = {
     orderBlocks: [
+      // Only 1 important H1 Order Block
       {
         type: 'BULLISH',
         zoneType: 'OB_BULLISH',
-        top: currentPrice - 10,
-        bottom: currentPrice - 15,
-        timeframe: 'M5',
-        time: Date.now() / 1000 - 300,
-        label: 'M5 TEST OB'
+        top: currentPrice - 15,
+        bottom: currentPrice - 25,
+        timeframe: 'H1',
+        time: Date.now() / 1000 - 3600,
+        label: 'H1 KEY OB'
       }
     ],
     fvgs: [
+      // Only 1 important M15 FVG
       {
         type: 'BULLISH',
         zoneType: 'FVG_BULLISH',
-        top: currentPrice - 5,
-        bottom: currentPrice + 5,
-        timeframe: 'M5',
-        time: Date.now() / 1000 - 600,
-        label: 'M5 TEST FVG'
+        top: currentPrice - 8,
+        bottom: currentPrice + 8,
+        timeframe: 'M15',
+        time: Date.now() / 1000 - 1800,
+        label: 'M15 KEY FVG'
       }
     ],
     keyLevels: [
+      // Only 2 important Key Levels (1 support, 1 resistance)
       {
         type: 'SUPPORT',
         zoneType: 'KEY_SUPPORT',
-        price: currentPrice - 20,
+        price: currentPrice - 30,
         timeframe: 'H1',
-        time: Date.now() / 1000 - 3600,
-        label: 'H1 TEST KL'
+        time: Date.now() / 1000 - 7200,
+        label: 'H1 KEY SUP'
+      },
+      {
+        type: 'RESISTANCE',
+        zoneType: 'KEY_RESISTANCE',
+        price: currentPrice + 25,
+        timeframe: 'H1',
+        time: Date.now() / 1000 - 7200,
+        label: 'H1 KEY RES'
       }
     ]
   };
