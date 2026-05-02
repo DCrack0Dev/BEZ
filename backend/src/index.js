@@ -207,18 +207,8 @@ app.get('/api/account', (req, res) => {
   
   res.json({
     ...accountState,
-    chart: {
-      M5: generateChartData('M5'),
-      M15: generateChartData('M15'),
-      H1: generateChartData('H1'),
-      H4: generateChartData('H4')
-    },
-    structures: {
-      M5: generateStructures('M5'),
-      M15: generateStructures('M15'),
-      H1: generateStructures('H1'),
-      H4: generateStructures('H4')
-    }
+    chart: {}, // Empty chart data - will be populated by real EA data
+    structures: {} // Empty structures - will be populated by real EA data
   });
 });
 
