@@ -75,6 +75,102 @@ app.post('/api/auth/validate', (req, res) => {
 app.get('/api/account', (req, res) => {
   console.log(`[ACCOUNT] Mobile app requesting account data`);
   
+  const currentPrice = 4565.58;
+  const now = Date.now();
+  
+  // Generate sample chart data for different timeframes
+  const generateChartData = (timeframe, candleCount = 200) => {
+    const data = [];
+    let basePrice = currentPrice;
+    const candleInterval = timeframe === 'M5' ? 300000 : timeframe === 'M15' ? 900000 : timeframe === 'H1' ? 3600000 : 14400000;
+    
+    for (let i = candleCount - 1; i >= 0; i--) {
+      const timestamp = now - (i * candleInterval);
+      const volatility = timeframe === 'M5' ? 0.5 : timeframe === 'M15' ? 0.8 : 1.2;
+      const random = Math.random() - 0.5;
+      const change = random * volatility;
+      
+      const open = basePrice;
+      const close = basePrice + change;
+      const high = Math.max(open, close) + Math.random() * 0.3;
+      const low = Math.min(open, close) - Math.random() * 0.3;
+      
+      data.push({
+        x: timestamp / 1000, // Unix timestamp in seconds
+        open: parseFloat(open.toFixed(5)),
+        high: parseFloat(high.toFixed(5)),
+        low: parseFloat(low.toFixed(5)),
+        close: parseFloat(close.toFixed(5))
+      });
+      
+      basePrice = close;
+    }
+    
+    return data;
+  };
+  
+  // Generate structures for each timeframe
+  const generateStructures = (timeframe) => ({
+    orderBlocks: [
+      {
+        type: 'BULLISH',
+        zoneType: 'OB_BULLISH',
+        top: currentPrice - 12,
+        bottom: currentPrice - 20,
+        timeframe: timeframe,
+        time: now / 1000 - 1800,
+        label: `${timeframe} OB`
+      },
+      {
+        type: 'BEARISH',
+        zoneType: 'OB_BEARISH',
+        top: currentPrice + 20,
+        bottom: currentPrice + 12,
+        timeframe: timeframe,
+        time: now / 1000 - 3600,
+        label: `${timeframe} OB`
+      }
+    ],
+    fvgs: [
+      {
+        type: 'BULLISH',
+        zoneType: 'FVG_BULLISH',
+        top: currentPrice - 6,
+        bottom: currentPrice + 6,
+        timeframe: timeframe,
+        time: now / 1000 - 900,
+        label: `${timeframe} FVG`
+      },
+      {
+        type: 'BEARISH',
+        zoneType: 'FVG_BEARISH',
+        top: currentPrice + 6,
+        bottom: currentPrice - 6,
+        timeframe: timeframe,
+        time: now / 1000 - 1800,
+        label: `${timeframe} FVG`
+      }
+    ],
+    keyLevels: [
+      {
+        type: 'HIGHER_HIGH',
+        zoneType: 'HH_H1',
+        price: currentPrice + 35,
+        timeframe: 'H1',
+        time: now / 1000 - 7200,
+        label: 'H1 HH'
+      },
+      {
+        type: 'LOWER_LOW',
+        zoneType: 'LL_H1',
+        price: currentPrice - 40,
+        timeframe: 'H1',
+        time: now / 1000 - 7200,
+        label: 'H1 LL'
+      }
+    ]
+  });
+  
   res.json({
     balance: 10000,
     equity: 10243,
@@ -84,19 +180,39 @@ app.get('/api/account', (req, res) => {
     profit: 243,
     pnl_today: 243,
     ea_connected: true,
+    eaSymbol: 'XAUUSD',
+    price: currentPrice,
+    fastEMA: 4568.23,
+    slowEMA: 4562.87,
+    bbUpper: 4575.50,
+    bbLower: 4550.25,
+    rsi: 58.4,
+    chart: {
+      M5: generateChartData('M5'),
+      M15: generateChartData('M15'),
+      H1: generateChartData('H1'),
+      H4: generateChartData('H4')
+    },
     positions: [
       {
         ticket: "123456",
-        symbol: "EURUSD",
+        symbol: "XAUUSD",
         type: "BUY",
         volume: 0.1,
-        priceOpen: 1.0850,
-        priceCurrent: 1.0875,
-        profit: 25.00,
-        swap: 0.50,
-        time: Date.now() - 3600000
+        openPrice: 4560.25,
+        sl: 4550.00,
+        tp: 4580.00,
+        profit: 52.33,
+        swap: 0.15,
+        time: now - 3600000
       }
     ],
+    structures: {
+      M5: generateStructures('M5'),
+      M15: generateStructures('M15'),
+      H1: generateStructures('H1'),
+      H4: generateStructures('H4')
+    },
     lastSeen: new Date().toISOString()
   });
 });
