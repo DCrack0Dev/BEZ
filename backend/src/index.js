@@ -172,15 +172,15 @@ app.get('/api/account', (req, res) => {
   });
   
   res.json({
-    balance: 10000,
-    equity: 10243,
+    balance: 200000,
+    equity: 205000,
     margin: 0,
-    freeMargin: 10243,
+    freeMargin: 205000,
     marginLevel: 0,
-    profit: 243,
-    pnl_today: 243,
+    profit: 5000,
+    pnl_today: 5000,
     ea_connected: true,
-    eaSymbol: 'XAUUSD',
+    eaSymbol: 'BTCUSD',
     price: currentPrice,
     fastEMA: 4568.23,
     slowEMA: 4562.87,
@@ -196,7 +196,7 @@ app.get('/api/account', (req, res) => {
     positions: [
       {
         ticket: "123456",
-        symbol: "XAUUSD",
+        symbol: "BTCUSD",
         type: "BUY",
         volume: 0.1,
         openPrice: 4560.25,
