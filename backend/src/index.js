@@ -46,6 +46,61 @@ app.post('/api/ea/validate', (req, res) => {
   });
 });
 
+// Mobile app auth validation endpoint
+app.post('/api/auth/validate', (req, res) => {
+  const { apiKey } = req.body;
+  
+  console.log(`[AUTH] Mobile app validation request for API Key: ${apiKey || 'none'}`);
+  
+  // Temporarily accept any API key that starts with FXSK-
+  if (!apiKey || !apiKey.toLowerCase().startsWith('fxsk-')) {
+    console.log(`[AUTH] Invalid API Key format: ${apiKey}`);
+    return res.status(401).json({
+      valid: false,
+      error: 'Invalid API Key'
+    });
+  }
+  
+  console.log(`[AUTH] API Key validated successfully`);
+  
+  res.json({
+    token: 'mock-jwt-token-' + Date.now(),
+    valid: true,
+    expiry: '2026-12-31',
+    plan: 'PAID'
+  });
+});
+
+// Mobile app account data endpoint
+app.get('/api/account', (req, res) => {
+  console.log(`[ACCOUNT] Mobile app requesting account data`);
+  
+  res.json({
+    balance: 10000,
+    equity: 10243,
+    margin: 0,
+    freeMargin: 10243,
+    marginLevel: 0,
+    profit: 243,
+    pnl_today: 243,
+    ea_connected: true,
+    positions: [
+      {
+        ticket: "123456",
+        symbol: "EURUSD",
+        type: "BUY",
+        volume: 0.1,
+        priceOpen: 1.0850,
+        priceCurrent: 1.0875,
+        profit: 25.00,
+        swap: 0.50,
+        time: Date.now() - 3600000
+      }
+    ],
+    lastSeen: new Date().toISOString()
+  });
+});
+
 // Basic heartbeat endpoint
 app.post('/api/ea/update', (req, res) => {
   const { apiKey, accountData } = req.body;
