@@ -5,6 +5,27 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// In-memory state for positions and account
+let accountState = {
+  balance: 200000,
+  equity: 205000,
+  margin: 0,
+  freeMargin: 205000,
+  marginLevel: 0,
+  profit: 5000,
+  pnl_today: 5000,
+  ea_connected: true,
+  eaSymbol: 'BTCUSD',
+  price: 4565.58,
+  fastEMA: 4568.23,
+  slowEMA: 4562.87,
+  bbUpper: 4575.50,
+  bbLower: 4550.25,
+  rsi: 58.4,
+  positions: [],
+  lastSeen: new Date().toISOString()
+};
+
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -75,7 +96,7 @@ app.post('/api/auth/validate', (req, res) => {
 app.get('/api/account', (req, res) => {
   console.log(`[ACCOUNT] Mobile app requesting account data`);
   
-  const currentPrice = 4565.58;
+  const currentPrice = accountState.price;
   const now = Date.now();
   
   // Generate sample chart data for different timeframes
@@ -171,50 +192,197 @@ app.get('/api/account', (req, res) => {
     ]
   });
   
+  // Calculate equity based on current positions
+  let totalProfit = 0;
+  accountState.positions.forEach(pos => {
+    // Simple profit calculation (mock)
+    const priceDiff = (currentPrice - pos.openPrice) * (pos.type === 'BUY' ? 1 : -1);
+    pos.profit = priceDiff * pos.volume * 100000; // Mock calculation
+    totalProfit += pos.profit;
+  });
+  
+  accountState.profit = totalProfit;
+  accountState.equity = accountState.balance + totalProfit;
+  accountState.pnl_today = totalProfit;
+  
   res.json({
-    balance: 200000,
-    equity: 205000,
-    margin: 0,
-    freeMargin: 205000,
-    marginLevel: 0,
-    profit: 5000,
-    pnl_today: 5000,
-    ea_connected: true,
-    eaSymbol: 'BTCUSD',
-    price: currentPrice,
-    fastEMA: 4568.23,
-    slowEMA: 4562.87,
-    bbUpper: 4575.50,
-    bbLower: 4550.25,
-    rsi: 58.4,
+    ...accountState,
     chart: {
       M5: generateChartData('M5'),
       M15: generateChartData('M15'),
       H1: generateChartData('H1'),
       H4: generateChartData('H4')
     },
-    positions: [
-      {
-        ticket: "123456",
-        symbol: "BTCUSD",
-        type: "BUY",
-        volume: 0.1,
-        openPrice: 4560.25,
-        sl: 4550.00,
-        tp: 4580.00,
-        profit: 52.33,
-        swap: 0.15,
-        time: now - 3600000
-      }
-    ],
     structures: {
       M5: generateStructures('M5'),
       M15: generateStructures('M15'),
       H1: generateStructures('H1'),
       H4: generateStructures('H4')
-    },
-    lastSeen: new Date().toISOString()
+    }
   });
+});
+
+// Order management endpoints
+app.post('/api/order', (req, res) => {
+  const { action, symbol, type, lots, sl, tp, ticket, apiKey } = req.body;
+  
+  console.log(`[ORDER] ${action} request for ${symbol} - Type: ${type} - Lots: ${lots}`);
+  
+  // Handle different order actions
+  switch (action) {
+    case 'BUY':
+    case 'SELL':
+      // Open a new position
+      const newTicket = Math.floor(Math.random() * 1000000).toString();
+      const newPosition = {
+        ticket: newTicket,
+        symbol: symbol || 'BTCUSD',
+        type: action,
+        volume: lots || 0.1,
+        openPrice: accountState.price, // Use current price
+        sl: sl || 0,
+        tp: tp || 0,
+        profit: 0,
+        swap: 0,
+        time: Date.now()
+      };
+      
+      // Add to account state
+      accountState.positions.push(newPosition);
+      accountState.lastSeen = new Date().toISOString();
+      
+      console.log(`[ORDER] Opened ${action} position: ${newTicket}`);
+      return res.json({
+        success: true,
+        ticket: newTicket,
+        message: `${action} order placed successfully`,
+        position: newPosition
+      });
+      
+    case 'CLOSE_TRADE':
+      // Close a specific position
+      console.log(`[ORDER] Closing position: ${ticket}`);
+      const positionIndex = accountState.positions.findIndex(pos => pos.ticket === ticket);
+      
+      if (positionIndex !== -1) {
+        const closedPosition = accountState.positions[positionIndex];
+        const profit = closedPosition.profit || (Math.random() * 200 - 100); // Mock profit/loss
+        
+        // Remove from positions
+        accountState.positions.splice(positionIndex, 1);
+        
+        // Update balance with profit/loss
+        accountState.balance += profit;
+        accountState.lastSeen = new Date().toISOString();
+        
+        return res.json({
+          success: true,
+          ticket: ticket,
+          message: 'Position closed successfully',
+          profit: profit
+        });
+      } else {
+        return res.status(404).json({
+          success: false,
+          message: 'Position not found'
+        });
+      }
+      
+    case 'CLOSE_ALL':
+      // Close all positions
+      console.log(`[ORDER] Closing all positions for ${symbol}`);
+      const positionsToClose = symbol 
+        ? accountState.positions.filter(pos => pos.symbol === symbol)
+        : [...accountState.positions];
+      
+      let totalProfit = 0;
+      positionsToClose.forEach(pos => {
+        totalProfit += pos.profit || (Math.random() * 200 - 100);
+      });
+      
+      // Remove closed positions
+      if (symbol) {
+        accountState.positions = accountState.positions.filter(pos => pos.symbol !== symbol);
+      } else {
+        accountState.positions = [];
+      }
+      
+      // Update balance
+      accountState.balance += totalProfit;
+      accountState.lastSeen = new Date().toISOString();
+      
+      return res.json({
+        success: true,
+        message: 'All positions closed successfully',
+        closedCount: positionsToClose.length,
+        profit: totalProfit
+      });
+      
+    case 'RESUME':
+    case 'PAUSE':
+      // Auto-trading control
+      console.log(`[ORDER] Auto-trading ${action} for ${symbol}`);
+      return res.json({
+        success: true,
+        message: `Auto-trading ${action}d successfully`
+      });
+      
+    case 'DRAW_OB':
+      // Draw order block
+      console.log(`[ORDER] Drawing Order Block for ${symbol}`);
+      return res.json({
+        success: true,
+        message: 'Order Block drawn successfully'
+      });
+      
+    case 'DRAW_FVG':
+      // Draw fair value gap
+      console.log(`[ORDER] Drawing FVG for ${symbol}`);
+      return res.json({
+        success: true,
+        message: 'FVG drawn successfully'
+      });
+      
+    default:
+      return res.status(400).json({
+        success: false,
+        message: `Unknown action: ${action}`
+      });
+  }
+});
+
+// Get closed orders endpoint
+app.get('/api/orders/closed', (req, res) => {
+  const { filter } = req.query;
+  console.log(`[ORDERS] Getting closed orders with filter: ${filter}`);
+  
+  // Mock closed orders data
+  const closedOrders = [
+    {
+      ticket: "123450",
+      symbol: "BTCUSD",
+      type: "BUY",
+      volume: 0.1,
+      openPrice: 4550.00,
+      closePrice: 4565.00,
+      profit: 150.00,
+      openTime: Date.now() - 7200000, // 2 hours ago
+      closeTime: Date.now() - 3600000  // 1 hour ago
+    },
+    {
+      ticket: "123449",
+      symbol: "BTCUSD",
+      type: "SELL",
+      volume: 0.05,
+      openPrice: 4570.00,
+      closePrice: 4555.00,
+      profit: 75.00,
+      openTime: Date.now() - 10800000, // 3 hours ago
+      closeTime: Date.now() - 7200000   // 2 hours ago
+    }
+  ];
+  
+  res.json(closedOrders);
 });
 
 // Basic heartbeat endpoint
