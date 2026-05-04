@@ -1,0 +1,23 @@
+FxScalpKing EA Setup Instructions
+==================================
+
+1. Copy the ea-template.mq5 file to your MT5 Experts folder
+2. Open the file in MetaEditor
+3. Change "FXSK-YOUR-API-KEY" to your actual API key
+4. Compile the EA
+5. Attach the EA to any chart in MT5
+6. The EA will automatically connect to the backend
+
+Default Settings:
+- Server URL: https://liquibot-back.onrender.com
+- Update Interval: 5 seconds
+- API Key: FXSK-YOUR-API-KEY (change this)
+
+What the EA Does:
+- Sends account balance, equity, profit
+- Sends open positions with real P&L
+- Sends technical indicators (EMA, RSI, ATR, BB)
+- Sends market structures (order blocks, FVGs)
+- Receives trading commands from the app
+
+No other configuration needed!
