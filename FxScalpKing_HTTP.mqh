@@ -287,7 +287,7 @@ public:
          
          if(PositionGetString(POSITION_SYMBOL) != _Symbol)
             continue;
-         if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         if(PositionGetInteger(POSITION_MAGIC) != 20250101)
             continue;
             
          if(!first) json += ",";
