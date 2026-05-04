@@ -65,7 +65,7 @@ app.post('/api/ea/update', (req, res) => {
     accountState.price = accountData.price || accountState.price;
     accountState.positions = accountData.positions || accountState.positions;
     accountState.ea_connected = true;
-    accountState.eaSymbol = accountData.symbol || accountData.eaSymbol || 'BTCUSD';
+    accountState.eaSymbol = accountData.symbol || accountState.eaSymbol || 'BTCUSD';
     accountState.fastEMA = accountData.fastEMA || 0;
     accountState.slowEMA = accountData.slowEMA || 0;
     accountState.bbUpper = accountData.bbUpper || 0;
@@ -76,15 +76,23 @@ app.post('/api/ea/update', (req, res) => {
     accountState.spread = accountData.spread || 0;
     accountState.tickVolume = accountData.tickVolume || 0;
     
-    // Calculate real P&L from EA data
+    // Store structures from EA
+    if (testStructures) {
+      accountState.structures = testStructures;
+    }
+    
+    // Calculate real P&L from EA data (use EA's profit values)
     let totalProfit = 0;
     accountState.positions.forEach(pos => {
-      if (pos.profit) {
+      if (pos.profit && typeof pos.profit === 'number') {
         totalProfit += pos.profit;
       }
     });
     accountState.profit = totalProfit;
     accountState.pnl_today = totalProfit;
+    
+    // Update equity properly (balance + floating P&L)
+    accountState.equity = accountState.balance + totalProfit;
   }
   
   res.json({
@@ -98,21 +106,7 @@ app.post('/api/ea/update', (req, res) => {
 app.get('/api/account', (req, res) => {
   console.log('[ACCOUNT] Account data requested');
   
-  // Calculate current P&L from open positions
-  let totalProfit = 0;
-  accountState.positions.forEach(pos => {
-    const currentPrice = accountState.price || 4565.58;
-    const priceDiff = pos.type === 'BUY' 
-      ? currentPrice - pos.openPrice 
-      : pos.openPrice - currentPrice;
-    pos.profit = priceDiff * pos.volume * 100000;
-    totalProfit += pos.profit;
-  });
-  
-  accountState.profit = totalProfit;
-  accountState.equity = accountState.balance + totalProfit;
-  accountState.pnl_today = totalProfit;
-  
+  // Return current account state with real EA data
   res.json(accountState);
 });
 
