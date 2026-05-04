@@ -2,27 +2,36 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, RefreshControl, Alert } from 'react-native';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { useLogStore } from '../store/useLogStore';
 import { placeOrder, closeOrder } from '../api/orders';
 import AccountCard from '../components/AccountCard';
 import TradeButton from '../components/TradeButton';
 import PositionCard from '../components/PositionCard';
 import ConfirmModal from '../components/ConfirmModal';
 import SkeletonLoader from '../components/SkeletonLoader';
+import Terminal from '../components/Terminal';
 import { COLORS } from '../theme/colors';
 import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
 import { usePolling } from '../hooks/usePolling';
+import { logApp } from '../store/useLogStore';
 
 const DashboardScreen = () => {
   const { account, openPositions, isLoading } = useTradeStore();
   const { botSettings } = useSettingsStore();
+  const { logs, keyLevelDistance, clearLogs } = useLogStore();
   const [refreshing, setRefreshing] = useState(false);
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [pendingOrder, setPendingOrder] = useState<{ type: 'BUY' | 'SELL', symbol: string } | null>(null);
 
-  const selectedSymbol = account.eaSymbol || 'XAUUSD';
+  const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'BTCUSD';
 
   const { refresh } = usePolling();
+
+  // Log dashboard events
+  useEffect(() => {
+    logApp('Dashboard loaded', 'info', `Positions: ${openPositions.length}, Symbol: ${selectedSymbol}`);
+  }, [openPositions.length, selectedSymbol]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -38,25 +47,34 @@ const DashboardScreen = () => {
   const handleConfirmOrder = async () => {
     if (!pendingOrder) return;
     setConfirmVisible(false);
+    
+    logApp(`Placing ${pendingOrder.type} order`, 'info', `Symbol: ${pendingOrder.symbol}, Lots: ${botSettings.defaultLots}`);
+    
     try {
       await placeOrder({
         symbol: pendingOrder.symbol,
         type: pendingOrder.type,
         lots: botSettings.defaultLots
       });
+      logApp(`Order sent successfully`, 'success', `${pendingOrder.type} ${pendingOrder.symbol}`);
       Alert.alert('Success', 'Order Sent Successfully');
       refresh();
     } catch (error) {
+      logApp(`Order failed`, 'error', error as string);
       Alert.alert('Error', 'Failed to place order');
     }
   };
 
   const handleClosePosition = async (ticket: string) => {
+    logApp(`Closing position`, 'info', `Ticket: ${ticket}`);
+    
     try {
       await closeOrder(ticket);
+      logApp(`Position closed successfully`, 'success', `Ticket: ${ticket}`);
       Alert.alert('Success', 'Position Closed');
       refresh();
     } catch (error) {
+      logApp(`Position close failed`, 'error', error as string);
       Alert.alert('Error', 'Failed to close position');
     }
   };
@@ -130,6 +148,12 @@ const DashboardScreen = () => {
           )}
         </View>
       </ScrollView>
+
+      <Terminal 
+        logs={logs} 
+        onClear={clearLogs}
+        keyLevelDistance={keyLevelDistance}
+      />
 
       {pendingOrder && (
         <ConfirmModal

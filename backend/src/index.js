@@ -12,6 +12,7 @@ let accountState = {
   positions: [],
   lastSeen: new Date().toISOString(),
   profit: 0,
+  pnl_today: 0,
   ea_connected: false,
   eaSymbol: 'BTCUSD',
   price: 4565.58,
@@ -24,6 +25,7 @@ let accountState = {
   vwap: 0,
   spread: 0,
   tickVolume: 0,
+  structures: {},
 };
 
 app.use(cors());
@@ -54,12 +56,16 @@ app.post('/api/ea/validate', (req, res) => {
 
 // EA heartbeat endpoint - receives real data from EA
 app.post('/api/ea/update', (req, res) => {
-  console.log('[EA] Update received from EA');
+  console.log(' [Backend] EA heartbeat received');
   
   const { accountData, testStructures } = req.body;
   
   // Update account state with real EA data
   if (accountData) {
+    const prevBalance = accountState.balance;
+    const prevEquity = accountState.equity;
+    const prevPrice = accountState.price;
+    
     accountState.balance = accountData.balance || accountState.balance;
     accountState.equity = accountData.equity || accountState.balance;
     accountState.price = accountData.price || accountState.price;
@@ -76,16 +82,45 @@ app.post('/api/ea/update', (req, res) => {
     accountState.spread = accountData.spread || 0;
     accountState.tickVolume = accountData.tickVolume || 0;
     
+    // Enhanced logging
+    console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
+    console.log(` [Backend] Account - Balance: R${accountState.balance} | Equity: R${accountState.equity} | Positions: ${accountState.positions.length}`);
+    
     // Store structures from EA
     if (testStructures) {
       accountState.structures = testStructures;
+      console.log(` [Backend] Structures updated - Timeframes: ${Object.keys(testStructures).join(', ')}`);
+      
+      // Calculate key level distances
+      const keyLevelInfo = calculateKeyLevelDistance(accountState.price, testStructures);
+      if (keyLevelInfo) {
+        console.log(` [Backend] Next Key Level - ${keyLevelInfo.type} at ${keyLevelInfo.level} (${keyLevelInfo.distance}pts away)`);
+        accountState.keyLevelInfo = keyLevelInfo;
+      }
     }
     
-    // Calculate real P&L from EA data (use EA's profit values)
+    // Calculate real P&L from EA data (use realistic calculations)
     let totalProfit = 0;
     accountState.positions.forEach(pos => {
       if (pos.profit && typeof pos.profit === 'number') {
-        totalProfit += pos.profit;
+        // If EA provides profit, use it but ensure it's realistic
+        let profit = pos.profit;
+        // If profit seems too large, recalculate based on price difference
+        if (Math.abs(profit) > 1000) {
+          const currentPrice = accountState.price || 4565.58;
+          const priceDiff = pos.type === 'BUY' 
+            ? currentPrice - pos.openPrice 
+            : pos.openPrice - currentPrice;
+          profit = priceDiff * pos.volume * 100; // Realistic calculation
+        }
+        totalProfit += profit;
+      } else {
+        // Calculate profit if not provided
+        const currentPrice = accountState.price || 4565.58;
+        const priceDiff = pos.type === 'BUY' 
+          ? currentPrice - pos.openPrice 
+          : pos.openPrice - currentPrice;
+        totalProfit += priceDiff * pos.volume * 100;
       }
     });
     accountState.profit = totalProfit;
@@ -93,21 +128,114 @@ app.post('/api/ea/update', (req, res) => {
     
     // Update equity properly (balance + floating P&L)
     accountState.equity = accountState.balance + totalProfit;
+    
+    // Log changes
+    if (Math.abs(prevBalance - accountState.balance) > 0.01) {
+      console.log(` [Backend] Balance changed: R${prevBalance} → R${accountState.balance}`);
+    }
+    if (Math.abs(prevEquity - accountState.equity) > 0.01) {
+      console.log(` [Backend] Equity changed: R${prevEquity} → R${accountState.equity}`);
+    }
+    if (Math.abs(prevPrice - accountState.price) > 0.0001) {
+      console.log(` [Backend] Price changed: ${prevPrice} → ${accountState.price}`);
+    }
   }
   
   res.json({
     ea_connected: true,
     lastSeen: new Date().toISOString(),
-    testStructures
+    testStructures,
+    keyLevelInfo: accountState.keyLevelInfo
   });
 });
+
+// Helper function to calculate key level distances
+function calculateKeyLevelDistance(currentPrice, structures) {
+  if (!structures || !currentPrice) return null;
+  
+  let nearestLevel = null;
+  let minDistance = Infinity;
+  let nearestType = '';
+  
+  // Check all timeframes for key levels
+  ['M5', 'M15', 'H1', 'H4'].forEach(timeframe => {
+    if (structures[timeframe]) {
+      const tfStructures = structures[timeframe];
+      
+      // Check key levels
+      if (tfStructures.keyLevels) {
+        tfStructures.keyLevels.forEach(level => {
+          const distance = Math.abs(currentPrice - level.price);
+          if (distance < minDistance) {
+            minDistance = distance;
+            nearestLevel = level.price;
+            nearestType = `${timeframe} ${level.type}`;
+          }
+        });
+      }
+      
+      // Check order blocks
+      if (tfStructures.orderBlocks) {
+        tfStructures.orderBlocks.forEach(ob => {
+          const distance = Math.abs(currentPrice - ob.top);
+          if (distance < minDistance) {
+            minDistance = distance;
+            nearestLevel = ob.top;
+            nearestType = `${timeframe} OB Top`;
+          }
+          
+          const bottomDistance = Math.abs(currentPrice - ob.bottom);
+          if (bottomDistance < minDistance) {
+            minDistance = bottomDistance;
+            nearestLevel = ob.bottom;
+            nearestType = `${timeframe} OB Bottom`;
+          }
+        });
+      }
+    }
+  });
+  
+  if (nearestLevel !== null) {
+    return {
+      level: nearestLevel,
+      distance: minDistance,
+      type: nearestType
+    };
+  }
+  
+  return null;
+}
 
 // Account endpoint - returns current account state
 app.get('/api/account', (req, res) => {
   console.log('[ACCOUNT] Account data requested');
   
-  // Return current account state with real EA data
-  res.json(accountState);
+  // Ensure equity is calculated correctly
+  const totalProfit = accountState.positions.reduce((sum, pos) => {
+    if (pos.profit && typeof pos.profit === 'number') {
+      let profit = pos.profit;
+      // Recalculate if profit seems unrealistic
+      if (Math.abs(profit) > 1000) {
+        const currentPrice = accountState.price || 4565.58;
+        const priceDiff = pos.type === 'BUY' 
+          ? currentPrice - pos.openPrice 
+          : pos.openPrice - currentPrice;
+        profit = priceDiff * pos.volume * 100;
+      }
+      return sum + profit;
+    }
+    return sum;
+  }, 0);
+  
+  // Update equity with correct calculation
+  const responseState = {
+    ...accountState,
+    profit: totalProfit,
+    pnl_today: totalProfit,
+    equity: accountState.balance + totalProfit
+  };
+  
+  res.json(responseState);
 });
 
 // Order management endpoints

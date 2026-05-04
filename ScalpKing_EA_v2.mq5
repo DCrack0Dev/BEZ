@@ -211,13 +211,13 @@ void SendHeartbeat()
    if(now - lastHeartbeat < HeartbeatInterval) return;
 
    if(!GetIndicatorData()) {
-      Print("❌ Failed to get indicator data for heartbeat");
+      Print("❌ [EA] Failed to get indicator data for heartbeat");
       return;
    }
    
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(currentPrice <= 0) {
-      Print("❌ Invalid price data for heartbeat");
+      Print("❌ [EA] Invalid price data for heartbeat");
       return;
    }
    
@@ -235,16 +235,39 @@ void SendHeartbeat()
    double bbl = (ArraySize(bb_lower) > 0) ? bb_lower[0] : 0;
    double r7 = (ArraySize(rsi7_M5) > 0) ? rsi7_M5[0] : 0;
 
+   // Enhanced logging
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+   int positions = PositionsTotal();
+   
+   Print("📊 [EA] Market Data - Price: ", DoubleToString(currentPrice, 5), 
+         " | EMA: ", DoubleToString(fEMA, 5), "/", DoubleToString(sEMA, 5),
+         " | RSI: ", DoubleToString(r7, 2),
+         " | ATR: ", DoubleToString(atr_val, 5));
+   
+   Print("💰 [EA] Account - Balance: ", DoubleToString(balance, 2),
+         " | Equity: ", DoubleToString(equity, 2),
+         " | Profit: ", DoubleToString(profit, 2),
+         " | Positions: ", IntegerToString(positions));
+   
+   Print("📡 [EA] Sending heartbeat to backend...");
+   
    FxScalpKing.SetMarketData(currentPrice, fEMA, sEMA, bbu, bbl, r7, atr_val, 0, spread, tickVol);
 
    string commands[];
    if(FxScalpKing.SendHeartbeat(commands))
    {
       lastHeartbeat = now;
-      Print("✅ Heartbeat sent successfully. Commands received: ", ArraySize(commands));
-      for(int i = 0; i < ArraySize(commands); i++) ProcessCommand(commands[i]);
+      Print("✅ [EA] Heartbeat sent successfully. Commands received: ", ArraySize(commands));
+      
+      // Log received commands
+      for(int i = 0; i < ArraySize(commands); i++) {
+         Print("🎯 [EA] Command received: ", commands[i]);
+         ProcessCommand(commands[i]);
+      }
    } else {
-      Print("❌ Failed to send heartbeat to server");
+      Print("❌ [EA] Failed to send heartbeat to server");
    }
 }
 
@@ -258,32 +281,66 @@ void ProcessCommand(string cmd)
    if(numParts == 0) return;
    
    string action = parts[0];
-   if(action == "BUY" && numParts >= 3) OpenBuy(StringToDouble(parts[1]), StringToDouble(parts[2]));
-   else if(action == "SELL" && numParts >= 3) OpenSell(StringToDouble(parts[1]), StringToDouble(parts[2]));
-   else if(action == "CLOSE_ALL") CloseAllTrades();
-   else if(action == "SET_TF" && numParts >= 2) FxScalpKing.SetRequestedTf(parts[1]);
-   else if(StringFind(action, "CLOSE_TICKET_") == 0) CloseTrade((ulong)StringToInteger(StringSubstr(action, 13)));
+   
+   // Enhanced command logging
+   Print("🎯 [EA] Processing command: ", action);
+   
+   if(action == "BUY" && numParts >= 3) {
+      double price = StringToDouble(parts[1]);
+      double sl = StringToDouble(parts[2]);
+      Print("💹 [EA] BUY command - Price: ", DoubleToString(price, 5), " SL: ", DoubleToString(sl, 5));
+      OpenBuy(price, sl);
+   }
+   else if(action == "SELL" && numParts >= 3) {
+      double price = StringToDouble(parts[1]);
+      double sl = StringToDouble(parts[2]);
+      Print("📉 [EA] SELL command - Price: ", DoubleToString(price, 5), " SL: ", DoubleToString(sl, 5));
+      OpenSell(price, sl);
+   }
+   else if(action == "CLOSE_ALL") {
+      Print("❌ [EA] CLOSE_ALL command - Closing all positions");
+      CloseAllTrades();
+   }
+   else if(action == "SET_TF" && numParts >= 2) {
+      Print("⏱️ [EA] SET_TF command - New timeframe: ", parts[1]);
+      FxScalpKing.SetRequestedTf(parts[1]);
+   }
+   else if(StringFind(action, "CLOSE_TICKET_") == 0) {
+      ulong ticket = (ulong)StringToInteger(StringSubstr(action, 13));
+      Print("🎫 [EA] CLOSE_TICKET command - Ticket: ", IntegerToString((long)ticket));
+      CloseTrade(ticket);
+   }
    else if((action == "DRAW_OB" || action == "DRAW_FVG" || action == "DRAW_KEY_LEVEL" || action == "DRAW_KL") && numParts >= 5) {
       double top = StringToDouble(parts[1]);
       double bottom = StringToDouble(parts[2]);
       string zoneType = parts[3];
       datetime zTime = (datetime)StringToInteger(parts[4]);
 
-      if(!IsSignificantPOI(top, bottom, zTime, action)) return;
+      Print("📐 [EA] DRAW command - ", action, " | Type: ", zoneType, " | Top: ", DoubleToString(top, 5), " | Bottom: ", DoubleToString(bottom, 5));
+
+      if(!IsSignificantPOI(top, bottom, zTime, action)) {
+         Print("⚠️ [EA] POI not significant, skipping");
+         return;
+      }
 
       bool isBull = (zoneType == "BULLISH" || zoneType == "BULL");
       if(action == "DRAW_KEY_LEVEL" || action == "DRAW_KL")
       {
          double lvl = (top > 0.0 ? top : bottom);
          if(lvl <= 0.0) return;
+         Print("📍 [EA] Drawing key level at: ", DoubleToString(lvl, 5));
          DrawKeyLevel("SMC_KL_" + IntegerToString((int)zTime), lvl, isBull ? clrLimeGreen : clrTomato, "KL");
       }
       else
       {
          color clr = isBull ? clrForestGreen : clrFireBrick;
          if(action == "DRAW_FVG") clr = isBull ? clrRoyalBlue : clrMediumVioletRed;
+         Print("🔲 [EA] Drawing zone: ", action, " | Color: ", isBull ? "Bullish" : "Bearish");
          DrawZone("SMC_" + action + "_" + parts[4], zTime, top, TimeCurrent() + 3600, bottom, clr);
       }
+   }
+   else {
+      Print("❓ [EA] Unknown command: ", action);
    }
 }
 
