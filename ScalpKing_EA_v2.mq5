@@ -310,9 +310,9 @@ void DrawZone(string name, datetime t1, double p1, datetime t2, double p2, color
    // Check if object already exists with same properties to avoid spam
    if(ObjectFind(0, name) >= 0) {
       double existing_top = ObjectGetDouble(0, name, OBJPROP_PRICE);
-      double existing_bottom = ObjectGetDouble(0, name, OBJPROP_PRICE2);
+      double existing_bottom = ObjectGetDouble(0, name, OBJPROP_PRICE, 1);
       datetime existing_time1 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME);
-      datetime existing_time2 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME2);
+      datetime existing_time2 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
       color existing_color = (color)ObjectGetInteger(0, name, OBJPROP_COLOR);
       
       // If properties are the same, don't redraw
