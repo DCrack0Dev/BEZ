@@ -141,11 +141,20 @@ app.post('/api/ea/update', (req, res) => {
     }
   }
   
+  // Send pending commands to EA
+  let commandsToSend = [];
+  if (pendingCommands.length > 0) {
+    commandsToSend = [...pendingCommands];
+    pendingCommands = []; // Clear the queue
+    console.log(`[BACKEND] Sending ${commandsToSend.length} commands to EA:`, commandsToSend.map(c => c.command).join(', '));
+  }
+  
   res.json({
     ea_connected: true,
     lastSeen: new Date().toISOString(),
     testStructures,
-    keyLevelInfo: accountState.keyLevelInfo
+    keyLevelInfo: accountState.keyLevelInfo,
+    commands: commandsToSend.map(cmd => cmd.command) // Send only command strings to EA
   });
 });
 
@@ -238,108 +247,95 @@ app.get('/api/account', (req, res) => {
   res.json(responseState);
 });
 
+// Command queue for EA
+let pendingCommands = [];
+
 // Order management endpoints
 app.post('/api/order', (req, res) => {
-  const { action, symbol, type, lots, sl, tp, ticket, apiKey } = req.body;
+  const { action, symbol, type, lots, sl, tp, ticket, apiKey, top, bottom, zoneType, time, price, levelType } = req.body;
   
-  console.log(`[ORDER] ${action} request for ${symbol} - Type: ${type} - Lots: ${lots}`);
+  console.log(`[ORDER] ${action || type} request for ${symbol} - Type: ${type} - Lots: ${lots}`);
   
-  // Handle different order actions
-  switch (action) {
+  // Default API key if not provided
+  const effectiveApiKey = apiKey || 'FXSK-DEFAULT-KEY-2025';
+  
+  // Build command string for EA based on action type
+  let commandString = '';
+  
+  switch (action || type) {
     case 'BUY':
+      commandString = `BUY|${sl || 0}|${tp || 0}`;
+      break;
+      
     case 'SELL':
-      // Open a new position
-      const newTicket = Math.floor(Math.random() * 1000000).toString();
-      const newPosition = {
-        ticket: newTicket,
-        symbol: symbol || 'BTCUSD',
-        type: action,
-        volume: lots || 0.1,
-        openPrice: accountState.price, // Use current price
-        sl: sl || 0,
-        tp: tp || 0,
-        profit: 0,
-        swap: 0,
-        time: Date.now()
-      };
-      
-      // Add to account state
-      accountState.positions.push(newPosition);
-      accountState.lastSeen = new Date().toISOString();
-      
-      console.log(`[ORDER] Opened ${action} position: ${newTicket}`);
-      return res.json({
-        success: true,
-        ticket: newTicket,
-        message: `${action} order placed successfully`,
-        position: newPosition
-      });
+      commandString = `SELL|${sl || 0}|${tp || 0}`;
+      break;
       
     case 'CLOSE_TRADE':
-      // Close a specific position
-      console.log(`[ORDER] Closing position: ${ticket}`);
-      const positionIndex = accountState.positions.findIndex(pos => pos.ticket === ticket);
-      
-      if (positionIndex !== -1) {
-        const closedPosition = accountState.positions[positionIndex];
-        const profit = closedPosition.profit || (Math.random() * 200 - 100); // Use real profit if available
-        
-        // Remove from positions
-        accountState.positions.splice(positionIndex, 1);
-        
-        // Update balance with profit/loss
-        accountState.balance += profit;
-        accountState.lastSeen = new Date().toISOString();
-        
-        console.log(`[ORDER] Closed position ${ticket} with profit: ${profit}`);
-        return res.json({
-          success: true,
-          ticket: ticket,
-          message: 'Position closed successfully',
-          profit: profit
-        });
-      } else {
-        return res.status(404).json({
-          success: false,
-          message: 'Position not found'
-        });
-      }
+      commandString = `CLOSE_TICKET_${ticket}`;
+      break;
       
     case 'CLOSE_ALL':
-      // Close all positions
-      console.log(`[ORDER] Closing all positions for ${symbol}`);
-      const positionsToClose = symbol 
-        ? accountState.positions.filter(pos => pos.symbol === symbol)
-        : [...accountState.positions];
+      commandString = `CLOSE_ALL`;
+      break;
       
-      let totalProfit = 0;
-      positionsToClose.forEach(pos => {
-        totalProfit += pos.profit || (Math.random() * 200 - 100);
-      });
+    case 'DRAW_OB':
+      commandString = `DRAW_OB|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
+      break;
       
-      // Remove closed positions
-      if (symbol) {
-        accountState.positions = accountState.positions.filter(pos => pos.symbol !== symbol);
-      } else {
-        accountState.positions = [];
-      }
+    case 'DRAW_FVG':
+      commandString = `DRAW_FVG|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
+      break;
       
-      // Update balance
-      accountState.balance += totalProfit;
-      accountState.lastSeen = new Date().toISOString();
+    case 'DRAW_KEY_LEVEL':
+      commandString = `DRAW_KEY_LEVEL|${price}|${levelType || 'support'}`;
+      break;
       
-      return res.json({
-        success: true,
-        message: 'All positions closed',
-        totalProfit: totalProfit
-      });
+    case 'RESUME':
+      commandString = 'RESUME';
+      break;
+      
+    case 'PAUSE':
+      commandString = 'PAUSE';
+      break;
       
     default:
+      console.log(`[ORDER] Unknown action: ${action || type}`);
       return res.status(400).json({
         success: false,
-        message: 'Invalid order action'
+        message: 'Unknown action'
       });
   }
+  
+  // Add command to pending queue for EA
+  const command = {
+    action: action || type,
+    command: commandString,
+    symbol: symbol || 'BTCUSD',
+    lots: lots || 0.1,
+    sl: sl || 0,
+    tp: tp || 0,
+    ticket: ticket,
+    top: top,
+    bottom: bottom,
+    zoneType: zoneType,
+    time: time,
+    price: price,
+    levelType: levelType,
+    createdAt: new Date().toISOString()
+  };
+  
+  pendingCommands.push(command);
+  
+  console.log(`[ORDER] Command queued for EA: ${commandString}`);
+  console.log(`[ORDER] Pending commands: ${pendingCommands.length}`);
+  
+  res.json({
+    success: true,
+    message: 'Command queued for EA execution',
+    command: commandString,
+    pendingCount: pendingCommands.length
+  });
 });
 
 // Closed orders endpoint
