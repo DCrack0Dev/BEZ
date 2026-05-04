@@ -9,10 +9,10 @@ export const getOpenOrders = async () => {
     symbol: pos.symbol,
     type: pos.type,
     lots: pos.volume || 0,
-    openPrice: pos.price || 0,
+    openPrice: pos.openPrice || pos.price || 0,
     currentPrice: response.data.price || pos.price || 0,
     pnl: pos.profit || 0,
-    openTime: new Date().toISOString(), // Mock if not provided by EA
+    openTime: pos.time ? new Date(pos.time).toISOString() : new Date().toISOString(),
   }));
 };
 
@@ -31,6 +31,8 @@ export const placeOrder = async (orderData: {
   bottom?: number;
   zoneType?: string;
   time?: number;
+  price?: number;
+  levelType?: string;
 }) => {
   const { apiKey } = useAuthStore.getState();
   const payload = {
