@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: liquibot-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run start
+    healthCheckPath: /test
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
