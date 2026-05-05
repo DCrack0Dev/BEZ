@@ -165,7 +165,8 @@ app.post('/api/ea/update', (req, res) => {
     lastSeen: new Date().toISOString(),
     structures: accountState.structures,
     keyLevelInfo: accountState.keyLevelInfo,
-    commands: commandsToSend.map(cmd => cmd.command) // Send only command strings to EA
+    commands: commandsToSend, // EA parser expects command objects
+    commandStrings: commandsToSend.map(cmd => cmd.command)
   });
 });
 
