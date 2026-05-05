@@ -8,11 +8,11 @@ export const getOpenOrders = async () => {
     ticket: String(pos.ticket),
     symbol: pos.symbol,
     type: pos.type,
-    lots: pos.volume || 0,
+    lots: pos.volume || pos.lots || 0,
     openPrice: pos.openPrice || pos.price || 0,
     currentPrice: response.data.price || pos.price || 0,
     pnl: pos.profit || 0,
-    openTime: pos.time ? new Date(pos.time).toISOString() : new Date().toISOString(),
+    openTime: pos.time ? new Date(Number(pos.time) * 1000).toISOString() : new Date().toISOString(),
   }));
 };
 

@@ -66,7 +66,7 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   console.log(' [Backend] EA heartbeat received');
   
-  const { accountData, testStructures, structures } = req.body;
+  const { accountData, testStructures, structures, positions } = req.body;
   
   // Update account state with real EA data
   if (accountData) {
@@ -77,7 +77,8 @@ app.post('/api/ea/update', (req, res) => {
     accountState.balance = accountData.balance || accountState.balance;
     accountState.equity = accountData.equity || accountState.balance;
     accountState.price = accountData.price || accountState.price;
-    accountState.positions = accountData.positions || accountState.positions;
+    // MT5 EA sends positions at top-level; keep accountData fallback for compatibility
+    accountState.positions = positions || accountData.positions || accountState.positions;
     accountState.ea_connected = true;
     accountState.eaSymbol = accountData.symbol || accountState.eaSymbol || 'BTCUSD';
     accountState.fastEMA = accountData.fastEMA || 0;
