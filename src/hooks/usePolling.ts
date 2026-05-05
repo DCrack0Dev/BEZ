@@ -406,19 +406,7 @@ export const usePolling = () => {
         const spread = accountData.spread || 0;
         const equity = accountData.equity || 1000;
         
-        // Basic filters
-        if (spread > 35 || atr > 6.0) {
-          return; // Skip if spread too wide or volatility too high
-        }
-        
-        // Session filter (London/NY overlap)
-        if (botSettings.sessionFilterEnabled) {
-          const now = new Date();
-          const hourGMT = now.getUTCHours();
-          if (hourGMT < 8 || hourGMT >= 17) {
-            return; // Trade only during active sessions
-          }
-        }
+        // ATR upper cap removed to keep volatility filter permissive.
         
         // Daily loss limit
         const dailyLossLimit = accountData.balance * 0.03;
@@ -456,60 +444,46 @@ export const usePolling = () => {
           
           // PURE SMC ENTRY LOGIC
           if (signal === 'NONE' && totalOpen < maxOpenTrades) {
-            // Check if price is at SMC level
             const isAtLevel = isAtSMCLevel(price, sortedChart);
+            const priceSlowing = detectPriceSlowing(sortedChart, 3);
+            const volumeFalling = detectVolumeFalling(sortedChart, 3);
+            const strengthDecreasing = detectStrengthDecrease(sortedChart, 3);
+            const rejection = detectRejection(sortedChart);
+            const sweep = detectSweep(sortedChart, 10);
             
-            if (isAtLevel) {
-              console.log(`📍 Price at SMC level: ${price}`);
-              
-              // Detect SMC conditions
-              const priceSlowing = detectPriceSlowing(sortedChart, 3);
-              const volumeFalling = detectVolumeFalling(sortedChart, 3);
-              const strengthDecreasing = detectStrengthDecrease(sortedChart, 3);
-              const rejection = detectRejection(sortedChart);
-              const sweep = detectSweep(sortedChart, 10);
-              
-              console.log(`🔍 SMC Analysis: Slowing=${priceSlowing}, Volume=${volumeFalling}, Strength=${strengthDecreasing}, Rejection=${rejection}, Sweep=${sweep}`);
-              
-              // Need at least 2/3 momentum confirmations
-              const momentumScore = [priceSlowing, volumeFalling, strengthDecreasing].filter(Boolean).length;
+            console.log(`🔍 SMC Analysis: AtLevel=${isAtLevel}, Slowing=${priceSlowing}, Volume=${volumeFalling}, Strength=${strengthDecreasing}, Rejection=${rejection}, Sweep=${sweep}, Spread=${spread}, ATR=${atr}`);
+            
+            // Need at least 2/3 momentum confirmations; SMC level is optional.
+            const momentumScore = [priceSlowing, volumeFalling, strengthDecreasing].filter(Boolean).length;
 
-              // BUY CONDITIONS
-              if (rejection === 'BULLISH_REJECTION' || sweep === 'LOW_SWEEP') {
-                if (momentumScore >= 2) {
-                  const swingLows = findSwingLows(sortedChart);
-                  const potentialSL = swingLows.length > 0 ? swingLows[0].val : price - atr;
-                  const potentialTP = price + (atr * 2);
-                  
-                  const risk = price - potentialSL;
-                  const reward = potentialTP - price;
-                  
-                  if (risk > 0 && (reward / risk) >= 2.0) {
-                    signal = 'BUY';
-                    slPrice = potentialSL;
-                    tpPrice = potentialTP;
-                    console.log(`🟢 PURE SMC BUY - Rejection/Sweep confirmed at level`);
-                  }
-                }
-              }
+            // BUY CONDITIONS
+            if ((rejection === 'BULLISH_REJECTION' || sweep === 'LOW_SWEEP') && momentumScore >= 2) {
+              const swingLows = findSwingLows(sortedChart);
+              const swingHighs = findSwingHighs(sortedChart);
+              const potentialSL = swingLows.length > 0 ? swingLows[0].val : price - Math.max(atr, 0.5);
+              // Requested behavior: TP for longs based on recent low.
+              const potentialTP = swingLows.length > 1 ? swingLows[1].val : (swingLows.length > 0 ? swingLows[0].val : price - Math.max(atr, 0.5));
               
-              // SELL CONDITIONS
-              else if (rejection === 'BEARISH_REJECTION' || sweep === 'HIGH_SWEEP') {
-                if (momentumScore >= 2) {
-                  const swingHighs = findSwingHighs(sortedChart);
-                  const potentialSL = swingHighs.length > 0 ? swingHighs[0].val : price + atr;
-                  const potentialTP = price - (atr * 2);
-                  
-                  const risk = potentialSL - price;
-                  const reward = price - potentialTP;
-                  
-                  if (risk > 0 && (reward / risk) >= 2.0) {
-                    signal = 'SELL';
-                    slPrice = potentialSL;
-                    tpPrice = potentialTP;
-                    console.log(`🔴 PURE SMC SELL - Rejection/Sweep confirmed at level`);
-                  }
-                }
+              if (potentialSL > 0 && potentialTP > 0 && swingHighs.length >= 0) {
+                signal = 'BUY';
+                slPrice = potentialSL;
+                tpPrice = potentialTP;
+                console.log(`🟢 PURE SMC BUY - Rejection/Sweep + momentum confirmed`);
+              }
+            }
+            
+            // SELL CONDITIONS
+            else if ((rejection === 'BEARISH_REJECTION' || sweep === 'HIGH_SWEEP') && momentumScore >= 2) {
+              const swingHighs = findSwingHighs(sortedChart);
+              const potentialSL = swingHighs.length > 0 ? swingHighs[0].val : price + Math.max(atr, 0.5);
+              // Requested behavior: TP for shorts based on recent high.
+              const potentialTP = swingHighs.length > 1 ? swingHighs[1].val : (swingHighs.length > 0 ? swingHighs[0].val : price + Math.max(atr, 0.5));
+              
+              if (potentialSL > 0 && potentialTP > 0) {
+                signal = 'SELL';
+                slPrice = potentialSL;
+                tpPrice = potentialTP;
+                console.log(`🔴 PURE SMC SELL - Rejection/Sweep + momentum confirmed`);
               }
             }
           }
