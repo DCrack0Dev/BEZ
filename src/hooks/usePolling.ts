@@ -200,16 +200,17 @@ const detectRejection = (chart: Candle[]): 'BULLISH_REJECTION' | 'BEARISH_REJECT
   
   const latest = chart[0];
   const previous = chart[1];
+  const body = Math.abs(latest.close - latest.open);
+  const upperWick = latest.high - Math.max(latest.open, latest.close);
+  const lowerWick = Math.min(latest.open, latest.close) - latest.low;
   
-  // Bullish rejection (long upper wick, close near low)
-  if (latest.high > previous.high && latest.close < latest.open && 
-      (latest.high - latest.close) > (latest.close - latest.low) * 2) {
+  // Bullish rejection: sweep low + strong lower wick
+  if (latest.low < previous.low && lowerWick > body * 1.5 && lowerWick > upperWick) {
     return 'BULLISH_REJECTION';
   }
   
-  // Bearish rejection (long lower wick, close near high)
-  if (latest.low < previous.low && latest.close > latest.open && 
-      (latest.close - latest.low) > (latest.high - latest.close) * 2) {
+  // Bearish rejection: sweep high + strong upper wick
+  if (latest.high > previous.high && upperWick > body * 1.5 && upperWick > lowerWick) {
     return 'BEARISH_REJECTION';
   }
   
@@ -411,10 +412,12 @@ export const usePolling = () => {
         }
         
         // Session filter (London/NY overlap)
-        const now = new Date();
-        const hourGMT = now.getUTCHours();
-        if (hourGMT < 8 || hourGMT >= 17) {
-          return; // Trade only during active sessions
+        if (botSettings.sessionFilterEnabled) {
+          const now = new Date();
+          const hourGMT = now.getUTCHours();
+          if (hourGMT < 8 || hourGMT >= 17) {
+            return; // Trade only during active sessions
+          }
         }
         
         // Daily loss limit
@@ -434,6 +437,7 @@ export const usePolling = () => {
           let tpPrice = 0;
           
           const totalOpen = openOrders.length;
+          const maxOpenTrades = Math.max(1, botSettings.maxOpenTrades || 1);
           
           // Exit logic - time based
           if (totalOpen > 0) {
@@ -451,7 +455,7 @@ export const usePolling = () => {
           }
           
           // PURE SMC ENTRY LOGIC
-          if (signal === 'NONE' && totalOpen === 0) {
+          if (signal === 'NONE' && totalOpen < maxOpenTrades) {
             // Check if price is at SMC level
             const isAtLevel = isAtSMCLevel(price, sortedChart);
             
@@ -467,9 +471,12 @@ export const usePolling = () => {
               
               console.log(`🔍 SMC Analysis: Slowing=${priceSlowing}, Volume=${volumeFalling}, Strength=${strengthDecreasing}, Rejection=${rejection}, Sweep=${sweep}`);
               
+              // Need at least 2/3 momentum confirmations
+              const momentumScore = [priceSlowing, volumeFalling, strengthDecreasing].filter(Boolean).length;
+
               // BUY CONDITIONS
               if (rejection === 'BULLISH_REJECTION' || sweep === 'LOW_SWEEP') {
-                if (priceSlowing && volumeFalling && strengthDecreasing) {
+                if (momentumScore >= 2) {
                   const swingLows = findSwingLows(sortedChart);
                   const potentialSL = swingLows.length > 0 ? swingLows[0].val : price - atr;
                   const potentialTP = price + (atr * 2);
@@ -488,7 +495,7 @@ export const usePolling = () => {
               
               // SELL CONDITIONS
               else if (rejection === 'BEARISH_REJECTION' || sweep === 'HIGH_SWEEP') {
-                if (priceSlowing && volumeFalling && strengthDecreasing) {
+                if (momentumScore >= 2) {
                   const swingHighs = findSwingHighs(sortedChart);
                   const potentialSL = swingHighs.length > 0 ? swingHighs[0].val : price + atr;
                   const potentialTP = price - (atr * 2);
@@ -564,7 +571,7 @@ export const usePolling = () => {
             placeOrder({
               symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
               type: signal,
-              lots: 0,
+              lots: botSettings.defaultLots || 0.01,
               sl: slPrice,
               tp: tpPrice
             }).catch(e => console.error("SMC execution failed:", e));
