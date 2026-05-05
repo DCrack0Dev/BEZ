@@ -25,6 +25,7 @@ let accountState = {
   vwap: 0,
   spread: 0,
   tickVolume: 0,
+  chart: {},
   structures: {},
   keyLevelInfo: null,
 };
@@ -66,7 +67,7 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   console.log(' [Backend] EA heartbeat received');
   
-  const { accountData, testStructures, structures, positions } = req.body;
+  const { accountData, testStructures, structures, positions, chart } = req.body;
   
   // Update account state with real EA data
   if (accountData) {
@@ -90,6 +91,7 @@ app.post('/api/ea/update', (req, res) => {
     accountState.vwap = accountData.vwap || 0;
     accountState.spread = accountData.spread || 0;
     accountState.tickVolume = accountData.tickVolume || 0;
+    accountState.chart = chart || accountData.chart || accountState.chart || {};
     
     // Enhanced logging
     console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
