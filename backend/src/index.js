@@ -29,6 +29,7 @@ let accountState = {
   structures: {},
   keyLevelInfo: null,
 };
+let closedTrades = [];
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -71,6 +72,7 @@ app.post('/api/ea/update', (req, res) => {
   
   // Update account state with real EA data
   if (accountData) {
+    const prevPositions = Array.isArray(accountState.positions) ? [...accountState.positions] : [];
     const prevBalance = accountState.balance;
     const prevEquity = accountState.equity;
     const prevPrice = accountState.price;
@@ -92,6 +94,29 @@ app.post('/api/ea/update', (req, res) => {
     accountState.spread = accountData.spread || 0;
     accountState.tickVolume = accountData.tickVolume || 0;
     accountState.chart = chart || accountData.chart || accountState.chart || {};
+
+    // Detect closed trades by position delta between heartbeats.
+    const currentPositions = Array.isArray(accountState.positions) ? accountState.positions : [];
+    const currentTickets = new Set(currentPositions.map((p) => String(p.ticket)));
+    prevPositions.forEach((p) => {
+      const ticket = String(p.ticket);
+      if (!currentTickets.has(ticket)) {
+        const closeTimeIso = new Date().toISOString();
+        const openTimeIso = p.time ? new Date(Number(p.time) * 1000).toISOString() : closeTimeIso;
+        const profit = Number(p.profit || 0);
+        closedTrades.unshift({
+          id: `${ticket}-${Date.now()}`,
+          ticket,
+          symbol: p.symbol || accountState.eaSymbol || 'BTCUSD',
+          type: p.type || 'BUY',
+          profit,
+          openTime: openTimeIso,
+          closeTime: closeTimeIso,
+          date: closeTimeIso
+        });
+      }
+    });
+    if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
     
     // Enhanced logging
     console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
@@ -407,7 +432,21 @@ app.post('/api/order', (req, res) => {
 
 // Closed orders endpoint
 app.get('/api/orders/closed', (req, res) => {
-  res.json([]);
+  const filter = String(req.query.filter || 'today').toLowerCase();
+  const now = Date.now();
+  const start =
+    filter === 'week'
+      ? now - 7 * 24 * 60 * 60 * 1000
+      : filter === 'month'
+      ? now - 30 * 24 * 60 * 60 * 1000
+      : now - 24 * 60 * 60 * 1000;
+
+  const filtered = closedTrades.filter((t) => {
+    const ts = new Date(t.closeTime || t.date || 0).getTime();
+    return Number.isFinite(ts) && ts >= start;
+  });
+
+  res.json(filtered);
 });
 
 app.get('/api/signal', (req, res) => {
