@@ -83,7 +83,7 @@ app.post('/api/ea/update', (req, res) => {
     // MT5 EA sends positions at top-level; keep accountData fallback for compatibility
     accountState.positions = positions || accountData.positions || accountState.positions;
     accountState.ea_connected = true;
-    accountState.eaSymbol = accountData.symbol || accountState.eaSymbol || 'BTCUSD';
+    accountState.eaSymbol = accountData.eaSymbol || accountData.symbol || accountState.eaSymbol || 'BTCUSD';
     accountState.fastEMA = accountData.fastEMA || 0;
     accountState.slowEMA = accountData.slowEMA || 0;
     accountState.bbUpper = accountData.bbUpper || 0;
