@@ -26,6 +26,7 @@ let accountState = {
   spread: 0,
   tickVolume: 0,
   structures: {},
+  keyLevelInfo: null,
 };
 
 app.use(cors());
@@ -43,11 +44,18 @@ app.post('/api/ea/validate', (req, res) => {
   
   // Simple validation - accept any key starting with FXSK-
   if (apiKey && apiKey.startsWith('FXSK-')) {
+    const maxOpenTrades = 5;
     res.json({
       valid: true,
       token: 'mock-jwt-token-' + Date.now(),
       expiry: '2026-12-31',
-      plan: 'PAID'
+      plan: 'PAID',
+      features: {
+        maxTrades: maxOpenTrades,
+        maxOpenTrades,
+        trailingStop: true,
+        sessionFilter: true
+      }
     });
   } else {
     res.status(401).json({ valid: false, message: 'Invalid API key' });
@@ -58,7 +66,7 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   console.log(' [Backend] EA heartbeat received');
   
-  const { accountData, testStructures } = req.body;
+  const { accountData, testStructures, structures } = req.body;
   
   // Update account state with real EA data
   if (accountData) {
@@ -86,16 +94,19 @@ app.post('/api/ea/update', (req, res) => {
     console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
     console.log(` [Backend] Account - Balance: R${accountState.balance} | Equity: R${accountState.equity} | Positions: ${accountState.positions.length}`);
     
-    // Store structures from EA
-    if (testStructures) {
-      accountState.structures = testStructures;
-      console.log(` [Backend] Structures updated - Timeframes: ${Object.keys(testStructures).join(', ')}`);
+    // Store structures from EA (supports both payload keys)
+    const incomingStructures = structures || testStructures;
+    if (incomingStructures && typeof incomingStructures === 'object') {
+      accountState.structures = incomingStructures;
+      console.log(` [Backend] Structures updated - Timeframes: ${Object.keys(incomingStructures).join(', ')}`);
       
       // Calculate key level distances
-      const keyLevelInfo = calculateKeyLevelDistance(accountState.price, testStructures);
+      const keyLevelInfo = calculateKeyLevelDistance(accountState.price, incomingStructures);
       if (keyLevelInfo) {
         console.log(` [Backend] Next Key Level - ${keyLevelInfo.type} at ${keyLevelInfo.level} (${keyLevelInfo.distance}pts away)`);
         accountState.keyLevelInfo = keyLevelInfo;
+      } else {
+        accountState.keyLevelInfo = null;
       }
     }
     
@@ -152,11 +163,42 @@ app.post('/api/ea/update', (req, res) => {
   res.json({
     ea_connected: true,
     lastSeen: new Date().toISOString(),
-    testStructures,
+    structures: accountState.structures,
     keyLevelInfo: accountState.keyLevelInfo,
     commands: commandsToSend.map(cmd => cmd.command) // Send only command strings to EA
   });
 });
+
+function normalizeStructuresForSignal(rawStructures, currentPrice) {
+  const base = (rawStructures && typeof rawStructures === 'object') ? rawStructures : {};
+  const tfList = ['M5', 'M15', 'H1', 'H4'];
+  const out = {};
+
+  tfList.forEach((tf) => {
+    const tfData = (base[tf] && typeof base[tf] === 'object') ? base[tf] : {};
+    out[tf] = {
+      keyLevels: Array.isArray(tfData.keyLevels) ? tfData.keyLevels : [],
+      orderBlocks: Array.isArray(tfData.orderBlocks) ? tfData.orderBlocks : [],
+      fvgs: Array.isArray(tfData.fvgs) ? tfData.fvgs : []
+    };
+  });
+
+  const totalLevels = tfList.reduce((sum, tf) => sum + out[tf].keyLevels.length, 0);
+  if (totalLevels === 0 && currentPrice > 0) {
+    out.M5.keyLevels.push({
+      type: 'SUPPORT',
+      price: Number((currentPrice - 20).toFixed(2)),
+      strength: 1
+    });
+    out.M5.keyLevels.push({
+      type: 'RESISTANCE',
+      price: Number((currentPrice + 20).toFixed(2)),
+      strength: 1
+    });
+  }
+
+  return out;
+}
 
 // Helper function to calculate key level distances
 function calculateKeyLevelDistance(currentPrice, structures) {
@@ -218,6 +260,7 @@ function calculateKeyLevelDistance(currentPrice, structures) {
 // Account endpoint - returns current account state
 app.get('/api/account', (req, res) => {
   console.log('[ACCOUNT] Account data requested');
+  accountState.lastSeen = new Date().toISOString();
   
   // Ensure equity is calculated correctly
   const totalProfit = accountState.positions.reduce((sum, pos) => {
@@ -247,6 +290,20 @@ app.get('/api/account', (req, res) => {
   res.json(responseState);
 });
 
+app.get('/api/subscription', (req, res) => {
+  res.json({
+    plan: 'PAID',
+    status: 'Active',
+    expiry: '2026-12-31',
+    features: {
+      maxTrades: 5,
+      maxOpenTrades: 5,
+      trailingStop: true,
+      sessionFilter: true
+    }
+  });
+});
+
 // Command queue for EA
 let pendingCommands = [];
 
@@ -258,6 +315,12 @@ app.post('/api/order', (req, res) => {
   
   // Default API key if not provided
   const effectiveApiKey = apiKey || 'FXSK-DEFAULT-KEY-2025';
+  if (!effectiveApiKey.startsWith('FXSK-')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid API key'
+    });
+  }
   
   // Build command string for EA based on action type
   let commandString = '';
@@ -341,6 +404,101 @@ app.post('/api/order', (req, res) => {
 // Closed orders endpoint
 app.get('/api/orders/closed', (req, res) => {
   res.json([]);
+});
+
+app.get('/api/signal', (req, res) => {
+  const { symbol = 'BTCUSD', tf = 'M5' } = req.query;
+  const currentPrice = Number(accountState.price || 0);
+  const fastEMA = Number(accountState.fastEMA || 0);
+  const slowEMA = Number(accountState.slowEMA || 0);
+  const rsi = Number(accountState.rsi || 0);
+  const spread = Number(accountState.spread || 0);
+  const atr = Number(accountState.atr || 0);
+  const structures = normalizeStructuresForSignal(accountState.structures, currentPrice);
+  const timeframe = String(tf).toUpperCase();
+  const tfStructures = structures[timeframe] || structures.M5;
+  const keyLevels = tfStructures.keyLevels || [];
+  const orderBlocks = tfStructures.orderBlocks || [];
+  const fvgs = tfStructures.fvgs || [];
+
+  if (!accountState.ea_connected) {
+    return res.json({
+      symbol,
+      tf: timeframe,
+      signal: 'HOLD',
+      confidence: 0,
+      reason: 'EA not connected'
+    });
+  }
+
+  if (spread > 35 || atr > 6.0) {
+    return res.json({
+      symbol,
+      tf: timeframe,
+      signal: 'HOLD',
+      confidence: 15,
+      reason: `Risk filter active (spread=${spread}, atr=${atr})`
+    });
+  }
+
+  const nearestKeyLevel = keyLevels.reduce((best, level) => {
+    const dist = Math.abs(currentPrice - Number(level.price || 0));
+    if (!best || dist < best.dist) return { level, dist };
+    return best;
+  }, null);
+
+  const hasBullOB = orderBlocks.some((ob) => String(ob.type || '').toUpperCase().includes('BULL'));
+  const hasBearOB = orderBlocks.some((ob) => String(ob.type || '').toUpperCase().includes('BEAR'));
+  const hasBullFVG = fvgs.some((g) => String(g.type || '').toUpperCase().includes('BULL'));
+  const hasBearFVG = fvgs.some((g) => String(g.type || '').toUpperCase().includes('BEAR'));
+
+  const emaBull = fastEMA > 0 && slowEMA > 0 && fastEMA > slowEMA;
+  const emaBear = fastEMA > 0 && slowEMA > 0 && fastEMA < slowEMA;
+  const nearLevel = nearestKeyLevel && nearestKeyLevel.dist <= Math.max(currentPrice * 0.002, 8);
+  const levelType = nearestKeyLevel ? String(nearestKeyLevel.level.type || '').toUpperCase() : '';
+
+  let signal = 'HOLD';
+  let confidence = 30;
+  let reason = 'No clean confluence yet';
+
+  if (emaBull && rsi <= 65 && (hasBullOB || hasBullFVG) && nearLevel && levelType.includes('SUPPORT')) {
+    signal = 'BUY';
+    confidence = 78;
+    reason = 'SMC bullish confluence at support + EMA confirmation';
+  } else if (emaBear && rsi >= 35 && (hasBearOB || hasBearFVG) && nearLevel && levelType.includes('RESISTANCE')) {
+    signal = 'SELL';
+    confidence = 78;
+    reason = 'SMC bearish confluence at resistance + EMA confirmation';
+  } else if (emaBull && rsi < 70) {
+    signal = 'BUY';
+    confidence = 55;
+    reason = 'Trend-following fallback: EMA bullish with acceptable RSI';
+  } else if (emaBear && rsi > 30) {
+    signal = 'SELL';
+    confidence = 55;
+    reason = 'Trend-following fallback: EMA bearish with acceptable RSI';
+  }
+
+  res.json({
+    symbol,
+    tf: timeframe,
+    signal,
+    confidence,
+    reason,
+    price: currentPrice,
+    indicators: {
+      fastEMA,
+      slowEMA,
+      rsi,
+      atr,
+      spread
+    },
+    structures: {
+      keyLevels: keyLevels.length,
+      orderBlocks: orderBlocks.length,
+      fvgs: fvgs.length
+    }
+  });
 });
 
 // Start server
