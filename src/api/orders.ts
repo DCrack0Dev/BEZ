@@ -55,3 +55,15 @@ export const closeOrder = async (ticket: string) => {
   const response = await apiClient.post('/api/order', { action: 'CLOSE_TRADE', ticket, apiKey });
   return response.data;
 };
+
+export const setBotConfig = async (config: {
+  autoTradingEnabled?: boolean;
+  executionMode?: 'app' | 'backend';
+  defaultLots?: number;
+  maxOpenTrades?: number;
+  trailingStopEnabled?: boolean;
+}) => {
+  const { apiKey } = useAuthStore.getState();
+  const response = await apiClient.post('/api/bot/config', { ...config, apiKey });
+  return response.data;
+};

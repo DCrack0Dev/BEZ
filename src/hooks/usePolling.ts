@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getAccountData, getOpenOrders, placeOrder } from '../api/orders';
+import { getAccountData, getOpenOrders, placeOrder, setBotConfig } from '../api/orders';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
@@ -47,6 +47,7 @@ export const usePolling = () => {
   const lastSignalCandleRef = useRef<number>(0);
   const autoTradingSyncSentRef = useRef<boolean>(false);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
+  const prevExecutionMode = useRef<'app' | 'backend'>(botSettings.executionMode || 'app');
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -142,17 +143,26 @@ export const usePolling = () => {
           });
         }
  
-        // Sync bot settings
+       // Sync bot settings
        if (accountDataSafe.eaConnected) {
          const autoTradingChanged = prevAutoTrading.current !== botSettings.autoTradingEnabled;
-         if (!autoTradingSyncSentRef.current || autoTradingChanged) {
+         const executionModeChanged = prevExecutionMode.current !== (botSettings.executionMode || 'app');
+         if (!autoTradingSyncSentRef.current || autoTradingChanged || executionModeChanged) {
            prevAutoTrading.current = botSettings.autoTradingEnabled;
+           prevExecutionMode.current = botSettings.executionMode || 'app';
            autoTradingSyncSentRef.current = true;
            placeOrder({
              symbol: accountDataSafe.eaSymbol || 'BTCUSD',
              type: botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE',
              lots: 0, sl: 0, tp: 0
            }).catch(e => console.error("Auto-trade sync failed:", e));
+           setBotConfig({
+             autoTradingEnabled: botSettings.autoTradingEnabled,
+             executionMode: botSettings.executionMode || 'app',
+             defaultLots: botSettings.defaultLots,
+             maxOpenTrades: botSettings.maxOpenTrades,
+             trailingStopEnabled: botSettings.trailingStopEnabled,
+           }).catch(e => console.error("Bot config sync failed:", e));
          }
        } else {
          autoTradingSyncSentRef.current = false;
@@ -166,8 +176,9 @@ export const usePolling = () => {
        }
       
       // --- PURE SMC APP BRAIN ---
-      if (botSettings.autoTradingEnabled && accountDataSafe.eaConnected) {
+      if (botSettings.autoTradingEnabled && accountDataSafe.eaConnected && (botSettings.executionMode || 'app') === 'app') {
         let chart = [];
+        let m1Chart = [];
         let h1Chart = [];
         let m15Chart = [];
         let h4Chart = [];
@@ -177,6 +188,7 @@ export const usePolling = () => {
             chart = accountData.chart;
           } else {
             chart = accountData.chart['M5'] || accountData.chart['M1'] || [];
+            m1Chart = accountData.chart['M1'] || [];
             h1Chart = accountData.chart['H1'] || [];
             m15Chart = accountData.chart['M15'] || [];
             h4Chart = accountData.chart['H4'] || [];
@@ -193,6 +205,7 @@ export const usePolling = () => {
         
         if (atr > 0 && chart.length >= 10) {
           const sortedChart = [...chart].sort((a, b) => b.x - a.x);
+          const sortedM1 = m1Chart.length > 0 ? [...m1Chart].sort((a, b) => b.x - a.x) : [];
           const sortedH1 = h1Chart.length > 0 ? [...h1Chart].sort((a, b) => b.x - a.x) : [];
           const sortedM15 = m15Chart.length > 0 ? [...m15Chart].sort((a, b) => b.x - a.x) : [];
           const sortedH4 = h4Chart.length > 0 ? [...h4Chart].sort((a, b) => b.x - a.x) : [];
@@ -295,18 +308,31 @@ export const usePolling = () => {
               const inFvg = (p: number, fvgs: FVG[]) => fvgs.some((fvg) => p >= (fvg.bottom - levelDistanceBuffer) && p <= (fvg.top + levelDistanceBuffer));
               
               const isNearSupport = (p: number) => {
-                const allSupp = [...h4Levels, ...h1Levels, ...m15Levels].filter(l => l.type === 'SUPPORT');
-                const obs = [...h4Obs, ...m15Obs].filter(o => o.type === 'BULLISH');
-                const fvgs = m5Fvgs.filter(f => f.type === 'BULLISH');
-                return allSupp.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || inOb(p, obs) || inFvg(p, fvgs);
+                const htfSupp = [...h4Levels, ...h1Levels].filter(l => l.type === 'SUPPORT');
+                const obs = [...h4Obs].filter(o => o.type === 'BULLISH');
+                // Only consider M15/M5 if they are very fresh or align with HTF
+                const ltfSupp = [...m15Levels].filter(l => l.type === 'SUPPORT');
+                
+                return htfSupp.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || 
+                       obs.some(o => p >= o.bottom && p <= o.top) ||
+                       (ltfSupp.some(l => Math.abs(p - l.price) <= levelDistanceBuffer * 0.5)); // LTF must be much closer
               };
 
               const isNearResistance = (p: number) => {
-                const allRes = [...h4Levels, ...h1Levels, ...m15Levels].filter(l => l.type === 'RESISTANCE');
-                const obs = [...h4Obs, ...m15Obs].filter(o => o.type === 'BEARISH');
-                const fvgs = m5Fvgs.filter(f => f.type === 'BEARISH');
-                return allRes.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || inOb(p, obs) || inFvg(p, fvgs);
+                const htfRes = [...h4Levels, ...h1Levels].filter(l => l.type === 'RESISTANCE');
+                const obs = [...h4Obs].filter(o => o.type === 'BEARISH');
+                const ltfRes = [...m15Levels].filter(l => l.type === 'RESISTANCE');
+                
+                return htfRes.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || 
+                       obs.some(o => p >= o.bottom && p <= o.top) ||
+                       (ltfRes.some(l => Math.abs(p - l.price) <= levelDistanceBuffer * 0.5));
               };
+              
+              // --- RANGE & MOMENTUM FILTERS ---
+              const rsi = accountData.rsi || 50;
+              const isOverbought = rsi > 70;
+              const isOversold = rsi < 30;
+              const inMiddleRange = rsi > 40 && rsi < 60; // Stop trading in no-man's land
 
               const atSupport = isNearSupport(price) || sortedChart.slice(0, 3).some(c => isNearSupport(c.low));
               const atResistance = isNearResistance(price) || sortedChart.slice(0, 3).some(c => isNearResistance(c.high));
@@ -318,6 +344,24 @@ export const usePolling = () => {
               
               const allLevels = [...h4Levels, ...h1Levels, ...m15Levels];
               
+              // --- MICRO-REVERSAL DETECTION (M1 Confirmation with BOS) ---
+              const m1Latest = sortedM1[0];
+              const m1Prev = sortedM1[1];
+              const m1Third = sortedM1[2];
+              
+              // M1 Break of Structure (BOS) requirement for micro-entries
+              const m1BosBuy = m1Latest && m1Prev && m1Latest.close > m1Prev.high;
+              const m1BosSell = m1Latest && m1Prev && m1Latest.close < m1Prev.low;
+              
+              const m1ReversalBuy = m1BosBuy && isBullish(m1Latest) && isBearish(m1Prev);
+              const m1ReversalSell = m1BosSell && isBearish(m1Latest) && isBullish(m1Prev);
+
+              // --- REVERSAL PATTERN DETECTION (3rd Candle Confirmation) ---
+              const thirdLast = sortedChart[2];
+              const fourthLast = sortedChart[3];
+              const isBullishFlip = thirdLast && fourthLast && isBullish(thirdLast) && isBearish(fourthLast);
+              const isBearishFlip = thirdLast && fourthLast && isBearish(thirdLast) && isBullish(fourthLast);
+
               // --- ANTI-CHASE FILTER ---
               const nearestLevel = allLevels.length > 0 ? allLevels.reduce((prev, curr) => 
                 Math.abs(curr.price - price) < Math.abs(prev.price - price) ? curr : prev
@@ -358,6 +402,8 @@ export const usePolling = () => {
                 if (change < -0.0003) return 'DOWN';
                 return 'RANGE';
               })();
+              const trendUp = h4Trend === 'UP' && fastEMA > slowEMA;
+              const trendDown = h4Trend === 'DOWN' && fastEMA < slowEMA;
               
               const spreadOk = spread <= 30;
               
@@ -366,10 +412,36 @@ export const usePolling = () => {
               }
 
               // --- SIGNAL LOGIC ---
-              const sniperReady = spreadOk && !isChoppy;
+              const sniperReady = spreadOk && !isChoppy && !inMiddleRange; // BLOCK middle range chop
 
+              // 0. MICRO-REVERSAL FLIP (M1 Chart at structural levels)
+              if (sniperReady && atSupport && m1ReversalBuy && !isChasing && (isOversold || !trendDown)) {
+                signal = 'BUY';
+                slPrice = (m1Latest?.low || price) - (atr * 0.3);
+                tpPrice = price + (atr * 2.5);
+                console.log(`💎 MICRO-BUY: M1 BOS at Structure`);
+              }
+              else if (sniperReady && atResistance && m1ReversalSell && !isChasing && (isOverbought || !trendUp)) {
+                signal = 'SELL';
+                slPrice = (m1Latest?.high || price) + (atr * 0.3);
+                tpPrice = price - (atr * 2.5);
+                console.log(`💎 MICRO-SELL: M1 BOS at Structure`);
+              }
+              // 0.5 FAST REVERSAL FLIP (M5 pattern) - Only allow if deeply overbought/oversold
+              else if (sniperReady && atSupport && isBullishFlip && !isChasing && isOversold) {
+                signal = 'BUY';
+                slPrice = thirdLast.low - (atr * 0.4);
+                tpPrice = price + (atr * 2.5);
+                console.log(`🚀 FAST BUY: Deep Oversold Flip`);
+              }
+              else if (sniperReady && atResistance && isBearishFlip && !isChasing && isOverbought) {
+                signal = 'SELL';
+                slPrice = thirdLast.high + (atr * 0.4);
+                tpPrice = price - (atr * 2.5);
+                console.log(`🚀 FAST SELL: Deep Overbought Flip`);
+              }
               // 1. REJECTION AT SUPPORT (Coming down to level)
-              if (sniperReady && atSupport && !isChasing && (isStrongBullishRejection || rejection === 'BULLISH' || sweep === 'LOW_SWEEP')) {
+              else if (sniperReady && atSupport && !isChasing && (isStrongBullishRejection || rejection === 'BULLISH' || sweep === 'LOW_SWEEP')) {
                 signal = 'BUY';
                 const lowestRecent = Math.min(latest.low, previous.low);
                 slPrice = lowestRecent - (atr * 0.35);
@@ -401,8 +473,6 @@ export const usePolling = () => {
 
               // Fallback early trend entry (only if no level conflict)
               if (signal === 'NONE' && !isChasing && !isChoppy && !atResistance && !atSupport) {
-                const trendUp = h4Trend === 'UP' && fastEMA > slowEMA;
-                const trendDown = h4Trend === 'DOWN' && fastEMA < slowEMA;
                 if (trendUp && isBullish(latest) && latest.close > previous.close) {
                   signal = 'BUY';
                   slPrice = previous.low - (atr * 0.3);

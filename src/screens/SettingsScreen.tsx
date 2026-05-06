@@ -70,6 +70,23 @@ const SettingsScreen = () => {
               thumbColor={botSettings.autoTradingEnabled ? COLORS.primary : COLORS.textSecondary}
             />
           </View>
+          <View style={styles.modeRow}>
+            <Text style={TYPOGRAPHY.body}>Execution Mode</Text>
+            <View style={styles.modeButtons}>
+              <TouchableOpacity
+                style={[styles.modeButton, botSettings.executionMode === 'app' && styles.modeButtonActive]}
+                onPress={() => updateBotSettings({ executionMode: 'app' })}
+              >
+                <Text style={[styles.modeButtonText, botSettings.executionMode === 'app' && styles.modeButtonTextActive]}>App Brain</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modeButton, botSettings.executionMode === 'backend' && styles.modeButtonActive]}
+                onPress={() => updateBotSettings({ executionMode: 'backend' })}
+              >
+                <Text style={[styles.modeButtonText, botSettings.executionMode === 'backend' && styles.modeButtonTextActive]}>Backend Brain</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
           <View style={styles.toggleRow}>
             <Text style={TYPOGRAPHY.body}>Session Filter (07:00 - 20:00)</Text>
             <Switch
@@ -166,6 +183,37 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: SPACING.s,
+  },
+  modeRow: {
+    paddingVertical: SPACING.s,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  modeButtons: {
+    marginTop: SPACING.s,
+    flexDirection: 'row',
+    gap: SPACING.s,
+  },
+  modeButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 8,
+    paddingVertical: SPACING.s,
+    alignItems: 'center',
+    backgroundColor: COLORS.background,
+  },
+  modeButtonActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '20',
+  },
+  modeButtonText: {
+    ...TYPOGRAPHY.bodySecondary,
+    color: COLORS.textSecondary,
+  },
+  modeButtonTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
   },
   smallInput: {
     backgroundColor: COLORS.background,

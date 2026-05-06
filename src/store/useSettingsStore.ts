@@ -9,6 +9,7 @@ interface BotSettings {
   trailingStopEnabled: boolean;
   sessionFilterEnabled: boolean;
   autoTradingEnabled: boolean;
+  executionMode: 'app' | 'backend';
 }
 
 interface NotificationSettings {
@@ -40,6 +41,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   trailingStopEnabled: false,
   sessionFilterEnabled: true,
   autoTradingEnabled: false,
+  executionMode: 'app',
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {

@@ -148,6 +148,7 @@ const DashboardScreen = () => {
               <Text style={styles.debugTitle}>Debug Panel</Text>
               <Text style={styles.debugLine}>EA: {account.eaConnected ? 'Connected' : 'Disconnected'}</Text>
               <Text style={styles.debugLine}>Auto Trading: {botSettings.autoTradingEnabled ? 'ON' : 'OFF'}</Text>
+              <Text style={styles.debugLine}>Brain Mode: {(botSettings.executionMode || 'app').toUpperCase()}</Text>
               <Text style={styles.debugLine}>Price: {account.price || 0} | ATR: {account.atr || 0} | Spread: {account.spread || 0}</Text>
               <Text style={styles.debugLine}>Open Trades: {openPositions.length}/{Math.max(1, botSettings.maxOpenTrades || 1)}</Text>
               <Text style={styles.debugLine}>

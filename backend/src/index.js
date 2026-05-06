@@ -32,9 +32,63 @@ let accountState = {
   logs: [], // Store logs from EA
 };
 let closedTrades = [];
+let botControl = {
+  autoTradingEnabled: false,
+  executionMode: 'app', // 'app' | 'backend'
+  defaultLots: 0.01,
+  maxOpenTrades: 5,
+  trailingStopEnabled: true,
+  lastActionAt: 0,
+  lastSignal: 'NONE',
+  pendingSignal: null
+};
 
 app.use(cors());
 app.use(bodyParser.json());
+
+function buildCommandString(action, payload = {}) {
+  const { sl, tp, ticket, top, bottom, zoneType, time, price, levelType } = payload;
+  switch (action) {
+    case 'BUY':
+      return `BUY|${sl || 0}|${tp || 0}`;
+    case 'SELL':
+      return `SELL|${sl || 0}|${tp || 0}`;
+    case 'CLOSE_TRADE':
+      return `CLOSE_TICKET_${ticket}`;
+    case 'CLOSE_ALL':
+      return 'CLOSE_ALL';
+    case 'MODIFY_SL':
+      return `MODIFY_SL|${ticket}|${sl || 0}|${tp || 0}`;
+    case 'DRAW_OB':
+      return `DRAW_OB|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
+    case 'DRAW_FVG':
+      return `DRAW_FVG|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
+    case 'DRAW_KEY_LEVEL':
+      return `DRAW_KEY_LEVEL|${price}|${levelType || 'support'}`;
+    case 'RESUME':
+      return 'RESUME';
+    case 'PAUSE':
+      return 'PAUSE';
+    default:
+      return '';
+  }
+}
+
+function queueCommand(action, payload = {}) {
+  const commandString = buildCommandString(action, payload);
+  if (!commandString) return false;
+  pendingCommands.push({
+    action,
+    command: commandString,
+    symbol: payload.symbol || accountState.eaSymbol || 'BTCUSD',
+    lots: payload.lots || botControl.defaultLots || 0.01,
+    sl: payload.sl || 0,
+    tp: payload.tp || 0,
+    ticket: payload.ticket,
+    createdAt: new Date().toISOString()
+  });
+  return true;
+}
 
 // Test endpoint
 app.get('/test', (req, res) => {
@@ -358,6 +412,99 @@ function calculateKeyLevelDistance(currentPrice, structures) {
   return null;
 }
 
+function runBackendBrain() {
+  if (!accountState.ea_connected) return;
+  if (!botControl.autoTradingEnabled) return;
+  if (botControl.executionMode !== 'backend') return;
+
+  const now = Date.now();
+  if (now - botControl.lastActionAt < 3000) return;
+
+  const positions = Array.isArray(accountState.positions) ? accountState.positions : [];
+  const openCount = positions.length;
+  const maxOpen = Math.max(1, Number(botControl.maxOpenTrades || 1));
+  const price = Number(accountState.price || 0);
+  const atr = Math.max(Number(accountState.atr || 0), 0.01);
+  const spread = Number(accountState.spread || 0);
+  const rsi = Number(accountState.rsi || 50);
+  const fastEMA = Number(accountState.fastEMA || 0);
+  const slowEMA = Number(accountState.slowEMA || 0);
+  const kl = accountState.keyLevelInfo;
+
+  if (spread > 35 || !price) return;
+
+  // Trailing runs only in backend mode and only if enabled.
+  if (botControl.trailingStopEnabled && openCount > 0) {
+    positions.forEach((pos) => {
+      const profit = Number(pos.profit || 0);
+      if (profit < 0.5) return;
+      const isBuy = String(pos.type).toUpperCase() === 'BUY';
+      const openPrice = Number(pos.openPrice || pos.price || 0);
+      const currentSl = Number(pos.sl || 0);
+      const currentTp = Number(pos.tp || 0);
+      let newSl = 0;
+
+      if (isBuy) {
+        const be = openPrice + atr * 0.1;
+        if (currentSl < be) newSl = be;
+        else if (profit >= 1.5) {
+          const trail = price - atr * 0.5;
+          if (trail > currentSl) newSl = trail;
+        }
+      } else {
+        const be = openPrice - atr * 0.1;
+        if (!currentSl || currentSl > be) newSl = be;
+        else if (profit >= 1.5) {
+          const trail = price + atr * 0.5;
+          if (trail < currentSl) newSl = trail;
+        }
+      }
+
+      if (newSl > 0 && Math.abs(newSl - currentSl) > atr * 0.1) {
+        queueCommand('MODIFY_SL', { ticket: pos.ticket, sl: newSl, tp: currentTp, symbol: accountState.eaSymbol });
+      }
+    });
+  }
+
+  // Execute pending signal after CLOSE_ALL has had a cycle to process.
+  if (botControl.pendingSignal && openCount === 0) {
+    const side = botControl.pendingSignal;
+    queueCommand(side, { sl: 0, tp: 0, symbol: accountState.eaSymbol, lots: botControl.defaultLots });
+    botControl.lastActionAt = now;
+    botControl.lastSignal = side;
+    botControl.pendingSignal = null;
+    return;
+  }
+
+  if (!kl || openCount >= maxOpen) return;
+
+  const klType = String(kl.type || '').toUpperCase();
+  const bullBias = fastEMA >= slowEMA;
+  const bearBias = fastEMA <= slowEMA;
+  let signal = 'NONE';
+
+  if (klType.includes('SUPPORT') && rsi <= 50 && bullBias) signal = 'BUY';
+  if (klType.includes('RESISTANCE') && rsi >= 50 && bearBias) signal = 'SELL';
+  if (signal === 'NONE') return;
+
+  const hasOpposite = positions.some((p) => String(p.type || '').toUpperCase() !== signal);
+  if (hasOpposite) {
+    queueCommand('CLOSE_ALL', { symbol: accountState.eaSymbol });
+    botControl.pendingSignal = signal;
+    botControl.lastActionAt = now;
+    return;
+  }
+
+  const hasSameSide = positions.some((p) => String(p.type || '').toUpperCase() === signal);
+  if (hasSameSide) return;
+
+  queueCommand(signal, { sl: 0, tp: 0, symbol: accountState.eaSymbol, lots: botControl.defaultLots });
+  botControl.lastActionAt = now;
+  botControl.lastSignal = signal;
+}
+
+setInterval(runBackendBrain, 2000);
+
 // Account endpoint - returns current account state
 app.get('/api/account', (req, res) => {
   console.log('[ACCOUNT] Account data requested');
@@ -385,7 +532,8 @@ app.get('/api/account', (req, res) => {
     ...accountState,
     profit: totalProfit,
     pnl_today: totalProfit,
-    equity: accountState.balance + totalProfit
+    equity: accountState.balance + totalProfit,
+    botControl
   };
   
   res.json(responseState);
@@ -403,6 +551,27 @@ app.get('/api/subscription', (req, res) => {
       sessionFilter: true
     }
   });
+});
+
+app.post('/api/bot/config', (req, res) => {
+  const { apiKey, autoTradingEnabled, executionMode, defaultLots, maxOpenTrades, trailingStopEnabled } = req.body || {};
+  const effectiveApiKey = apiKey || req.headers['x-api-key'] || 'FXSK-DEFAULT-KEY-2025';
+  if (!String(effectiveApiKey).startsWith('FXSK-')) {
+    return res.status(401).json({ success: false, message: 'Invalid API key' });
+  }
+
+  if (typeof autoTradingEnabled === 'boolean') botControl.autoTradingEnabled = autoTradingEnabled;
+  if (executionMode === 'app' || executionMode === 'backend') botControl.executionMode = executionMode;
+  if (typeof defaultLots === 'number' && defaultLots > 0) botControl.defaultLots = defaultLots;
+  if (typeof maxOpenTrades === 'number' && maxOpenTrades > 0) botControl.maxOpenTrades = Math.floor(maxOpenTrades);
+  if (typeof trailingStopEnabled === 'boolean') botControl.trailingStopEnabled = trailingStopEnabled;
+
+  // Hard anti-clash: when app mode is selected, backend pending signal is flushed.
+  if (botControl.executionMode === 'app') {
+    botControl.pendingSignal = null;
+  }
+
+  return res.json({ success: true, botControl });
 });
 
 // Command queue for EA
@@ -423,61 +592,19 @@ app.post('/api/order', (req, res) => {
     });
   }
   
-  // Build command string for EA based on action type
-  let commandString = '';
-  
-  switch (action || type) {
-    case 'BUY':
-      commandString = `BUY|${sl || 0}|${tp || 0}`;
-      break;
-      
-    case 'SELL':
-      commandString = `SELL|${sl || 0}|${tp || 0}`;
-      break;
-      
-    case 'CLOSE_TRADE':
-      commandString = `CLOSE_TICKET_${ticket}`;
-      break;
-      
-    case 'CLOSE_ALL':
-      commandString = `CLOSE_ALL`;
-      break;
-      
-    case 'MODIFY_SL':
-      commandString = `MODIFY_SL|${ticket}|${sl || 0}|${tp || 0}`;
-      break;
-      
-    case 'DRAW_OB':
-      commandString = `DRAW_OB|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
-      break;
-      
-    case 'DRAW_FVG':
-      commandString = `DRAW_FVG|${top}|${bottom}|${zoneType || 'BULLISH'}|${time || 0}`;
-      break;
-      
-    case 'DRAW_KEY_LEVEL':
-      commandString = `DRAW_KEY_LEVEL|${price}|${levelType || 'support'}`;
-      break;
-      
-    case 'RESUME':
-      commandString = 'RESUME';
-      break;
-      
-    case 'PAUSE':
-      commandString = 'PAUSE';
-      break;
-      
-    default:
-      console.log(`[ORDER] Unknown action: ${action || type}`);
-      return res.status(400).json({
-        success: false,
-        message: 'Unknown action'
-      });
+  const normalizedAction = action || type;
+  const commandString = buildCommandString(normalizedAction, { sl, tp, ticket, top, bottom, zoneType, time, price, levelType });
+  if (!commandString) {
+    console.log(`[ORDER] Unknown action: ${normalizedAction}`);
+    return res.status(400).json({
+      success: false,
+      message: 'Unknown action'
+    });
   }
   
   // Add command to pending queue for EA
   const command = {
-    action: action || type,
+    action: normalizedAction,
     command: commandString,
     symbol: symbol || 'BTCUSD',
     lots: lots || 0.1,
