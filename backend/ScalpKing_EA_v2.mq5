@@ -14,6 +14,9 @@
 #include <Trade\PositionInfo.mqh>
 #include "FxScalpKing_HTTP.mqh"
 
+// Embed the logo as a resource (Place logo.png in the same folder as this MQ5)
+#resource "logo.png"
+
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
@@ -75,6 +78,7 @@ void OpenBuy(double sl = 0, double tp = 0);
 void OpenSell(double sl = 0, double tp = 0);
 void DrawZone(string name, datetime t1, double p1, datetime t2, double p2, color clr);
 void DrawKeyLevel(string name, double price, color clr, string txt);
+void CreateWatermark();
 
 //+------------------------------------------------------------------+
 //| EXPERT INITIALIZATION                                            |
@@ -97,8 +101,6 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(10);
 
-   // Do not modify chart style/layout to avoid chart shifting.
-
    // Initialize Indicators
    handle_FastEMA_M5 = iMA(_Symbol, PERIOD_M5, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M5 = iMA(_Symbol, PERIOD_M5, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
@@ -108,6 +110,7 @@ int OnInit()
    handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M1 = iMA(_Symbol, PERIOD_M1, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
 
+   CreateWatermark();
    EventSetTimer(HeartbeatInterval);
    SendHeartbeat();
 
@@ -119,6 +122,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   ObjectDelete(0, "SMC_Watermark");
    EventKillTimer();
    IndicatorRelease(handle_FastEMA_M5);
    IndicatorRelease(handle_SlowEMA_M5);
@@ -354,6 +358,16 @@ void ProcessCommand(string cmd)
    if(action == "BUY" && numParts >= 3) OpenBuy(StringToDouble(parts[1]), StringToDouble(parts[2]));
    else if(action == "SELL" && numParts >= 3) OpenSell(StringToDouble(parts[1]), StringToDouble(parts[2]));
    else if(action == "CLOSE_ALL") CloseAllTrades();
+   else if(action == "MODIFY_SL" && numParts >= 4) {
+      ulong ticket = (ulong)StringToInteger(parts[1]);
+      double sl = StringToDouble(parts[2]);
+      double tp = StringToDouble(parts[3]);
+      if(posInfo.SelectByTicket(ticket)) {
+         if(trade.PositionModify(ticket, sl, tp)) {
+            Print("✅ Modified SL/TP for #", ticket, " to SL:", sl, " TP:", tp);
+         }
+      }
+   }
    else if(action == "SET_TF" && numParts >= 2) FxScalpKing.SetRequestedTf(parts[1]);
    else if(StringFind(action, "CLOSE_TICKET_") == 0) CloseTrade((ulong)StringToInteger(StringSubstr(action, 13)));
    else if((action == "DRAW_OB" || action == "DRAW_FVG" || action == "DRAW_KEY_LEVEL" || action == "DRAW_KL") && numParts >= 5) {
@@ -394,4 +408,38 @@ void DrawKeyLevel(string name, double price, color clr, string txt)
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
+}
+
+//+------------------------------------------------------------------+
+//| CREATE WATERMARK                                                 |
+//+------------------------------------------------------------------+
+void CreateWatermark()
+{
+   string name = "SMC_Watermark";
+   ObjectDelete(0, name);
+   
+   // Create the bitmap label
+   if(ObjectCreate(0, name, OBJ_BITMAP_LABEL, 0, 0, 0))
+   {
+      // Set the image file (Must be in MQL5/Images/)
+      ObjectSetString(0, name, OBJPROP_BMPFILE, 0, "::logo.png"); // Use resource or direct path
+      
+      // Position at bottom right
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 50);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 50);
+      
+      // Make it a background watermark
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);
+      
+      Print("✅ Watermark created using logo.png");
+   }
+   else
+   {
+      Print("❌ Failed to create watermark object");
+   }
 }

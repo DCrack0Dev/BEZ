@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, RefreshControl, Alert } from 'react
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
-import { placeOrder, closeOrder } from '../api/orders';
+import { placeOrder } from '../api/orders';
 import AccountCard from '../components/AccountCard';
 import TradeButton from '../components/TradeButton';
 import PositionCard from '../components/PositionCard';
@@ -25,6 +25,15 @@ const DashboardScreen = () => {
   const [pendingOrder, setPendingOrder] = useState<{ type: 'BUY' | 'SELL', symbol: string } | null>(null);
 
   const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'BTCUSD';
+  
+  // Calculate key level for display from account data if store is empty
+  const displayKeyLevel = keyLevelDistance || (account.keyLevelInfo ? { 
+    type: account.keyLevelInfo.type, 
+    distance: account.keyLevelInfo.distance,
+    level: account.keyLevelInfo.level 
+  } : null);
+
+  const latestAppLog = [...logs].reverse().find((log) => log.component === 'App');
 
   const { refresh } = usePolling();
 
@@ -65,17 +74,23 @@ const DashboardScreen = () => {
     }
   };
 
-  const handleClosePosition = async (ticket: string) => {
-    logApp(`Closing position`, 'info', `Ticket: ${ticket}`);
+  const handleCloseAllTrades = async () => {
+    logApp('Closing all trades', 'info', `Symbol: ${selectedSymbol}`);
     
     try {
-      await closeOrder(ticket);
-      logApp(`Position closed successfully`, 'success', `Ticket: ${ticket}`);
-      Alert.alert('Success', 'Position Closed');
+      await placeOrder({
+        symbol: selectedSymbol,
+        type: 'CLOSE_ALL',
+        lots: 0,
+        sl: 0,
+        tp: 0,
+      });
+      logApp('Close all command sent', 'success', `Symbol: ${selectedSymbol}`);
+      Alert.alert('Success', 'Close all command sent');
       refresh();
     } catch (error) {
-      logApp(`Position close failed`, 'error', error as string);
-      Alert.alert('Error', 'Failed to close position');
+      logApp('Close all failed', 'error', error as string);
+      Alert.alert('Error', 'Failed to close all trades');
     }
   };
 
@@ -104,6 +119,7 @@ const DashboardScreen = () => {
               equity={account.equity}
               pnlToday={account.pnlToday}
               eaConnected={account.eaConnected}
+              currency={account.currency}
             />
 
             <View style={styles.tradePanel}>
@@ -127,6 +143,20 @@ const DashboardScreen = () => {
                 <Text style={TYPOGRAPHY.bodySecondary}>Lots: {botSettings.defaultLots}</Text>
               </View>
             </View>
+
+            <View style={styles.debugPanel}>
+              <Text style={styles.debugTitle}>Debug Panel</Text>
+              <Text style={styles.debugLine}>EA: {account.eaConnected ? 'Connected' : 'Disconnected'}</Text>
+              <Text style={styles.debugLine}>Auto Trading: {botSettings.autoTradingEnabled ? 'ON' : 'OFF'}</Text>
+              <Text style={styles.debugLine}>Price: {account.price || 0} | ATR: {account.atr || 0} | Spread: {account.spread || 0}</Text>
+              <Text style={styles.debugLine}>Open Trades: {openPositions.length}/{Math.max(1, botSettings.maxOpenTrades || 1)}</Text>
+              <Text style={styles.debugLine}>
+                Key Level: {displayKeyLevel ? `${displayKeyLevel.type} (${displayKeyLevel.distance.toFixed(2)} pts)` : 'N/A'}
+              </Text>
+              <Text style={styles.debugLine}>
+                Last App Log: {latestAppLog ? `${latestAppLog.message}` : 'No app logs yet'}
+              </Text>
+            </View>
           </>
         )}
 
@@ -138,9 +168,18 @@ const DashboardScreen = () => {
               <SkeletonLoader style={{ height: 100, marginBottom: SPACING.m }} />
             </View>
           ) : openPositions.length > 0 ? (
-            openPositions.map((pos) => (
-              <PositionCard key={pos.ticket} position={pos} onClose={handleClosePosition} />
-            ))
+            <>
+              <TradeButton
+                title="CLOSE ALL TRADES"
+                type="SELL"
+                onPress={handleCloseAllTrades}
+                disabled={!account.eaConnected}
+              />
+              <View style={styles.closeAllSpacer} />
+              {openPositions.map((pos) => (
+                <PositionCard key={pos.ticket} position={pos} currency={account.currency} />
+              ))}
+            </>
           ) : (
             <View style={styles.emptyState}>
               <Text style={TYPOGRAPHY.bodySecondary}>No open positions</Text>
@@ -152,7 +191,7 @@ const DashboardScreen = () => {
       <Terminal 
         logs={logs} 
         onClear={clearLogs}
-        keyLevelDistance={keyLevelDistance}
+        keyLevelDistance={displayKeyLevel}
       />
 
       {pendingOrder && (
@@ -178,6 +217,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: SPACING.m,
+    paddingBottom: 60, // Add padding to avoid content being hidden by Terminal
   },
   sectionTitle: {
     ...TYPOGRAPHY.h3,
@@ -202,6 +242,25 @@ const styles = StyleSheet.create({
   },
   positionsSection: {
     marginTop: SPACING.m,
+  },
+  debugPanel: {
+    backgroundColor: COLORS.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACING.m,
+    marginBottom: SPACING.l,
+  },
+  debugTitle: {
+    ...TYPOGRAPHY.h3,
+    marginBottom: SPACING.s,
+  },
+  debugLine: {
+    ...TYPOGRAPHY.bodySecondary,
+    marginBottom: 4,
+  },
+  closeAllSpacer: {
+    height: SPACING.m,
   },
   emptyState: {
     padding: SPACING.xl,

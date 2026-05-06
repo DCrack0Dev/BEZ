@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { COLORS } from '../theme/colors';
 import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
@@ -7,12 +7,13 @@ import { Position } from '../store/useTradeStore';
 
 interface PositionCardProps {
   position: Position;
-  onClose: (ticket: string) => void;
+  currency?: string;
 }
 
-const PositionCard: React.FC<PositionCardProps> = ({ position, onClose }) => {
+const PositionCard: React.FC<PositionCardProps> = ({ position, currency = 'USD' }) => {
   const isBuy = position.type === 'BUY';
   const isPositive = position.pnl >= 0;
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
 
   return (
     <View style={styles.card}>
@@ -29,17 +30,11 @@ const PositionCard: React.FC<PositionCardProps> = ({ position, onClose }) => {
         </View>
         <View style={styles.pnlContainer}>
           <Text style={[TYPOGRAPHY.mono, { color: isPositive ? COLORS.buy : COLORS.sell, fontSize: 18 }]}>
-            {isPositive ? '+' : ''}{(position.pnl || 0).toFixed(2)}
+            {isPositive ? '+' : ''}{symbol}{(position.pnl || 0).toFixed(2)}
           </Text>
           <Text style={TYPOGRAPHY.bodySecondary}>Price: {position.currentPrice}</Text>
         </View>
       </View>
-      <TouchableOpacity 
-        style={styles.closeButton} 
-        onPress={() => onClose(position.ticket)}
-      >
-        <Text style={styles.closeButtonText}>Close Position</Text>
-      </TouchableOpacity>
     </View>
   );
 };
@@ -81,17 +76,6 @@ const styles = StyleSheet.create({
   },
   pnlContainer: {
     alignItems: 'flex-end',
-  },
-  closeButton: {
-    backgroundColor: COLORS.border,
-    paddingVertical: SPACING.s,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  closeButtonText: {
-    ...TYPOGRAPHY.button,
-    fontSize: 14,
-    color: COLORS.textPrimary,
   },
 });
 

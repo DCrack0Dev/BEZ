@@ -4,8 +4,8 @@ import { useAuthStore } from '../store/useAuthStore';
 const MOCK_MODE = false; // Set to false when backend is ready
 
 const apiClient = axios.create({
-  baseURL: 'https://liquibot-back.onrender.com', // Live backend URL
-  timeout: 10000,
+  baseURL: 'https://liquibot-back.onrender.com', // Default backend URL - will be overridden by user input
+  timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -26,41 +26,6 @@ apiClient.interceptors.request.use((config) => {
 });
 
 // Mock Data Interceptor
-if (MOCK_MODE) {
-  apiClient.interceptors.request.use(async (config) => {
-    // If it's a mock request, we'll handle it here and "throw" a custom response
-    if (config.url?.includes('/api/auth/validate')) {
-      return Promise.reject({ mockResponse: { data: { token: 'mock-jwt-token' } } });
-    }
-    if (config.url?.includes('/api/account')) {
-      return Promise.reject({
-        mockResponse: {
-          data: {
-            balance: 10000,
-            equity: 10243,
-            pnl_today: 243,
-            ea_connected: true,
-          },
-        },
-      });
-    }
-    if (config.url?.includes('/api/order')) {
-      return Promise.reject({
-        mockResponse: { data: { success: true, ticket: Math.floor(Math.random() * 1000000).toString() } },
-      });
-    }
-    return config;
-  });
-
-  apiClient.interceptors.response.use(
-    (response) => response,
-    (error) => {
-      if (error.mockResponse) {
-        return Promise.resolve(error.mockResponse);
-      }
-      return Promise.reject(error);
-    }
-  );
-}
+// Mock mode is disabled - all requests go to real backend
 
 export default apiClient;

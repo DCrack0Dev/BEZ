@@ -8,7 +8,7 @@ import { SPACING } from '../theme/spacing';
 
 const LoginScreen = () => {
   const [apiKey, setApiKey] = useState('');
-  const [serverUrl, setServerUrl] = useState('https://api.scalpking.com');
+  const [serverUrl, setServerUrl] = useState('https://liquibot-back.onrender.com');
   const [loading, setLoading] = useState(false);
   const { setAuth } = useAuthStore();
 
@@ -48,7 +48,7 @@ const LoginScreen = () => {
           <Text style={styles.label}>Backend Server URL</Text>
           <TextInput
             style={styles.input}
-            placeholder="https://api.fxscalpking.com"
+            placeholder="https://liquibot-back.onrender.com"
             placeholderTextColor={COLORS.textSecondary}
             value={serverUrl}
             onChangeText={setServerUrl}

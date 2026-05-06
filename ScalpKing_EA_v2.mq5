@@ -58,6 +58,16 @@ string         EA_Name           = "FxScalpKing EA v2.0";
 string         licenseExpiry     = "";
 string         licensePlan       = "";
 
+double         last_key_level    = 0;
+string         last_level_type   = "N/A";
+
+void SendPositionHistorySync(long positionId);
+void CreateWatermark();
+void UpdateDebugPanel();
+
+// Embed the logo as a resource
+#resource "\\logo.png"
+
 //+------------------------------------------------------------------+
 //| EXPERT INITIALIZATION                                            |
 //+------------------------------------------------------------------+
@@ -106,6 +116,7 @@ int OnInit()
    handle_ATR_M15    = iATR(_Symbol, PERIOD_M15, 14);
    handle_ATR_H1     = iATR(_Symbol, PERIOD_H1, 14);
 
+   CreateWatermark();
    EventSetTimer(HeartbeatInterval);
    SendHeartbeat();
 
@@ -117,6 +128,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   ObjectDelete(0, "SMC_Watermark");
    EventKillTimer();
    IndicatorRelease(handle_FastEMA_M5);
    IndicatorRelease(handle_SlowEMA_M5);
@@ -137,6 +149,11 @@ void OnTick()
    if(!licenseValid) return;
    
    CleanHistoryText();
+   
+   // Run debug panel every tick for real-time price/spread updates
+   UpdateDebugPanel();
+
+   // Heartbeat and Indicator updates on timer/interval
    SendHeartbeat();
 
    if(!GetIndicatorData()) return;
@@ -175,9 +192,9 @@ void UpdateSMCZones()
 {
    static datetime lastZoneUpdate = 0;
    datetime now = TimeCurrent();
-   if (now - lastZoneUpdate < 60) return;
+   if (now - lastZoneUpdate < 300) return; // Increased to 5 mins to prevent clearing levels too often
 
-   // Cleanup old zones
+   // Cleanup old zones (except the nearest KL which is forced)
    for(int i = ObjectsTotal(0, 0, OBJ_RECTANGLE) - 1; i >= 0; i--)
    {
       string name = ObjectName(0, i, 0, OBJ_RECTANGLE);
@@ -191,12 +208,8 @@ void UpdateSMCZones()
    for(int i = ObjectsTotal(0, 0, OBJ_TREND) - 1; i >= 0; i--)
    {
       string name = ObjectName(0, i, 0, OBJ_TREND);
-      if(StringFind(name, "SMC_KL_") == 0) ObjectDelete(0, name);
+      if(StringFind(name, "SMC_KL_") == 0 && name != "SMC_KL_NEAREST") ObjectDelete(0, name);
    }
-
-   // SMC zones are handled by the backend and sent via DRAW commands
-   // The EA receives DRAW commands from the backend and renders them
-   // This ensures consistency between EA chart and mobile app
    
    lastZoneUpdate = now;
    ChartRedraw();
@@ -241,15 +254,18 @@ void SendHeartbeat()
    double profit = AccountInfoDouble(ACCOUNT_PROFIT);
    int positions = PositionsTotal();
    
-   Print("📊 [EA] Market Data - Price: ", DoubleToString(currentPrice, 5), 
-         " | EMA: ", DoubleToString(fEMA, 5), "/", DoubleToString(sEMA, 5),
-         " | RSI: ", DoubleToString(r7, 2),
-         " | ATR: ", DoubleToString(atr_val, 5));
-   
-   Print("💰 [EA] Account - Balance: ", DoubleToString(balance, 2),
-         " | Equity: ", DoubleToString(equity, 2),
-         " | Profit: ", DoubleToString(profit, 2),
-         " | Positions: ", IntegerToString(positions));
+   string marketLog = "";
+   marketLog += "\n┌────────────────── MARKET UPDATE ──────────────────┐";
+   marketLog += "\n│ Symbol: " + _Symbol + " | Price: " + DoubleToString(currentPrice, 5) + " | Spread: " + IntegerToString(spread);
+   marketLog += "\n│ EMA Fast: " + DoubleToString(fEMA, 5) + " | EMA Slow: " + DoubleToString(sEMA, 5);
+   marketLog += "\n│ RSI: " + DoubleToString(r7, 2) + " | ATR: " + DoubleToString(atr_val, 5);
+   marketLog += "\n│ KeyLevel: " + (last_key_level > 0 ? DoubleToString(last_key_level, 5) : "N/A") + " (" + last_level_type + ")";
+   marketLog += "\n├────────────────── ACCOUNT STATUS ─────────────────┤";
+   marketLog += "\n│ Balance: " + DoubleToString(balance, 2) + " | Equity: " + DoubleToString(equity, 2);
+   marketLog += "\n│ Profit: " + DoubleToString(profit, 2) + " | Open Positions: " + IntegerToString(positions);
+   marketLog += "\n└───────────────────────────────────────────────────┘";
+   Print(marketLog);
+   FxScalpKing.AddLog("Market Update: Price " + DoubleToString(currentPrice, 5) + ", Spread " + IntegerToString(spread), "info");
    
    Print("📡 [EA] Sending heartbeat to backend...");
    
@@ -260,6 +276,21 @@ void SendHeartbeat()
    {
       lastHeartbeat = now;
       Print("✅ [EA] Heartbeat sent successfully. Commands received: ", ArraySize(commands));
+      
+      // Update local key level info from HTTP client
+      double kl_price = 0;
+      string kl_type = "";
+      double kl_dist = 0;
+      FxScalpKing.GetKeyLevelInfo(kl_price, kl_type, kl_dist);
+      if(kl_price > 0)
+      {
+         last_key_level = kl_price;
+         last_level_type = kl_type;
+         
+         // Force draw the nearest key level immediately
+         bool isBull = (kl_type == "support" || kl_type == "SUPPORT" || StringFind(kl_type, "SUPPORT") >= 0);
+         DrawKeyLevel("SMC_KL_NEAREST", kl_price, isBull ? clrLimeGreen : clrTomato, kl_type);
+      }
       
       // Log received commands
       for(int i = 0; i < ArraySize(commands); i++) {
@@ -305,12 +336,23 @@ void ProcessCommand(string cmd)
       Print("⏱️ [EA] SET_TF command - New timeframe: ", parts[1]);
       FxScalpKing.SetRequestedTf(parts[1]);
    }
+   else if(action == "MODIFY_SL" && numParts >= 3) {
+      ulong ticket = (ulong)StringToInteger(parts[1]);
+      double sl = StringToDouble(parts[2]);
+      double tp = (numParts >= 4) ? StringToDouble(parts[3]) : 0;
+      Print("🔄 [EA] MODIFY_SL command - Ticket: ", IntegerToString((long)ticket), " SL: ", DoubleToString(sl, 5));
+      if(posInfo.SelectByTicket(ticket)) {
+         double currentTp = (tp > 0) ? tp : posInfo.TakeProfit();
+         if(!trade.PositionModify(ticket, sl, currentTp))
+            Print("❌ [EA] Modify failed: ", trade.ResultRetcodeDescription());
+      }
+   }
    else if(StringFind(action, "CLOSE_TICKET_") == 0) {
       ulong ticket = (ulong)StringToInteger(StringSubstr(action, 13));
       Print("🎫 [EA] CLOSE_TICKET command - Ticket: ", IntegerToString((long)ticket));
       CloseTrade(ticket);
    }
-   else if((action == "DRAW_OB" || action == "DRAW_FVG" || action == "DRAW_KEY_LEVEL" || action == "DRAW_KL") && numParts >= 5) {
+   else if((action == "DRAW_OB" || action == "DRAW_FVG") && numParts >= 5) {
       double top = StringToDouble(parts[1]);
       double bottom = StringToDouble(parts[2]);
       string zoneType = parts[3];
@@ -324,20 +366,22 @@ void ProcessCommand(string cmd)
       }
 
       bool isBull = (zoneType == "BULLISH" || zoneType == "BULL");
-      if(action == "DRAW_KEY_LEVEL" || action == "DRAW_KL")
-      {
-         double lvl = (top > 0.0 ? top : bottom);
-         if(lvl <= 0.0) return;
-         Print("📍 [EA] Drawing key level at: ", DoubleToString(lvl, 5));
-         DrawKeyLevel("SMC_KL_" + IntegerToString((int)zTime), lvl, isBull ? clrLimeGreen : clrTomato, "KL");
-      }
-      else
-      {
-         color clr = isBull ? clrForestGreen : clrFireBrick;
-         if(action == "DRAW_FVG") clr = isBull ? clrRoyalBlue : clrMediumVioletRed;
-         Print("🔲 [EA] Drawing zone: ", action, " | Color: ", isBull ? "Bullish" : "Bearish");
-         DrawZone("SMC_" + action + "_" + parts[4], zTime, top, TimeCurrent() + 3600, bottom, clr);
-      }
+      color clr = isBull ? clrForestGreen : clrFireBrick;
+      if(action == "DRAW_FVG") clr = isBull ? clrRoyalBlue : clrMediumVioletRed;
+      Print("🔲 [EA] Drawing zone: ", action, " | Color: ", isBull ? "Bullish" : "Bearish");
+      DrawZone("SMC_" + action + "_" + parts[4], zTime, top, TimeCurrent() + 3600, bottom, clr);
+   }
+   else if((action == "DRAW_KEY_LEVEL" || action == "DRAW_KL") && numParts >= 3) {
+      double lvl = StringToDouble(parts[1]);
+      string levelType = parts[2];
+      if(lvl <= 0.0) return;
+      
+      last_key_level = lvl;
+      last_level_type = levelType;
+      bool isBull = (levelType == "support" || levelType == "SUPPORT" || levelType == "bullish" || levelType == "BULLISH");
+      
+      Print("📍 [EA] Drawing key level at: ", DoubleToString(lvl, 5), " | Type: ", levelType);
+      DrawKeyLevel("SMC_KL_" + IntegerToString((int)TimeCurrent()) + "_" + IntegerToString(MathRand() % 10000), lvl, isBull ? clrLimeGreen : clrTomato, "KL");
    }
    else {
       Print("❓ [EA] Unknown command: ", action);
@@ -394,6 +438,7 @@ void DrawZone(string name, datetime t1, double p1, datetime t2, double p2, color
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ChartRedraw(0);
 }
 
 void DrawKeyLevel(string name, double levelPrice, color clr, string txt)
@@ -405,10 +450,15 @@ void DrawKeyLevel(string name, double levelPrice, color clr, string txt)
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
+   ChartRedraw(0);
 }
 
 bool IsSignificantPOI(double top, double bottom, double zTime, string action)
 {
+   // Ensure drawings are always visible when app sends draw commands.
+   if(action == "DRAW_OB" || action == "DRAW_FVG" || action == "DRAW_KEY_LEVEL" || action == "DRAW_KL")
+      return true;
+
    double pTop = MathMax(top, bottom);
    double pBottom = MathMin(top, bottom);
    double zoneHeight = MathAbs(pTop - pBottom);
@@ -440,15 +490,67 @@ bool IsSignificantPOI(double top, double bottom, double zTime, string action)
 }
 
 void OpenBuy(double sl, double tp) {
+   // Close opposite positions first (Anti-Hedging)
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == MagicNumber && posInfo.PositionType() == POSITION_TYPE_SELL) {
+         Print("🔄 [EA] Closing opposite SELL before opening BUY");
+         trade.PositionClose(posInfo.Ticket());
+      }
+   }
+
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   if(trade.Buy(LotSize, _Symbol, ask, sl, tp, EA_Name))
-      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "BUY", LotSize, ask, sl, tp, AccountInfoDouble(ACCOUNT_PROFIT));
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   
+   double finalSl = sl;
+   double finalTp = tp;
+   
+   // Ensure minimum distance from price for SL/TP to prevent broker rejection
+   if(finalSl > 0 && ask - finalSl < stopsLevel) finalSl = ask - stopsLevel - (10 * point);
+   if(finalTp > 0 && finalTp - ask < stopsLevel) finalTp = ask + stopsLevel + (10 * point);
+   
+   Print("🚀 [EA] Executing BUY - Price: ", DoubleToString(ask, 5), " SL: ", DoubleToString(finalSl, 5), " TP: ", DoubleToString(finalTp, 5));
+   
+   if(trade.Buy(LotSize, _Symbol, ask, finalSl, finalTp, EA_Name)) {
+      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "BUY", LotSize, ask, finalSl, finalTp, AccountInfoDouble(ACCOUNT_PROFIT));
+      FxScalpKing.AddLog("BUY Order Executed: " + DoubleToString(LotSize, 2) + " lots at " + DoubleToString(ask, 5), "success");
+   }
+   else {
+      Print("❌ [EA] BUY failed: ", trade.ResultRetcodeDescription());
+      FxScalpKing.AddLog("BUY Order Failed: " + trade.ResultRetcodeDescription(), "error");
+   }
 }
 
 void OpenSell(double sl, double tp) {
+   // Close opposite positions first (Anti-Hedging)
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == MagicNumber && posInfo.PositionType() == POSITION_TYPE_BUY) {
+         Print("🔄 [EA] Closing opposite BUY before opening SELL");
+         trade.PositionClose(posInfo.Ticket());
+      }
+   }
+
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(trade.Sell(LotSize, _Symbol, bid, sl, tp, EA_Name))
-      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "SELL", LotSize, bid, sl, tp, AccountInfoDouble(ACCOUNT_PROFIT));
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   
+   double finalSl = sl;
+   double finalTp = tp;
+   
+   // Ensure minimum distance from price for SL/TP
+   if(finalSl > 0 && finalSl - bid < stopsLevel) finalSl = bid + stopsLevel + (10 * point);
+   if(finalTp > 0 && bid - finalTp < stopsLevel) finalTp = bid - stopsLevel - (10 * point);
+   
+   Print("🚀 [EA] Executing SELL - Price: ", DoubleToString(bid, 5), " SL: ", DoubleToString(finalSl, 5), " TP: ", DoubleToString(finalTp, 5));
+   
+   if(trade.Sell(LotSize, _Symbol, bid, finalSl, finalTp, EA_Name)) {
+      FxScalpKing.NotifyTradeExecuted(trade.ResultOrder(), "SELL", LotSize, bid, finalSl, finalTp, AccountInfoDouble(ACCOUNT_PROFIT));
+      FxScalpKing.AddLog("SELL Order Executed: " + DoubleToString(LotSize, 2) + " lots at " + DoubleToString(bid, 5), "success");
+   }
+   else {
+      Print("❌ [EA] SELL failed: ", trade.ResultRetcodeDescription());
+      FxScalpKing.AddLog("SELL Order Failed: " + trade.ResultRetcodeDescription(), "error");
+   }
 }
 
 void CloseAllTrades() {
@@ -573,5 +675,73 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 
    long posId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
    SendPositionHistorySync(posId);
+}
+
+//+------------------------------------------------------------------+
+//| CREATE WATERMARK                                                 |
+//+------------------------------------------------------------------+
+void CreateWatermark()
+{
+   string name = "SMC_Watermark";
+   ObjectDelete(0, name);
+   
+   // Use a standard Bitmap Label for screen-fixed positioning
+   if(ObjectCreate(0, name, OBJ_BITMAP_LABEL, 0, 0, 0))
+   {
+      // Try to load the resource. Note: MQL5 is very picky with PNGs.
+      // If this fails, the red square appears. 
+      // Ensure logo.png is a 32-bit PNG with transparency or a BMP.
+      ObjectSetString(0, name, OBJPROP_BMPFILE, 0, "::logo.png");
+      ObjectSetString(0, name, OBJPROP_BMPFILE, 1, "::logo.png"); // Set for both states
+      
+      // Center the anchor point of the image
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      
+      // Dynamic centering based on chart size
+      int chart_w = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+      int chart_h = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+      
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, chart_w / 2);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, chart_h / 2);
+      
+      // Opacity/Visibility settings
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);         // Behind candles
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);   // Not clickable
+      ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);       // Don't show in object list
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);          // Bottom layer
+      
+      // Ensure the object is visible
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      
+      ChartRedraw(0);
+      Print("✅ Background Watermark attempted. If you see a red square, MT5 cannot read the logo.png format.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| UPDATE DEBUG PANEL                                               |
+//+------------------------------------------------------------------+
+void UpdateDebugPanel()
+{
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   
+   string comment = "";
+   comment += "╔═══════════════════════════════════════════╗\n";
+   comment += "║       " + EA_Name + "       ║\n";
+   comment += "╠═══════════════════════════════════════════╣\n";
+   comment += "║  Symbol:    " + _Symbol + "                        \n";
+   comment += "║  Price:     " + DoubleToString(currentPrice, 5) + "               \n";
+   comment += "║  Spread:    " + IntegerToString(spread) + "                          \n";
+   comment += "║  KeyLevel:  " + (last_key_level > 0 ? DoubleToString(last_key_level, 5) : "N/A") + " (" + last_level_type + ") \n";
+   comment += "╠═══════════════════════════════════════════╣\n";
+   comment += "║  Account:   " + IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN)) + "                  \n";
+   comment += "║  Equity:    " + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "                  \n";
+   comment += "║  License:   " + licensePlan + " (" + licenseExpiry + ") \n";
+   comment += "╚═══════════════════════════════════════════╝";
+   
+   Comment(comment);
 }
 //+------------------------------------------------------------------+

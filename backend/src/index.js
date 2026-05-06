@@ -15,6 +15,7 @@ let accountState = {
   pnl_today: 0,
   ea_connected: false,
   eaSymbol: 'BTCUSD',
+  currency: 'USD',
   price: 4565.58,
   fastEMA: 0,
   slowEMA: 0,
@@ -28,6 +29,7 @@ let accountState = {
   chart: {},
   structures: {},
   keyLevelInfo: null,
+  logs: [], // Store logs from EA
 };
 let closedTrades = [];
 
@@ -68,7 +70,7 @@ app.post('/api/ea/validate', (req, res) => {
 app.post('/api/ea/update', (req, res) => {
   console.log(' [Backend] EA heartbeat received');
   
-  const { accountData, testStructures, structures, positions, chart } = req.body;
+  const { accountData, testStructures, structures, positions, chart, logs: eaLogs } = req.body;
   
   // Update account state with real EA data
   if (accountData) {
@@ -80,6 +82,7 @@ app.post('/api/ea/update', (req, res) => {
     accountState.balance = accountData.balance || accountState.balance;
     accountState.equity = accountData.equity || accountState.balance;
     accountState.price = accountData.price || accountState.price;
+    accountState.currency = accountData.currency || accountState.currency || 'USD';
     // MT5 EA sends positions at top-level; keep accountData fallback for compatibility
     accountState.positions = positions || accountData.positions || accountState.positions;
     accountState.ea_connected = true;
@@ -120,22 +123,41 @@ app.post('/api/ea/update', (req, res) => {
     
     // Enhanced logging
     console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
-    console.log(` [Backend] Account - Balance: R${accountState.balance} | Equity: R${accountState.equity} | Positions: ${accountState.positions.length}`);
+    console.log(` [Backend] Account - Balance: ${accountState.currency}${accountState.balance} | Equity: ${accountState.currency}${accountState.equity} | Positions: ${accountState.positions.length}`);
     
     // Store structures from EA (supports both payload keys)
     const incomingStructures = structures || testStructures;
-    if (incomingStructures && typeof incomingStructures === 'object') {
+    if (incomingStructures && typeof incomingStructures === 'object' && Object.keys(incomingStructures).length > 0) {
       accountState.structures = incomingStructures;
-      console.log(` [Backend] Structures updated - Timeframes: ${Object.keys(incomingStructures).join(', ')}`);
-      
-      // Calculate key level distances
-      const keyLevelInfo = calculateKeyLevelDistance(accountState.price, incomingStructures);
-      if (keyLevelInfo) {
-        console.log(` [Backend] Next Key Level - ${keyLevelInfo.type} at ${keyLevelInfo.level} (${keyLevelInfo.distance}pts away)`);
-        accountState.keyLevelInfo = keyLevelInfo;
-      } else {
-        accountState.keyLevelInfo = null;
-      }
+      console.log(` [Backend] Structures updated from EA - Timeframes: ${Object.keys(incomingStructures).join(', ')}`);
+    } else if (accountState.chart && Object.keys(accountState.chart).length > 0) {
+      // Fallback: Generate basic structures from chart data if EA doesn't send them
+      accountState.structures = generateBasicStructures(accountState.chart);
+      console.log(` [Backend] Structures generated from chart data`);
+    }
+    
+    // Calculate key level distances
+    const keyLevelInfo = calculateKeyLevelDistance(accountState.price, accountState.structures);
+    if (keyLevelInfo) {
+      console.log(` [Backend] Next Key Level - ${keyLevelInfo.type} at ${keyLevelInfo.level} (${keyLevelInfo.distance.toFixed(2)}pts away)`);
+      accountState.keyLevelInfo = keyLevelInfo;
+    } else {
+      accountState.keyLevelInfo = null;
+    }
+
+    // Add logs from EA
+    if (Array.isArray(eaLogs)) {
+      eaLogs.forEach(log => {
+        accountState.logs.unshift({
+          id: `${Date.now()}-${Math.random()}`,
+          timestamp: new Date().toISOString(),
+          component: 'EA',
+          level: log.level || 'info',
+          message: log.message,
+          details: log.details
+        });
+      });
+      if (accountState.logs.length > 200) accountState.logs = accountState.logs.slice(0, 200);
     }
     
     // Calculate real P&L from EA data (use realistic calculations)
@@ -170,10 +192,10 @@ app.post('/api/ea/update', (req, res) => {
     
     // Log changes
     if (Math.abs(prevBalance - accountState.balance) > 0.01) {
-      console.log(` [Backend] Balance changed: R${prevBalance} → R${accountState.balance}`);
+      console.log(` [Backend] Balance changed: ${accountState.currency}${prevBalance} → ${accountState.currency}${accountState.balance}`);
     }
     if (Math.abs(prevEquity - accountState.equity) > 0.01) {
-      console.log(` [Backend] Equity changed: R${prevEquity} → R${accountState.equity}`);
+      console.log(` [Backend] Equity changed: ${accountState.currency}${prevEquity} → ${accountState.currency}${accountState.equity}`);
     }
     if (Math.abs(prevPrice - accountState.price) > 0.0001) {
       console.log(` [Backend] Price changed: ${prevPrice} → ${accountState.price}`);
@@ -188,11 +210,26 @@ app.post('/api/ea/update', (req, res) => {
     console.log(`[BACKEND] Sending ${commandsToSend.length} commands to EA:`, commandsToSend.map(c => c.command).join(', '));
   }
   
+  // Automatically add DRAW commands for all identified key levels in the current timeframe
+  if (accountState.structures && accountState.structures['M5']) {
+    const m5Levels = accountState.structures['M5'].keyLevels || [];
+    m5Levels.forEach(lvl => {
+      commandsToSend.push({
+        action: 'DRAW_KEY_LEVEL',
+        command: `DRAW_KEY_LEVEL|${lvl.price}|${lvl.type}`,
+        price: lvl.price,
+        levelType: lvl.type
+      });
+    });
+  }
+  
   res.json({
     ea_connected: true,
     lastSeen: new Date().toISOString(),
+    currency: accountState.currency,
     structures: accountState.structures,
     keyLevelInfo: accountState.keyLevelInfo,
+    logs: accountState.logs, // Send logs back to EA/App
     commands: commandsToSend, // EA parser expects command objects
     commandStrings: commandsToSend.map(cmd => cmd.command)
   });
@@ -227,6 +264,41 @@ function normalizeStructuresForSignal(rawStructures, currentPrice) {
   }
 
   return out;
+}
+
+function generateBasicStructures(charts) {
+  const structures = {};
+  const tfs = Object.keys(charts);
+  
+  tfs.forEach(tf => {
+    const candles = charts[tf];
+    if (!Array.isArray(candles) || candles.length < 10) return;
+    
+    const keyLevels = [];
+    const sorted = [...candles].sort((a, b) => b.x - a.x); // Newest first
+    
+    // Simple Peak/Trough detection for Key Levels
+    for (let i = 2; i < Math.min(sorted.length - 2, 50); i++) {
+      // Resistance (Peak)
+      if (sorted[i].high > sorted[i-1].high && sorted[i].high > sorted[i-2].high &&
+          sorted[i].high > sorted[i+1].high && sorted[i].high > sorted[i+2].high) {
+        keyLevels.push({ price: sorted[i].high, type: 'RESISTANCE', strength: 1 });
+      }
+      // Support (Trough)
+      if (sorted[i].low < sorted[i-1].low && sorted[i].low < sorted[i-2].low &&
+          sorted[i].low < sorted[i+1].low && sorted[i].low < sorted[i+2].low) {
+        keyLevels.push({ price: sorted[i].low, type: 'SUPPORT', strength: 1 });
+      }
+    }
+    
+    structures[tf] = {
+      keyLevels: keyLevels.slice(0, 5), // Keep top 5 per TF
+      orderBlocks: [],
+      fvgs: []
+    };
+  });
+  
+  return structures;
 }
 
 // Helper function to calculate key level distances
@@ -369,6 +441,10 @@ app.post('/api/order', (req, res) => {
       
     case 'CLOSE_ALL':
       commandString = `CLOSE_ALL`;
+      break;
+      
+    case 'MODIFY_SL':
+      commandString = `MODIFY_SL|${ticket}|${sl || 0}|${tp || 0}`;
       break;
       
     case 'DRAW_OB':

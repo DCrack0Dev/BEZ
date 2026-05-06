@@ -178,6 +178,7 @@ public:
       double profit = AccountInfoDouble(ACCOUNT_PROFIT);
       double margin = AccountInfoDouble(ACCOUNT_MARGIN);
       double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      string currency = AccountInfoString(ACCOUNT_CURRENCY);
       double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
       int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
       double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -191,6 +192,7 @@ public:
             "\"pnl_today\":" + DoubleToString(profit, 2) + ","
             "\"margin\":" + DoubleToString(margin, 2) + ","
             "\"freeMargin\":" + DoubleToString(freeMargin, 2) + ","
+            "\"currency\":\"" + currency + "\","
             "\"accountId\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ","
             "\"eaSymbol\":\"" + _Symbol + "\","
             "\"digits\":" + IntegerToString(digits) + ","

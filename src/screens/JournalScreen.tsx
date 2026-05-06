@@ -6,11 +6,17 @@ import { COLORS } from '../theme/colors';
 import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
 
+import { useTradeStore } from '../store/useTradeStore';
+
 const JournalScreen = () => {
+  const { account } = useTradeStore();
   const [filter, setFilter] = useState<'today' | 'week' | 'month'>('today');
   const [trades, setTrades] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState({ total: 0, winRate: 0, pnl: 0 });
+
+  const currency = account?.currency || 'USD';
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
 
   const fetchTrades = async () => {
     setLoading(true);
@@ -108,7 +114,7 @@ const JournalScreen = () => {
               <View style={styles.summaryItem}>
                 <Text style={TYPOGRAPHY.caption}>Total P&L</Text>
                 <Text style={[TYPOGRAPHY.h3, { color: summary.pnl >= 0 ? COLORS.buy : COLORS.sell }]}>
-                  {summary.pnl >= 0 ? '+' : ''}{summary.pnl.toFixed(2)}
+                  {summary.pnl >= 0 ? '+' : ''}{symbol}{summary.pnl.toFixed(2)}
                 </Text>
               </View>
             </View>
@@ -124,7 +130,7 @@ const JournalScreen = () => {
                     </Text>
                   </View>
                   <Text style={[TYPOGRAPHY.mono, { color: trade.pnl >= 0 ? COLORS.buy : COLORS.sell, fontSize: 18 }]}>
-                    {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+                    {trade.pnl >= 0 ? '+' : ''}{symbol}{trade.pnl.toFixed(2)}
                   </Text>
                 </View>
                 <View style={styles.tradeFooter}>

@@ -69,9 +69,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
   setSubscription: (subscription) => set({ subscription }),
   loadSettings: async () => {
-    const botSettings = await AsyncStorage.getItem('botSettings');
-    const notifications = await AsyncStorage.getItem('notifications');
-    if (botSettings) set({ botSettings: JSON.parse(botSettings) });
-    if (notifications) set({ notifications: JSON.parse(notifications) });
+    try {
+      const botSettings = await AsyncStorage.getItem('botSettings');
+      const notifications = await AsyncStorage.getItem('notifications');
+      if (botSettings) {
+        const parsed = JSON.parse(botSettings);
+        set({ botSettings: { ...DEFAULT_BOT_SETTINGS, ...parsed } });
+      }
+      if (notifications) {
+        const parsed = JSON.parse(notifications);
+        set({ notifications: { ...DEFAULT_NOTIFICATION_SETTINGS, ...parsed } });
+      }
+    } catch (error) {
+      console.error('[SETTINGS] Error loading settings:', error);
+      // Keep default settings on error
+    }
   },
 }));

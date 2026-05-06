@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS } from '../theme/colors';
 import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const TERMINAL_MAX_HEIGHT = SCREEN_HEIGHT / 3;
 
 interface LogEntry {
   id: string;
@@ -22,14 +25,16 @@ interface TerminalProps {
 
 const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) => {
   const scrollViewRef = useRef<ScrollView>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false); // Default to collapsed as requested
 
   useEffect(() => {
-    // Auto-scroll to bottom when new logs arrive
-    if (scrollViewRef.current) {
-      scrollViewRef.current.scrollToEnd({ animated: true });
+    // Auto-scroll to bottom when new logs arrive and it's expanded
+    if (isExpanded && scrollViewRef.current) {
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
     }
-  }, [logs]);
+  }, [logs, isExpanded]);
 
   const getComponentColor = (component: string) => {
     switch (component) {
@@ -51,8 +56,9 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
     }
   };
 
-  const formatTime = (timestamp: Date) => {
-    return timestamp.toLocaleTimeString('en-US', { 
+  const formatTime = (timestamp: Date | string) => {
+    const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+    return date.toLocaleTimeString('en-US', { 
       hour12: false, 
       hour: '2-digit', 
       minute: '2-digit', 
@@ -62,10 +68,14 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
 
   return (
     <View style={[styles.container, isExpanded && styles.expanded]}>
-      <View style={styles.header}>
+      <TouchableOpacity 
+        activeOpacity={0.8}
+        onPress={() => setIsExpanded(!isExpanded)}
+        style={styles.header}
+      >
         <View style={styles.headerLeft}>
-          <MaterialCommunityIcons name="console" size={20} color={COLORS.textPrimary} />
-          <Text style={styles.title}>System Terminal</Text>
+          <MaterialCommunityIcons name="console" size={18} color={COLORS.primary} />
+          <Text style={styles.title} numberOfLines={1}>TERMINAL</Text>
           <View style={styles.badge}>
             <Text style={styles.badgeText}>{logs.length}</Text>
           </View>
@@ -74,43 +84,43 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
         <View style={styles.headerRight}>
           {keyLevelDistance && (
             <View style={styles.keyLevelInfo}>
-              <MaterialCommunityIcons name="map-marker" size={16} color={COLORS.warning} />
-              <Text style={styles.keyLevelText}>
-                Next {keyLevelDistance.type}: {keyLevelDistance.level} ({Math.abs(keyLevelDistance.distance).toFixed(2)}pts)
+              <MaterialCommunityIcons name="map-marker" size={12} color={COLORS.warning} />
+              <Text style={styles.keyLevelText} numberOfLines={1}>
+                {keyLevelDistance.type}: {keyLevelDistance.level}
               </Text>
             </View>
           )}
           
-          <TouchableOpacity onPress={() => setIsExpanded(!isExpanded)} style={styles.expandBtn}>
+          <View style={styles.controls}>
+            <TouchableOpacity onPress={onClear} style={styles.controlBtn}>
+              <MaterialCommunityIcons name="delete-outline" size={18} color={COLORS.error} />
+            </TouchableOpacity>
             <MaterialCommunityIcons 
               name={isExpanded ? "chevron-down" : "chevron-up"} 
-              size={20} 
+              size={22} 
               color={COLORS.textPrimary} 
             />
-          </TouchableOpacity>
-          
-          <TouchableOpacity onPress={onClear} style={styles.clearBtn}>
-            <MaterialCommunityIcons name="delete" size={20} color={COLORS.error} />
-          </TouchableOpacity>
+          </View>
         </View>
-      </View>
+      </TouchableOpacity>
 
       {isExpanded && (
         <ScrollView 
           ref={scrollViewRef}
           style={styles.logContainer}
-          showsVerticalScrollIndicator={false}
+          showsVerticalScrollIndicator={true}
+          nestedScrollEnabled={true}
         >
           {logs.length === 0 ? (
             <View style={styles.emptyState}>
-              <MaterialCommunityIcons name="console" size={40} color={COLORS.textSecondary} />
+              <MaterialCommunityIcons name="console" size={30} color="#333" />
               <Text style={styles.emptyText}>No logs yet...</Text>
             </View>
           ) : (
-            logs.map((log) => (
+            [...logs].reverse().map((log) => (
               <View key={log.id} style={styles.logEntry}>
                 <View style={styles.logHeader}>
-                  <Text style={[styles.logTime, { color: COLORS.textSecondary }]}>
+                  <Text style={[styles.logTime, { color: '#666' }]}>
                     {formatTime(log.timestamp)}
                   </Text>
                   <Text style={[styles.logComponent, { color: getComponentColor(log.component) }]}>
@@ -120,11 +130,11 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
                     {log.level.toUpperCase()}
                   </Text>
                 </View>
-                <Text style={[styles.logMessage, { color: COLORS.textPrimary }]}>
+                <Text style={[styles.logMessage, { color: '#ccc' }]}>
                   {log.message}
                 </Text>
                 {log.details && (
-                  <Text style={[styles.logDetails, { color: COLORS.textSecondary }]}>
+                  <Text style={[styles.logDetails, { color: '#888' }]}>
                     {log.details}
                   </Text>
                 )}
@@ -139,46 +149,57 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: COLORS.card,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    maxHeight: 200,
+    backgroundColor: '#0a0a0a',
+    borderTopWidth: 2,
+    borderTopColor: COLORS.primary,
+    elevation: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 5,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
   },
   expanded: {
-    maxHeight: 400,
+    height: TERMINAL_MAX_HEIGHT,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: SPACING.s,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingHorizontal: SPACING.m,
+    paddingVertical: SPACING.s,
+    backgroundColor: '#151515',
+    height: 45,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
+    maxWidth: '40%',
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-end',
+    flex: 1,
   },
   title: {
-    ...TYPOGRAPHY.caption,
-    color: COLORS.textPrimary,
+    fontSize: 12,
+    color: COLORS.primary,
     marginLeft: SPACING.xs,
-    fontWeight: 'bold',
+    fontWeight: '900',
+    letterSpacing: 2,
   },
   badge: {
     backgroundColor: COLORS.primary,
     borderRadius: 10,
     paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingVertical: 1,
     marginLeft: SPACING.s,
   },
   badgeText: {
-    ...TYPOGRAPHY.caption,
     color: COLORS.white,
     fontSize: 10,
     fontWeight: 'bold',
@@ -186,42 +207,39 @@ const styles = StyleSheet.create({
   keyLevelInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.background,
+    backgroundColor: '#222',
     paddingHorizontal: SPACING.s,
-    paddingVertical: SPACING.xs,
+    paddingVertical: 4,
     borderRadius: 4,
     marginRight: SPACING.s,
+    borderWidth: 1,
+    borderColor: '#333',
+    maxWidth: '60%',
   },
   keyLevelText: {
-    ...TYPOGRAPHY.caption,
-    color: COLORS.textPrimary,
-    marginLeft: SPACING.xs,
+    fontSize: 10,
+    color: COLORS.warning,
+    marginLeft: 4,
+    fontWeight: 'bold',
   },
-  expandBtn: {
-    padding: SPACING.xs,
+  controls: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  clearBtn: {
-    padding: SPACING.xs,
+  controlBtn: {
+    padding: 4,
+    marginRight: SPACING.s,
   },
   logContainer: {
-    maxHeight: 350,
-    padding: SPACING.s,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: SPACING.xl,
-  },
-  emptyText: {
-    ...TYPOGRAPHY.caption,
-    color: COLORS.textSecondary,
-    marginTop: SPACING.s,
+    flex: 1,
+    paddingHorizontal: SPACING.m,
+    paddingTop: SPACING.s,
   },
   logEntry: {
-    marginBottom: SPACING.s,
-    paddingVertical: SPACING.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    marginBottom: 10,
+    borderLeftWidth: 2,
+    borderLeftColor: '#222',
+    paddingLeft: 10,
   },
   logHeader: {
     flexDirection: 'row',
@@ -229,31 +247,39 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   logTime: {
-    ...TYPOGRAPHY.caption,
     fontSize: 10,
-    marginRight: SPACING.s,
+    fontFamily: 'monospace',
+    marginRight: 8,
   },
   logComponent: {
-    ...TYPOGRAPHY.caption,
     fontSize: 10,
     fontWeight: 'bold',
-    marginRight: SPACING.s,
+    marginRight: 8,
   },
   logLevel: {
-    ...TYPOGRAPHY.caption,
-    fontSize: 10,
-    fontWeight: 'bold',
+    fontSize: 9,
+    fontWeight: '900',
   },
   logMessage: {
-    ...TYPOGRAPHY.caption,
     fontSize: 11,
-    lineHeight: 14,
+    lineHeight: 15,
+    fontFamily: 'monospace',
   },
   logDetails: {
-    ...TYPOGRAPHY.caption,
     fontSize: 10,
     marginTop: 2,
-    fontStyle: 'italic',
+    opacity: 0.7,
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  emptyText: {
+    fontSize: 12,
+    marginTop: SPACING.s,
+    color: '#444',
   },
 });
 

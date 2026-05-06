@@ -29,11 +29,17 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ apiKey: null, serverUrl: null, jwt: null, isAuthenticated: false });
   },
   loadAuth: async () => {
-    const apiKey = await SecureStore.getItemAsync('apiKey');
-    const serverUrl = await SecureStore.getItemAsync('serverUrl');
-    const jwt = await SecureStore.getItemAsync('jwt');
-    if (apiKey && serverUrl && jwt) {
-      set({ apiKey, serverUrl, jwt, isAuthenticated: true });
+    try {
+      const apiKey = await SecureStore.getItemAsync('apiKey');
+      const serverUrl = await SecureStore.getItemAsync('serverUrl');
+      const jwt = await SecureStore.getItemAsync('jwt');
+      if (apiKey && serverUrl && jwt) {
+        set({ apiKey, serverUrl, jwt, isAuthenticated: true });
+      }
+    } catch (error) {
+      console.error('[AUTH] Error loading auth data:', error);
+      // Set default state on error
+      set({ apiKey: null, serverUrl: null, jwt: null, isAuthenticated: false });
     }
   },
 }));

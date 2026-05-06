@@ -1,6 +1,11 @@
 import { useAuthStore } from '../store/useAuthStore';
 import apiClient from './client';
 
+export const getAccountData = async () => {
+  const response = await apiClient.get('/api/account');
+  return response.data;
+};
+
 export const getOpenOrders = async () => {
   const response = await apiClient.get('/api/account'); // Account endpoint now returns positions
   const positions = response.data.positions || [];
@@ -33,6 +38,7 @@ export const placeOrder = async (orderData: {
   time?: number;
   price?: number;
   levelType?: string;
+  ticket?: string | number;
 }) => {
   const { apiKey } = useAuthStore.getState();
   const payload = {

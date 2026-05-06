@@ -38,6 +38,12 @@ private:
    long        m_tickVolume;
    string      m_requestedTf;
    string      m_structuresJson;
+   string      m_logs[];
+   
+   // Key Level Data from Backend
+   double      m_klPrice;
+   string      m_klType;
+   double      m_klDistance;
    
 public:
    // Constructor
@@ -58,6 +64,24 @@ public:
       m_tickVolume = 0;
       m_requestedTf = "M5"; // Default
       m_structuresJson = "{\"orderBlocks\":[],\"fvgs\":[],\"keyLevels\":[],\"marketStructure\":[]}";
+      m_klPrice = 0.0;
+      m_klType = "N/A";
+      m_klDistance = 0.0;
+      ArrayResize(m_logs, 0);
+   }
+   
+   void GetKeyLevelInfo(double &price, string &type, double &dist)
+   {
+      price = m_klPrice;
+      type = m_klType;
+      dist = m_klDistance;
+   }
+   
+   void AddLog(string message, string level = "info", string details = "")
+   {
+      int size = ArraySize(m_logs);
+      ArrayResize(m_logs, size + 1);
+      m_logs[size] = "{\"message\":\"" + message + "\",\"level\":\"" + level + "\",\"details\":\"" + details + "\"}";
    }
    
    void SetStructures(string json) { m_structuresJson = json; }
@@ -303,11 +327,23 @@ public:
          json += "\"price\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), 5) + ",";
          json += "\"sl\":" + DoubleToString(PositionGetDouble(POSITION_SL), 5) + ",";
          json += "\"tp\":" + DoubleToString(PositionGetDouble(POSITION_TP), 5) + ",";
-         json += "\"profit\":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2);
-         json += "}";
+         json += "\"profit\":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) +
+         "}";
+      }
+      
+      json += "],"
+         "\"logs\":[";
+      
+      for(int i = 0; i < ArraySize(m_logs); i++)
+      {
+         if(i > 0) json += ",";
+         json += m_logs[i];
       }
       
       json += "]}";
+      
+      // Clear logs after sending
+      ArrayResize(m_logs, 0);
       
       string headers = "Content-Type: application/json";
       string response;
@@ -325,6 +361,36 @@ public:
       if(!success || respCode != 200) {
          Print("❌ Update failed. Code: ", respCode);
          return false;
+      }
+      
+      // Parse Key Level Info from response
+      int klStart = StringFind(response, "\"keyLevelInfo\":{");
+      if(klStart >= 0)
+      {
+         int klEnd = StringFind(response, "}", klStart);
+         string klObj = StringSubstr(response, klStart, klEnd - klStart + 1);
+         
+         // Extract level
+         int lvlStart = StringFind(klObj, "\"level\":") + 8;
+         int lvlEnd = StringFind(klObj, ",", lvlStart);
+         if(lvlEnd < 0) lvlEnd = StringFind(klObj, "}", lvlStart);
+         if(lvlStart > 7 && lvlEnd > lvlStart)
+            m_klPrice = StringToDouble(StringSubstr(klObj, lvlStart, lvlEnd - lvlStart));
+            
+         // Extract type
+         int typeStart = StringFind(klObj, "\"type\":\"") + 8;
+         int typeEnd = StringFind(klObj, "\"", typeStart);
+         if(typeStart > 7 && typeEnd > typeStart)
+            m_klType = StringSubstr(klObj, typeStart, typeEnd - typeStart);
+            
+         // Extract distance
+         int distStart = StringFind(klObj, "\"distance\":") + 11;
+         int distEnd = StringFind(klObj, ",", distStart);
+         if(distEnd < 0) distEnd = StringFind(klObj, "}", distStart);
+         if(distStart > 10 && distEnd > distStart)
+            m_klDistance = StringToDouble(StringSubstr(klObj, distStart, distEnd - distStart));
+            
+         Print("📍 [EA] Parsed Key Level: ", DoubleToString(m_klPrice, 5), " | Type: ", m_klType);
       }
       
       // Parse commands from response
@@ -355,6 +421,11 @@ public:
          int actionStart = StringFind(cmdObj, "\"action\":\"") + 10;
          int actionEnd = StringFind(cmdObj, "\"", actionStart);
          string action = StringSubstr(cmdObj, actionStart, actionEnd - actionStart);
+
+         // Extract prebuilt command string (preferred for exact backend intent)
+         int commandStart = StringFind(cmdObj, "\"command\":\"") + 11;
+         int commandEnd = StringFind(cmdObj, "\"", commandStart);
+         string commandStr = (commandStart > 10 && commandEnd > commandStart) ? StringSubstr(cmdObj, commandStart, commandEnd - commandStart) : "";
 
          // Extract timeframe (for SET_TF)
          int tfStart = StringFind(cmdObj, "\"timeframe\":\"");
@@ -401,10 +472,13 @@ public:
          if(timeEnd < 0) timeEnd = StringFind(cmdObj, "}", timeStart);
          string timeStr = (timeStart > 6 && timeEnd > timeStart) ? StringSubstr(cmdObj, timeStart, timeEnd - timeStart) : "0";
          
-         // Add to commands array (Format: ACTION|SL|TP|TOP|BOTTOM|TYPE|TIME)
+         // Add to commands array
          int idx = ArraySize(commands);
          ArrayResize(commands, idx + 1);
-         if(action == "SET_TF" && tfStr != "") {
+         if(commandStr != "") {
+            commands[idx] = commandStr;
+            Print("Parsed direct command: ", commands[idx]);
+         } else if(action == "SET_TF" && tfStr != "") {
             commands[idx] = action + "|" + tfStr;
             Print("Parsed timeframe command: ", commands[idx]);
          } else if(StringFind(action, "DRAW_") == 0) {

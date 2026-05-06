@@ -9,17 +9,19 @@ interface AccountCardProps {
   equity: number;
   pnlToday: number;
   eaConnected: boolean;
+  currency?: string;
 }
 
-const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, eaConnected }) => {
+const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, eaConnected, currency = 'USD' }) => {
   const isPositive = pnlToday >= 0;
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
 
   return (
     <View style={styles.card}>
       <View style={styles.header}>
         <View>
           <Text style={TYPOGRAPHY.caption}>Account Balance</Text>
-          <Text style={styles.balance}>${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
+          <Text style={styles.balance}>{symbol}{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: eaConnected ? COLORS.buy + '20' : COLORS.sell + '20' }]}>
           <View style={[styles.statusDot, { backgroundColor: eaConnected ? COLORS.buy : COLORS.sell }]} />
@@ -32,12 +34,12 @@ const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, ea
       <View style={styles.footer}>
         <View>
           <Text style={TYPOGRAPHY.caption}>Equity</Text>
-          <Text style={TYPOGRAPHY.mono}>${equity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
+          <Text style={TYPOGRAPHY.mono}>{symbol}{equity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
         </View>
         <View style={styles.pnlContainer}>
           <Text style={[TYPOGRAPHY.caption, { textAlign: 'right' }]}>Today's P&L</Text>
           <Text style={[TYPOGRAPHY.mono, { color: isPositive ? COLORS.buy : COLORS.sell }]}>
-            {isPositive ? '+' : ''}{pnlToday.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            {isPositive ? '+' : ''}{symbol}{pnlToday.toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </Text>
         </View>
       </View>

@@ -1,337 +1,63 @@
-import React, { useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { getAccountData, getOpenOrders, placeOrder } from '../api/orders';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { getAccountData } from '../api/account';
-import { getOpenOrders, placeOrder } from '../api/orders';
+import { useLogStore } from '../store/useLogStore';
 
-// --- PURE SMC TRADING HELPERS ---
+// --- HELPER TYPES ---
 interface Candle {
-  x: number; open: number; high: number; low: number; close: number; tick_volume?: number;
+  x: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  tick_volume?: number;
+}
+
+interface OrderBlock {
+  top: number;
+  bottom: number;
+  type: 'BULLISH' | 'BEARISH';
+  index: number;
+  mitigated: boolean;
+}
+
+interface FVG {
+  top: number;
+  bottom: number;
+  type: 'BULLISH' | 'BEARISH';
+  index: number;
+  mitigated: boolean;
 }
 
 interface KeyLevel {
   price: number;
   type: 'SUPPORT' | 'RESISTANCE';
   strength: number;
-  touches: number;
 }
-
-interface POI {
-  price: number;
-  type: 'BOS' | 'CHOCH' | 'LIQUIDITY';
-  timeframe: string;
-}
-
-// Check if a candle is an up-close (bullish) or down-close (bearish)
-const isBullish = (c: Candle) => c.close > c.open;
-const isBearish = (c: Candle) => c.close < c.open;
-
-// Find swing highs and lows
-const findSwingHighs = (chart: Candle[], window: number = 2): {index: number, val: number}[] => {
-  const swings = [];
-  for (let i = window; i < chart.length - window; i++) {
-    let isHigh = true;
-    for (let j = 1; j <= window; j++) {
-      if (chart[i].high <= chart[i - j].high || chart[i].high <= chart[i + j].high) {
-        isHigh = false; break;
-      }
-    }
-    if (isHigh) swings.push({index: i, val: chart[i].high});
-  }
-  return swings;
-};
-
-const findSwingLows = (chart: Candle[], window: number = 2): {index: number, val: number}[] => {
-  const swings = [];
-  for (let i = window; i < chart.length - window; i++) {
-    let isLow = true;
-    for (let j = 1; j <= window; j++) {
-      if (chart[i].low >= chart[i - j].low || chart[i].low >= chart[i + j].low) {
-        isLow = false; break;
-      }
-    }
-    if (isLow) swings.push({index: i, val: chart[i].low});
-  }
-  return swings;
-};
-
-// Identify Fair Value Gaps (FVG)
-export interface FVG { index: number; type: 'BULLISH'|'BEARISH'; top: number; bottom: number; mitigated: boolean; }
-export const findFVGs = (chart: Candle[]): FVG[] => {
-  const fvgs: FVG[] = [];
-  for (let i = 2; i < chart.length; i++) {
-    const c1 = chart[i];     // oldest
-    const c2 = chart[i-1];   // middle (the gap candle)
-    const c3 = chart[i-2];   // newest
-    
-    // Bullish FVG: c1 high < c3 low
-    if (c1.high < c3.low && isBullish(c2)) {
-      fvgs.push({ index: i-1, type: 'BULLISH', top: c3.low, bottom: c1.high, mitigated: false });
-    }
-    // Bearish FVG: c1 low > c3 high
-    else if (c1.low > c3.high && isBearish(c2)) {
-      fvgs.push({ index: i-1, type: 'BEARISH', top: c1.low, bottom: c3.high, mitigated: false });
-    }
-  }
-  
-  // Mark mitigated FVGs
-  for (let fvg of fvgs) {
-    for (let j = fvg.index - 1; j >= 0; j--) {
-      const c = chart[j];
-      if (fvg.type === 'BULLISH' && c.low <= fvg.top) fvg.mitigated = true;
-      if (fvg.type === 'BEARISH' && c.high >= fvg.bottom) fvg.mitigated = true;
-      if (fvg.mitigated) break;
-    }
-  }
-  return fvgs;
-};
-
-// Find Order Blocks (OB)
-export interface OrderBlock { index: number; type: 'BULLISH'|'BEARISH'; top: number; bottom: number; mitigated: boolean; }
-export const findOrderBlocks = (chart: Candle[]): OrderBlock[] => {
-  const obs: OrderBlock[] = [];
-  const swingHighs = findSwingHighs(chart);
-  const swingLows = findSwingLows(chart);
-  
-  for (let i = 1; i < chart.length - 3; i++) {
-    const c = chart[i];
-    const prevC = chart[i+1];
-    const prevPrevC = chart[i+2];
-    
-    const bodySize = Math.abs(c.open - c.close);
-    const isDisplacement = bodySize > (c.high - c.low) * 0.7; // Strong body
-    
-    if (isDisplacement) {
-      if (isBullish(c)) {
-        if (isBearish(prevC)) {
-           obs.push({ index: i+1, type: 'BULLISH', top: prevC.high, bottom: prevC.low, mitigated: false });
-        } else if (isBearish(prevPrevC)) {
-           obs.push({ index: i+2, type: 'BULLISH', top: prevPrevC.high, bottom: prevPrevC.low, mitigated: false });
-        }
-      } else if (isBearish(c)) {
-        if (isBullish(prevC)) {
-           obs.push({ index: i+1, type: 'BEARISH', top: prevC.high, bottom: prevC.low, mitigated: false });
-        } else if (isBullish(prevPrevC)) {
-           obs.push({ index: i+2, type: 'BEARISH', top: prevPrevC.high, bottom: prevPrevC.low, mitigated: false });
-        }
-      }
-    }
-  }
-  
-  // Mark mitigated OBs
-  for (let ob of obs) {
-    for (let j = ob.index - 1; j >= 0; j--) {
-      const c = chart[j];
-      if (ob.type === 'BULLISH' && c.low <= ob.top) ob.mitigated = true;
-      if (ob.type === 'BEARISH' && c.high >= ob.bottom) ob.mitigated = true;
-      if (ob.mitigated) break;
-    }
-  }
-  return obs;
-};
-
-// --- PURE SMC DETECTION FUNCTIONS ---
-
-// Detect price slowing down (consecutive smaller candles)
-const detectPriceSlowing = (chart: Candle[], lookback: number = 3): boolean => {
-  if (chart.length < lookback + 1) return false;
-  
-  const recent = chart.slice(0, lookback);
-  let slowingCount = 0;
-  
-  for (let i = 1; i < recent.length; i++) {
-    const currentRange = recent[i-1].high - recent[i-1].low;
-    const previousRange = recent[i].high - recent[i].low;
-    
-    if (currentRange < previousRange * 0.7) { // 30% reduction in range
-      slowingCount++;
-    }
-  }
-  
-  return slowingCount >= Math.floor(lookback * 0.6); // 60% of candles showing slowing
-};
-
-// Detect volume falling
-const detectVolumeFalling = (chart: Candle[], lookback: number = 3): boolean => {
-  if (chart.length < lookback + 1) return false;
-  
-  const recent = chart.slice(0, lookback);
-  let fallingCount = 0;
-  
-  for (let i = 1; i < recent.length; i++) {
-    const currentVolume = recent[i-1].tick_volume || 0;
-    const previousVolume = recent[i].tick_volume || 0;
-    
-    if (currentVolume < previousVolume * 0.8) { // 20% reduction in volume
-      fallingCount++;
-    }
-  }
-  
-  return fallingCount >= Math.floor(lookback * 0.6);
-};
-
-// Detect strength decrease (weaker candle bodies)
-const detectStrengthDecrease = (chart: Candle[], lookback: number = 3): boolean => {
-  if (chart.length < lookback + 1) return false;
-  
-  const recent = chart.slice(0, lookback);
-  let weakeningCount = 0;
-  
-  for (let i = 1; i < recent.length; i++) {
-    const currentBody = Math.abs(recent[i-1].close - recent[i-1].open);
-    const previousBody = Math.abs(recent[i].close - recent[i].open);
-    const currentRange = recent[i-1].high - recent[i-1].low;
-    
-    // Body to range ratio decreasing
-    const currentBodyRatio = currentRange > 0 ? currentBody / currentRange : 0;
-    const previousBodyRatio = currentRange > 0 ? previousBody / (recent[i].high - recent[i].low) : 0;
-    
-    if (currentBodyRatio < previousBodyRatio * 0.8) {
-      weakeningCount++;
-    }
-  }
-  
-  return weakeningCount >= Math.floor(lookback * 0.6);
-};
-
-// Detect rejection patterns at levels
-const detectRejection = (chart: Candle[]): 'BULLISH_REJECTION' | 'BEARISH_REJECTION' | 'NONE' => {
-  if (chart.length < 2) return 'NONE';
-  
-  const latest = chart[0];
-  const previous = chart[1];
-  const body = Math.abs(latest.close - latest.open);
-  const upperWick = latest.high - Math.max(latest.open, latest.close);
-  const lowerWick = Math.min(latest.open, latest.close) - latest.low;
-  
-  // Bullish rejection: sweep low + strong lower wick
-  if (latest.low < previous.low && lowerWick > body * 1.5 && lowerWick > upperWick) {
-    return 'BULLISH_REJECTION';
-  }
-  
-  // Bearish rejection: sweep high + strong upper wick
-  if (latest.high > previous.high && upperWick > body * 1.5 && upperWick > lowerWick) {
-    return 'BEARISH_REJECTION';
-  }
-  
-  return 'NONE';
-};
-
-// Detect high/low sweeps
-const detectSweep = (chart: Candle[], lookback: number = 10): 'HIGH_SWEEP' | 'LOW_SWEEP' | 'NONE' => {
-  if (chart.length < lookback + 1) return 'NONE';
-  
-  const recent = chart.slice(0, lookback);
-  const latest = chart[0];
-  
-  const highestHigh = Math.max(...recent.slice(1).map(c => c.high));
-  const lowestLow = Math.min(...recent.slice(1).map(c => c.low));
-  
-  // High sweep: price goes above recent high then reverses
-  if (latest.high > highestHigh && latest.close < latest.open) {
-    return 'HIGH_SWEEP';
-  }
-  
-  // Low sweep: price goes below recent low then reverses
-  if (latest.low < lowestLow && latest.close > latest.open) {
-    return 'LOW_SWEEP';
-  }
-  
-  return 'NONE';
-};
-
-// Find key levels (swing highs/lows with multiple touches)
-const findKeyLevels = (chart: Candle[], tolerance: number = 0.001): KeyLevel[] => {
-  const levels: KeyLevel[] = [];
-  const swingHighs = findSwingHighs(chart, 3);
-  const swingLows = findSwingLows(chart, 3);
-  
-  // Process swing highs as resistance
-  swingHighs.forEach(sh => {
-    let touches = 0;
-    chart.forEach(candle => {
-      if (Math.abs(candle.high - sh.val) <= sh.val * tolerance) {
-        touches++;
-      }
-    });
-    
-    if (touches >= 2) {
-      levels.push({
-        price: sh.val,
-        type: 'RESISTANCE',
-        strength: touches,
-        touches
-      });
-    }
-  });
-  
-  // Process swing lows as support
-  swingLows.forEach(sl => {
-    let touches = 0;
-    chart.forEach(candle => {
-      if (Math.abs(candle.low - sl.val) <= sl.val * tolerance) {
-        touches++;
-      }
-    });
-    
-    if (touches >= 2) {
-      levels.push({
-        price: sl.val,
-        type: 'SUPPORT',
-        strength: touches,
-        touches
-      });
-    }
-  });
-  
-  return levels;
-};
-
-// Check if price is at any SMC level
-const isAtSMCLevel = (price: number, chart: Candle[], tolerance: number = 0.002): boolean => {
-  const keyLevels = findKeyLevels(chart, tolerance);
-  const fvgs = findFVGs(chart).filter(fvg => !fvg.mitigated);
-  const obs = findOrderBlocks(chart).filter(ob => !ob.mitigated);
-  
-  // Check key levels
-  for (const level of keyLevels) {
-    if (Math.abs(price - level.price) <= price * tolerance) {
-      return true;
-    }
-  }
-  
-  // Check FVGs
-  for (const fvg of fvgs) {
-    if (price >= fvg.bottom && price <= fvg.top) {
-      return true;
-    }
-  }
-  
-  // Check Order Blocks
-  for (const ob of obs) {
-    if (price >= ob.bottom && price <= ob.top) {
-      return true;
-    }
-  }
-  
-  return false;
-};
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setLoading, setError, openPositions } = useTradeStore();
+  const { setAccount, setOpenPositions, setStructures, setError, setLoading } = useTradeStore();
   const { botSettings } = useSettingsStore();
-  const lastSignalRef = useRef<'BUY' | 'SELL' | 'NONE'>('NONE');
-  const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
+  const { setKeyLevelDistance, addLog, logs: existingLogs } = useLogStore();
+  
   const lastTradeTimeRef = useRef<number>(0);
   const lastDrawTimeRef = useRef<number>(0);
+  const lastSignalRef = useRef<string>('NONE');
+  const lastSignalCandleRef = useRef<number>(0);
+  const autoTradingSyncSentRef = useRef<boolean>(false);
+  const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
     try {
-      const [accountData, openOrders] = await Promise.all([
-        getAccountData(),
-        getOpenOrders(),
-      ]);
+      // Use getAccountData to fetch everything in one go (it includes positions)
+      const accountData = await getAccountData();
+      if (!accountData) {
+        throw new Error('No data received from server');
+      }
+
+      const openOrders = accountData.positions || [];
       
       // Process chart data safely
       let safeChart = [];
@@ -344,51 +70,107 @@ export const usePolling = () => {
         safeChart = [];
       }
       
+      const balance = Number(accountData.balance || 0);
+      const pnlToday = Number(accountData.pnl_today || accountData.pnlToday || 0);
+      
       const accountDataSafe = {
-        balance: accountData.balance || 0,
-        equity: accountData.equity || 0,
-        pnlToday: accountData.pnl_today || accountData.pnlToday || 0,
+        balance,
+        equity: Number(accountData.equity || 0),
+        pnlToday,
         eaConnected: accountData.ea_connected || accountData.eaConnected || false,
         eaSymbol: accountData.eaSymbol || accountData.ea_symbol || 'BTCUSD',
-        price: accountData.price || 0,
-        fastEMA: accountData.fastEMA || 0,
-        slowEMA: accountData.slowEMA || 0,
-        bbUpper: accountData.bbUpper || 0,
-        bbLower: accountData.bbLower || 0,
-        rsi: accountData.rsi || 0,
-        atr: accountData.atr || 0,
-        vwap: accountData.vwap || 0,
-        spread: accountData.spread || 0,
-        tickVolume: accountData.tickVolume || 0,
+        price: Number(accountData.price || 0),
+        fastEMA: Number(accountData.fastEMA || 0),
+        slowEMA: Number(accountData.slowEMA || 0),
+        bbUpper: Number(accountData.bbUpper || 0),
+        bbLower: Number(accountData.bbLower || 0),
+        rsi: Number(accountData.rsi || 0),
+        atr: Number(accountData.atr || 0),
+        vwap: Number(accountData.vwap || 0),
+        spread: Number(accountData.spread || 0),
+        tickVolume: Number(accountData.tickVolume || 0),
+        currency: accountData.currency || 'USD',
         chart: safeChart,
+        keyLevelInfo: accountData.keyLevelInfo,
+        logs: accountData.logs,
       };
       
       setAccount(accountDataSafe);
-      setOpenPositions(openOrders);
-      setStructures(accountData.structures || {});
-      setError(null);
+      
+      // Map open orders to the Position interface
+      const mappedPositions = openOrders.map((pos: any) => ({
+        ticket: String(pos.ticket),
+        symbol: pos.symbol,
+        type: pos.type,
+        lots: pos.volume || pos.lots || 0,
+        openPrice: pos.openPrice || pos.price || 0,
+        currentPrice: accountData.price || pos.price || 0,
+        profit: pos.profit || 0,
+        pnl: pos.profit || 0,
+        openTime: pos.time ? new Date(Number(pos.time) * 1000).toISOString() : new Date().toISOString(),
+      }));
 
-      // Sync bot settings
-      if (prevAutoTrading.current !== botSettings.autoTradingEnabled) {
-        prevAutoTrading.current = botSettings.autoTradingEnabled;
-        if (accountData.ea_connected) {
-          console.log(`🤖 Auto-trading: ${botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE'}`);
-          placeOrder({
-            symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-            type: botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE',
-            lots: 0,
-            sl: 0,
-            tp: 0
-          }).catch(e => console.error("Auto-trade sync failed:", e));
+      setOpenPositions(mappedPositions);
+       setStructures(accountData.structures || {});
+       setError(null);
+
+       // Update key level distance from backend data if available
+        if (accountData.keyLevelInfo) {
+          setKeyLevelDistance(
+            accountData.keyLevelInfo.level,
+            accountData.keyLevelInfo.distance,
+            accountData.keyLevelInfo.type
+          );
         }
-      }
 
+        // Process incoming logs from EA/Backend
+        if (Array.isArray(accountData.logs)) {
+          accountData.logs.forEach((incomingLog: any) => {
+            // Only add if not already in existing logs (based on message and timestamp)
+            const exists = existingLogs.some(l => 
+              l.message === incomingLog.message && 
+              l.component === incomingLog.component
+            );
+            if (!exists) {
+              addLog({
+                component: incomingLog.component,
+                level: incomingLog.level,
+                message: incomingLog.message,
+                details: incomingLog.details
+              });
+            }
+          });
+        }
+ 
+        // Sync bot settings
+       if (accountDataSafe.eaConnected) {
+         const autoTradingChanged = prevAutoTrading.current !== botSettings.autoTradingEnabled;
+         if (!autoTradingSyncSentRef.current || autoTradingChanged) {
+           prevAutoTrading.current = botSettings.autoTradingEnabled;
+           autoTradingSyncSentRef.current = true;
+           placeOrder({
+             symbol: accountDataSafe.eaSymbol || 'BTCUSD',
+             type: botSettings.autoTradingEnabled ? 'RESUME' : 'PAUSE',
+             lots: 0, sl: 0, tp: 0
+           }).catch(e => console.error("Auto-trade sync failed:", e));
+         }
+       } else {
+         autoTradingSyncSentRef.current = false;
+       }
+  
+       // Daily loss limit
+       const dailyLossLimit = balance * 0.03;
+       if (pnlToday <= -dailyLossLimit) {
+         console.log('🛑 Daily drawdown limit reached');
+         return;
+       }
+      
       // --- PURE SMC APP BRAIN ---
-      if (botSettings.autoTradingEnabled && accountData.ea_connected) {
+      if (botSettings.autoTradingEnabled && accountDataSafe.eaConnected) {
         let chart = [];
         let h1Chart = [];
-        let m30Chart = [];
         let m15Chart = [];
+        let h4Chart = [];
         
         if (accountData.chart) {
           if (Array.isArray(accountData.chart)) {
@@ -396,29 +178,24 @@ export const usePolling = () => {
           } else {
             chart = accountData.chart['M5'] || accountData.chart['M1'] || [];
             h1Chart = accountData.chart['H1'] || [];
-            m30Chart = accountData.chart['M30'] || [];
             m15Chart = accountData.chart['M15'] || [];
+            h4Chart = accountData.chart['H4'] || [];
           }
         }
         
         const price = accountData.price || 0;
         const atr = accountData.atr || 0;
-        const spread = accountData.spread || 0;
-        const equity = accountData.equity || 1000;
+        const spreadRaw = accountData.spread || 0;
+        const inferredPoint = price >= 1000 ? 0.001 : (price >= 100 ? 0.01 : 0.0001);
+        const spread = spreadRaw > Math.max(atr * 8, 10) ? spreadRaw * inferredPoint : spreadRaw;
+        const fastEMA = accountData.fastEMA || 0;
+        const slowEMA = accountData.slowEMA || 0;
         
-        // ATR upper cap removed to keep volatility filter permissive.
-        
-        // Daily loss limit
-        const dailyLossLimit = accountData.balance * 0.03;
-        if (accountData.pnl_today <= -dailyLossLimit) {
-          console.log('🛑 Daily drawdown limit reached');
-          return;
-        }
-        
-        // Ensure we have enough data
         if (atr > 0 && chart.length >= 10) {
           const sortedChart = [...chart].sort((a, b) => b.x - a.x);
           const sortedH1 = h1Chart.length > 0 ? [...h1Chart].sort((a, b) => b.x - a.x) : [];
+          const sortedM15 = m15Chart.length > 0 ? [...m15Chart].sort((a, b) => b.x - a.x) : [];
+          const sortedH4 = h4Chart.length > 0 ? [...h4Chart].sort((a, b) => b.x - a.x) : [];
           
           let signal: 'BUY' | 'SELL' | 'NONE' | 'CLOSE_ALL' = 'NONE';
           let slPrice = 0;
@@ -426,157 +203,414 @@ export const usePolling = () => {
           
           const totalOpen = openOrders.length;
           const maxOpenTrades = Math.max(1, botSettings.maxOpenTrades || 1);
+          const now = Date.now();
           
-          // Exit logic - time based
+          // Trailing Stop & Stacking Logic
           if (totalOpen > 0) {
+            openOrders.forEach(pos => {
+              const profit = pos.profit || 0;
+              const isBuy = pos.type === 'BUY';
+              
+              // Emergency Manual Close
+              const closeBuffer = atr * 0.1;
+              if (pos.tp > 0 && ((isBuy && price >= pos.tp - closeBuffer) || (!isBuy && price <= pos.tp + closeBuffer))) {
+                console.log(`🚨 Emergency TP Close for #${pos.ticket}`);
+                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
+              }
+              if (pos.sl > 0 && ((isBuy && price <= pos.sl + closeBuffer) || (!isBuy && price >= pos.sl - closeBuffer))) {
+                console.log(`🚨 Emergency SL Close for #${pos.ticket}`);
+                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
+              }
+
+              // --- IMPROVED TRAILING STOP ($0.50 profit = move to break even, then trail) ---
+              if (profit >= 0.50) {
+                const currentSl = pos.sl || 0;
+                let newSlPrice = 0;
+                
+                if (isBuy) {
+                  const breakEven = pos.openPrice + (atr * 0.1); // BE + small buffer
+                  if (currentSl < breakEven) {
+                    newSlPrice = breakEven;
+                  } else if (profit >= 1.50) {
+                    // Trail by 0.5 ATR behind price
+                    const trailSl = price - (atr * 0.5);
+                    if (trailSl > currentSl) newSlPrice = trailSl;
+                  }
+                } else {
+                  const breakEven = pos.openPrice - (atr * 0.1);
+                  if (currentSl === 0 || currentSl > breakEven) {
+                    newSlPrice = breakEven;
+                  } else if (profit >= 1.50) {
+                    const trailSl = price + (atr * 0.5);
+                    if (trailSl < currentSl) newSlPrice = trailSl;
+                  }
+                }
+                
+                if (newSlPrice > 0 && Math.abs(newSlPrice - currentSl) > (atr * 0.1)) {
+                  placeOrder({
+                    symbol: accountData.eaSymbol || 'BTCUSD',
+                    type: 'MODIFY_SL',
+                    lots: pos.lots,
+                    sl: newSlPrice,
+                    tp: pos.tp || 0,
+                    ticket: pos.ticket
+                  }).catch(e => console.error("Trailing update failed:", e));
+                }
+              }
+            });
+
+            // Time exit
             const oldestTrade = openOrders.reduce((oldest, current) => {
               return (current.time || 0) < (oldest.time || 0) ? current : oldest;
             }, openOrders[0]);
             
             if (oldestTrade && oldestTrade.time) {
               const tradeAgeSeconds = Math.floor(Date.now() / 1000) - oldestTrade.time;
-              if (tradeAgeSeconds > 600) { // 10 minutes max
+              if (tradeAgeSeconds > 900) {
                 signal = 'CLOSE_ALL';
-                console.log(`⏱️ Time exit: ${tradeAgeSeconds}s`);
               }
             }
           }
           
           // PURE SMC ENTRY LOGIC
-          if (signal === 'NONE' && totalOpen < maxOpenTrades) {
-            const isAtLevel = isAtSMCLevel(price, sortedChart);
-            const priceSlowing = detectPriceSlowing(sortedChart, 3);
-            const volumeFalling = detectVolumeFalling(sortedChart, 3);
-            const strengthDecreasing = detectStrengthDecrease(sortedChart, 3);
-            const rejection = detectRejection(sortedChart);
-            const sweep = detectSweep(sortedChart, 10);
+          if (signal === 'NONE') {
+            const allTrailed = openOrders.every(pos => pos.profit >= 0.50);
+            const canStack = totalOpen === 0 || (totalOpen < maxOpenTrades && allTrailed);
             
-            console.log(`🔍 SMC Analysis: AtLevel=${isAtLevel}, Slowing=${priceSlowing}, Volume=${volumeFalling}, Strength=${strengthDecreasing}, Rejection=${rejection}, Sweep=${sweep}, Spread=${spread}, ATR=${atr}`);
+            if (totalOpen > 0 && !allTrailed) {
+              console.log(`⚠️ Stacking blocked: waiting for current trades to reach $0.50 profit`);
+            }
             
-            // Need at least 2/3 momentum confirmations; SMC level is optional.
-            const momentumScore = [priceSlowing, volumeFalling, strengthDecreasing].filter(Boolean).length;
+            if (canStack) {
+              const latestCandleTime = sortedChart[0]?.x || 0;
+              const h4Obs = sortedH4.length > 0 ? findOrderBlocks(sortedH4).filter(ob => !ob.mitigated) : [];
+              const h4Levels = sortedH4.length > 0 ? findKeyLevels(sortedH4) : [];
+              const h1Levels = sortedH1.length > 0 ? findKeyLevels(sortedH1) : [];
+              const m15Obs = sortedM15.length > 0 ? findOrderBlocks(sortedM15).filter(ob => !ob.mitigated) : [];
+              const m15Levels = sortedM15.length > 0 ? findKeyLevels(sortedM15) : [];
+              const m5Fvgs = sortedChart.length > 0 ? findFVGs(sortedChart).filter(fvg => !fvg.mitigated) : [];
 
-            // BUY CONDITIONS
-            if ((rejection === 'BULLISH_REJECTION' || sweep === 'LOW_SWEEP') && momentumScore >= 2) {
-              const swingLows = findSwingLows(sortedChart);
-              const swingHighs = findSwingHighs(sortedChart);
-              const potentialSL = swingLows.length > 0 ? swingLows[0].val : price - Math.max(atr, 0.5);
-              // Requested behavior: TP for longs based on recent low.
-              const potentialTP = swingLows.length > 1 ? swingLows[1].val : (swingLows.length > 0 ? swingLows[0].val : price - Math.max(atr, 0.5));
+              const levelDistanceBuffer = Math.max(atr * 0.60, price * 0.001);
+              const inOb = (p: number, obs: OrderBlock[]) => obs.some((ob) => p >= (ob.bottom - levelDistanceBuffer) && p <= (ob.top + levelDistanceBuffer));
+              const inFvg = (p: number, fvgs: FVG[]) => fvgs.some((fvg) => p >= (fvg.bottom - levelDistanceBuffer) && p <= (fvg.top + levelDistanceBuffer));
               
-              if (potentialSL > 0 && potentialTP > 0 && swingHighs.length >= 0) {
+              const isNearSupport = (p: number) => {
+                const allSupp = [...h4Levels, ...h1Levels, ...m15Levels].filter(l => l.type === 'SUPPORT');
+                const obs = [...h4Obs, ...m15Obs].filter(o => o.type === 'BULLISH');
+                const fvgs = m5Fvgs.filter(f => f.type === 'BULLISH');
+                return allSupp.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || inOb(p, obs) || inFvg(p, fvgs);
+              };
+
+              const isNearResistance = (p: number) => {
+                const allRes = [...h4Levels, ...h1Levels, ...m15Levels].filter(l => l.type === 'RESISTANCE');
+                const obs = [...h4Obs, ...m15Obs].filter(o => o.type === 'BEARISH');
+                const fvgs = m5Fvgs.filter(f => f.type === 'BEARISH');
+                return allRes.some(l => Math.abs(p - l.price) <= levelDistanceBuffer) || inOb(p, obs) || inFvg(p, fvgs);
+              };
+
+              const atSupport = isNearSupport(price) || sortedChart.slice(0, 3).some(c => isNearSupport(c.low));
+              const atResistance = isNearResistance(price) || sortedChart.slice(0, 3).some(c => isNearResistance(c.high));
+              
+              const priceSlowing = detectPriceSlowing(sortedChart, 3);
+              const rejection = detectRecentRejection(sortedChart);
+              const sweep = detectSweep(sortedChart, 10);
+              const volumeExpansion = detectVolumeExpansion(sortedChart);
+              
+              const allLevels = [...h4Levels, ...h1Levels, ...m15Levels];
+              
+              // --- ANTI-CHASE FILTER ---
+              const nearestLevel = allLevels.length > 0 ? allLevels.reduce((prev, curr) => 
+                Math.abs(curr.price - price) < Math.abs(prev.price - price) ? curr : prev
+              ) : null;
+              
+              const nearestLevelPrice = nearestLevel ? nearestLevel.price : 0;
+              const maxChaseDistance = atr * 0.65;
+              const isChasing = nearestLevelPrice > 0 && Math.abs(price - nearestLevelPrice) > maxChaseDistance;
+              
+              // --- BREAK AND RETEST DETECTION ---
+              const latestCandle = sortedChart[0];
+              const prevCandle = sortedChart[1];
+              const hasBrokenAbove = nearestLevel && nearestLevel.type === 'RESISTANCE' && prevCandle.close > nearestLevel.price && latestCandle.low <= nearestLevel.price + (atr * 0.1);
+              const hasBrokenBelow = nearestLevel && nearestLevel.type === 'SUPPORT' && prevCandle.close < nearestLevel.price && latestCandle.high >= nearestLevel.price - (atr * 0.1);
+
+              // --- CHOPPINESS FILTER ---
+              const bodyAvg = sortedChart.slice(1, 11).reduce((acc, c) => acc + Math.abs(c.close - c.open), 0) / 10;
+              const isChoppy = atr < bodyAvg * 0.8;
+              
+              // Find nearest key level for debug panel
+              if (nearestLevel) {
+                setKeyLevelDistance(nearestLevel.price, Math.abs(nearestLevel.price - price), nearestLevel.type);
+              }
+              
+              const latest = sortedChart[0];
+              const previous = sortedChart[1];
+              const prevBody = Math.abs(previous.close - previous.open);
+              const prevLowerWick = Math.min(previous.open, previous.close) - previous.low;
+              const prevUpperWick = previous.high - Math.max(previous.open, previous.close);
+              
+              const isStrongBullishRejection = prevLowerWick > prevBody * 1.2 && prevLowerWick > prevUpperWick;
+              const isStrongBearishRejection = prevUpperWick > prevBody * 1.2 && prevUpperWick > prevLowerWick;
+
+              const h4Trend: 'UP' | 'DOWN' | 'RANGE' = (() => {
+                if (sortedH4.length < 6) return 'RANGE';
+                const change = (sortedH4[0].close - sortedH4[5].close) / sortedH4[5].close;
+                if (change > 0.0003) return 'UP';
+                if (change < -0.0003) return 'DOWN';
+                return 'RANGE';
+              })();
+              
+              const spreadOk = spread <= 30;
+              
+              if (!spreadOk) {
+                console.log(`❌ Trade blocked: Spread too high (${spread.toFixed(2)} > 30)`);
+              }
+
+              // --- SIGNAL LOGIC ---
+              const sniperReady = spreadOk && !isChoppy;
+
+              // 1. REJECTION AT SUPPORT (Coming down to level)
+              if (sniperReady && atSupport && !isChasing && (isStrongBullishRejection || rejection === 'BULLISH' || sweep === 'LOW_SWEEP')) {
                 signal = 'BUY';
-                slPrice = potentialSL;
-                tpPrice = potentialTP;
-                console.log(`🟢 PURE SMC BUY - Rejection/Sweep + momentum confirmed`);
+                const lowestRecent = Math.min(latest.low, previous.low);
+                slPrice = lowestRecent - (atr * 0.35);
+                tpPrice = price + (atr * 2.5);
+                console.log(`🟢 SUPPORT REJECTION BUY`);
               }
-            }
-            
-            // SELL CONDITIONS
-            else if ((rejection === 'BEARISH_REJECTION' || sweep === 'HIGH_SWEEP') && momentumScore >= 2) {
-              const swingHighs = findSwingHighs(sortedChart);
-              const potentialSL = swingHighs.length > 0 ? swingHighs[0].val : price + Math.max(atr, 0.5);
-              // Requested behavior: TP for shorts based on recent high.
-              const potentialTP = swingHighs.length > 1 ? swingHighs[1].val : (swingHighs.length > 0 ? swingHighs[0].val : price + Math.max(atr, 0.5));
-              
-              if (potentialSL > 0 && potentialTP > 0) {
+              // 2. REJECTION AT RESISTANCE (Going up to level)
+              else if (sniperReady && atResistance && !isChasing && (isStrongBearishRejection || rejection === 'BEARISH' || sweep === 'HIGH_SWEEP')) {
                 signal = 'SELL';
-                slPrice = potentialSL;
-                tpPrice = potentialTP;
-                console.log(`🔴 PURE SMC SELL - Rejection/Sweep + momentum confirmed`);
+                const highestRecent = Math.max(latest.high, previous.high);
+                slPrice = highestRecent + (atr * 0.35);
+                tpPrice = price - (atr * 2.5);
+                console.log(`🔴 RESISTANCE REJECTION SELL`);
+              }
+              // 3. BREAK AND RETEST (Continuation)
+              else if (sniperReady && !isChasing) {
+                if (hasBrokenAbove && isBullish(latest)) {
+                  signal = 'BUY';
+                  slPrice = latest.low - (atr * 0.3);
+                  tpPrice = price + (atr * 2.2);
+                  console.log(`🚀 BREAK & RETEST BUY`);
+                } else if (hasBrokenBelow && isBearish(latest)) {
+                  signal = 'SELL';
+                  slPrice = latest.high + (atr * 0.3);
+                  tpPrice = price - (atr * 2.2);
+                  console.log(`🚀 BREAK & RETEST SELL`);
+                }
+              }
+
+              // Fallback early trend entry (only if no level conflict)
+              if (signal === 'NONE' && !isChasing && !isChoppy && !atResistance && !atSupport) {
+                const trendUp = h4Trend === 'UP' && fastEMA > slowEMA;
+                const trendDown = h4Trend === 'DOWN' && fastEMA < slowEMA;
+                if (trendUp && isBullish(latest) && latest.close > previous.close) {
+                  signal = 'BUY';
+                  slPrice = previous.low - (atr * 0.3);
+                  tpPrice = price + (atr * 2.0);
+                } else if (trendDown && isBearish(latest) && latest.close < previous.close) {
+                  signal = 'SELL';
+                  slPrice = previous.high + (atr * 0.3);
+                  tpPrice = price - (atr * 2.0);
+                }
+              }
+
+              if (signal === 'NONE') {
+                if (Math.random() > 0.9) {
+                  const reason = isChasing ? "Anti-Chase" : isChoppy ? "Choppy" : "No Setup";
+                  console.log(`🔎 Scan: ${reason} | Price: ${price}`);
+                }
+              }
+
+              if (signal !== 'NONE' && signal !== 'CLOSE_ALL' && lastSignalRef.current === signal && lastSignalCandleRef.current === latestCandleTime) {
+                signal = 'NONE';
+              }
+              
+              // EXECUTE SIGNAL IMMEDIATELY
+              if (signal !== 'NONE' && signal !== 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 5000)) { 
+                lastTradeTimeRef.current = now;
+                lastSignalRef.current = signal;
+                lastSignalCandleRef.current = sortedChart[0]?.x || 0;
+                
+                // --- ANTI-HEDGING LOGIC: Close opposite positions before opening new ones ---
+                const oppositePositions = openOrders.filter(p => p.type !== signal);
+                if (oppositePositions.length > 0) {
+                  console.log(`🔄 Opposite positions detected. Closing ${oppositePositions.length} trades before opening ${signal}`);
+                  placeOrder({ 
+                    symbol: accountDataSafe.eaSymbol || 'BTCUSD', 
+                    type: 'CLOSE_ALL', 
+                    lots: 0, sl: 0, tp: 0 
+                  }).catch(e => console.error("Auto-close opposite failed:", e));
+                  
+                  // Add a small delay for the close to process on MT5
+                  setTimeout(() => {
+                    console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price}`);
+                    placeOrder({
+                      symbol: accountDataSafe.eaSymbol || 'BTCUSD',
+                      type: signal,
+                      lots: botSettings.defaultLots || 0.01,
+                      sl: slPrice, tp: tpPrice
+                    }).catch(e => console.error("SMC execution failed:", e));
+                  }, 500);
+                  return; // Exit this polling cycle to wait for close
+                }
+
+                console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price} | SL: ${slPrice} | TP: ${tpPrice}`);
+                placeOrder({
+                  symbol: accountDataSafe.eaSymbol || 'BTCUSD',
+                  type: signal as any,
+                  lots: botSettings.defaultLots || 0.01,
+                  sl: slPrice, tp: tpPrice
+                }).catch(e => console.error("SMC execution failed:", e));
+              } else if (signal === 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 2000)) {
+                lastTradeTimeRef.current = now;
+                console.log(`🚀 EXECUTING CLOSE ALL`);
+                placeOrder({ symbol: accountDataSafe.eaSymbol || 'BTCUSD', type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(e => console.error("SMC close failed:", e));
               }
             }
-          }
-          
-          // Draw zones on chart
-          const now = Date.now();
-          if (now - lastDrawTimeRef.current > 5000) {
-            lastDrawTimeRef.current = now;
-            
-            const activeOBs = sortedH1.length > 0 ? findOrderBlocks(sortedH1).filter(ob => !ob.mitigated) : [];
-            const activeFVGs = sortedChart.length > 0 ? findFVGs(sortedChart).filter(fvg => !fvg.mitigated) : [];
-            const keyLevels = findKeyLevels(sortedH1.length > 0 ? sortedH1 : sortedChart);
-            
-            // Draw Order Blocks
-            activeOBs.forEach(ob => {
-              const obTime = sortedH1[ob.index]?.x || sortedH1[0]?.x;
-              placeOrder({
-                symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-                type: 'DRAW_OB',
-                lots: 0, sl: 0, tp: 0,
-                top: ob.top,
-                bottom: ob.bottom,
-                zoneType: ob.type,
-                time: obTime
-              }).catch(e => console.error("Draw OB failed:", e));
-            });
-            
-            // Draw FVGs
-            activeFVGs.forEach(fvg => {
-              const fvgTime = sortedChart[fvg.index]?.x || sortedChart[0]?.x;
-              placeOrder({
-                symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-                type: 'DRAW_FVG',
-                lots: 0, sl: 0, tp: 0,
-                top: fvg.top,
-                bottom: fvg.bottom,
-                zoneType: fvg.type,
-                time: fvgTime
-              }).catch(e => console.error("Draw FVG failed:", e));
-            });
-            
-            // Draw Key Levels
-            keyLevels.forEach(level => {
-              placeOrder({
-                symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-                type: 'DRAW_KEY_LEVEL',
-                lots: 0, sl: 0, tp: 0,
-                price: level.price,
-                levelType: level.type.toLowerCase()
-              }).catch(e => console.error("Draw Key Level failed:", e));
-            });
-          }
-          
-          // Execute signals
-          if (signal !== 'NONE' && signal !== 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 2000)) {
-            lastTradeTimeRef.current = now;
-            console.log(`🚀 PURE SMC SIGNAL: ${signal} | Price: ${price} | SL: ${slPrice} | TP: ${tpPrice}`);
-            
-            placeOrder({
-              symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-              type: signal,
-              lots: botSettings.defaultLots || 0.01,
-              sl: slPrice,
-              tp: tpPrice
-            }).catch(e => console.error("SMC execution failed:", e));
-            
-          } else if (signal === 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 2000)) {
-            lastTradeTimeRef.current = now;
-            console.log(`🚀 PURE SMC CLOSE ALL`);
-            placeOrder({
-              symbol: accountData.ea_symbol || accountData.eaSymbol || 'BTCUSD',
-              type: 'CLOSE_ALL',
-              lots: 0,
-              sl: 0,
-              tp: 0
-            }).catch(e => console.error("SMC close failed:", e));
           }
         }
       }
-
     } catch (error) {
       console.error('Polling error:', error);
       setError('Connection lost. Retrying...');
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [setAccount, setOpenPositions, setLoading, setError, botSettings]);
+  }, [setAccount, setOpenPositions, setStructures, setError, setLoading, botSettings]);
 
   useEffect(() => {
     refresh(true);
-    const interval = setInterval(() => refresh(false), 5000);
+    const interval = setInterval(() => {
+      refresh(false);
+    }, 3000); // 3 seconds polling
     return () => clearInterval(interval);
   }, [refresh]);
 
   return { refresh };
 };
+
+// --- HELPER FUNCTIONS ---
+function findOrderBlocks(chart: Candle[]): OrderBlock[] {
+  const result: OrderBlock[] = [];
+  for (let i = 1; i < chart.length - 2; i++) {
+    const c = chart[i];
+    const p = chart[i+1];
+    if (c.close > c.open && p.close < p.open && (c.close - c.open) > (c.high - c.low) * 0.6) {
+      result.push({ top: p.high, bottom: p.low, type: 'BULLISH', index: i, mitigated: false });
+    } else if (c.close < c.open && p.close > p.open && (c.open - c.close) > (c.high - c.low) * 0.6) {
+      result.push({ top: p.high, bottom: p.low, type: 'BEARISH', index: i, mitigated: false });
+    }
+  }
+  return result;
+}
+
+function findFVGs(chart: Candle[]): FVG[] {
+  const result: FVG[] = [];
+  for (let i = 1; i < chart.length - 1; i++) {
+    if (chart[i-1].low > chart[i+1].high) {
+      result.push({ top: chart[i-1].low, bottom: chart[i+1].high, type: 'BEARISH', index: i, mitigated: false });
+    } else if (chart[i-1].high < chart[i+1].low) {
+      result.push({ top: chart[i+1].low, bottom: chart[i-1].high, type: 'BULLISH', index: i, mitigated: false });
+    }
+  }
+  return result;
+}
+
+function findKeyLevels(chart: Candle[]): KeyLevel[] {
+  const levels: KeyLevel[] = [];
+  for (let i = 2; i < chart.length - 2; i++) {
+    if (chart[i].low < chart[i-1].low && chart[i].low < chart[i+1].low) levels.push({ price: chart[i].low, type: 'SUPPORT', strength: 1 });
+    if (chart[i].high > chart[i-1].high && chart[i].high > chart[i+1].high) levels.push({ price: chart[i].high, type: 'RESISTANCE', strength: 1 });
+  }
+  return levels;
+}
+
+function detectPriceSlowing(chart: Candle[], period: number): boolean {
+  if (chart.length < period + 1) return false;
+  const currentMove = Math.abs(chart[0].close - chart[1].close);
+  const prevMove = Math.abs(chart[1].close - chart[2].close);
+  return currentMove < prevMove;
+}
+
+function detectVolumeExpansion(chart: Candle[]): boolean {
+  if (chart.length < 6) return false;
+  const latestVol = chart[0].tick_volume || 0;
+  if (latestVol === 0) {
+    // Proxy: candle body expansion
+    const latestBody = Math.abs(chart[0].close - chart[0].open);
+    const avgBody = chart.slice(1, 6).reduce((acc, c) => acc + Math.abs(c.close - c.open), 0) / 5;
+    return latestBody > avgBody * 1.5;
+  }
+  const avgVol = chart.slice(1, 6).reduce((acc, c) => acc + (c.tick_volume || 0), 0) / 5;
+  return latestVol > avgVol * 1.3;
+}
+
+function detectLevelCross(price: number, prevPrice: number, levels: KeyLevel[]): boolean {
+  return levels.some(lvl => 
+    (prevPrice < lvl.price && price > lvl.price) || // Crossed Up
+    (prevPrice > lvl.price && price < lvl.price)    // Crossed Down
+  );
+}
+
+function detectStrengthDecrease(chart: Candle[], period: number): boolean { 
+  if (chart.length < period + 1) return false;
+  // Body size is decreasing
+  const currentBody = Math.abs(chart[0].close - chart[0].open);
+  const prevBody = Math.abs(chart[1].close - chart[1].open);
+  return currentBody < prevBody;
+}
+
+function detectRecentRejection(chart: Candle[]): 'BULLISH' | 'BEARISH' | 'NONE' { 
+  if (chart.length < 2) return 'NONE';
+  const prev = chart[1];
+  const body = Math.abs(prev.close - prev.open);
+  const lowerWick = Math.min(prev.open, prev.close) - prev.low;
+  const upperWick = prev.high - Math.max(prev.open, prev.close);
+  
+  if (lowerWick > body * 1.5 && lowerWick > upperWick) return 'BULLISH';
+  if (upperWick > body * 1.5 && upperWick > lowerWick) return 'BEARISH';
+  return 'NONE';
+}
+
+function detectSweep(chart: Candle[], period: number): 'HIGH_SWEEP' | 'LOW_SWEEP' | 'NONE' { 
+  if (chart.length < period) return 'NONE';
+  const latest = chart[0];
+  const lookback = chart.slice(1, period);
+  const highestHigh = Math.max(...lookback.map(c => c.high));
+  const lowestLow = Math.min(...lookback.map(c => c.low));
+  
+  // Sweep High: price went above highest high but closed below it
+  if (latest.high > highestHigh && latest.close < highestHigh) return 'HIGH_SWEEP';
+  // Sweep Low: price went below lowest low but closed above it
+  if (latest.low < lowestLow && latest.close > lowestLow) return 'LOW_SWEEP';
+  
+  return 'NONE';
+}
+function isNearLevelPrice(p: number, target: number, pct: number): boolean { return Math.abs(p - target) / target < pct; }
+function isBullish(c: Candle): boolean { return c.close > c.open; }
+function isBearish(c: Candle): boolean { return c.close < c.open; }
+function findSwingLows(chart: Candle[]): { val: number }[] { 
+  if (chart.length < 5) return [];
+  const results: { val: number }[] = [];
+  // Look back 40 candles for pivots
+  for (let i = 2; i < Math.min(chart.length - 2, 40); i++) {
+    if (chart[i].low < chart[i-1].low && chart[i].low < chart[i-2].low && 
+        chart[i].low < chart[i+1].low && chart[i].low < chart[i+2].low) {
+      results.push({ val: chart[i].low });
+    }
+  }
+  return results; 
+}
+
+function findSwingHighs(chart: Candle[]): { val: number }[] { 
+  if (chart.length < 5) return [];
+  const results: { val: number }[] = [];
+  // Look back 40 candles for pivots
+  for (let i = 2; i < Math.min(chart.length - 2, 40); i++) {
+    if (chart[i].high > chart[i-1].high && chart[i].high > chart[i-2].high && 
+        chart[i].high > chart[i+1].high && chart[i].high > chart[i+2].high) {
+      results.push({ val: chart[i].high });
+    }
+  }
+  return results; 
+}

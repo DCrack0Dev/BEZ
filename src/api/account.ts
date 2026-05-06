@@ -6,7 +6,7 @@ export const getAccountData = async () => {
 };
 
 export const validateApiKey = async (apiKey: string) => {
-  const response = await apiClient.post('/api/auth/validate', { apiKey });
+  const response = await apiClient.post('/api/ea/validate', { apiKey });
   return response.data;
 };
 

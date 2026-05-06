@@ -9,6 +9,8 @@ export interface Position {
   currentPrice: number;
   pnl: number;
   openTime: string;
+  sl?: number;
+  tp?: number;
 }
 
 export interface AccountData {
@@ -28,17 +30,23 @@ export interface AccountData {
   spread?: number;
   tickVolume?: number;
   chart: any;
+  keyLevelInfo?: { level: number; distance: number; type: string };
+  logs?: any[];
 }
 
 interface TradeState {
   account: AccountData;
   openPositions: Position[];
   closedPositions: Position[];
+  structures: any;
+  activeTimeframe: string;
   isLoading: boolean;
   error: string | null;
   setAccount: (account: AccountData) => void;
   setOpenPositions: (positions: Position[]) => void;
   setClosedPositions: (positions: Position[]) => void;
+  setStructures: (structures: any) => void;
+  setActiveTimeframe: (timeframe: string) => void;
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
 }
@@ -49,7 +57,7 @@ export const useTradeStore = create<TradeState>((set) => ({
     equity: 0,
     pnlToday: 0,
     eaConnected: false,
-    eaSymbol: 'XAUUSD',
+    eaSymbol: 'BTCUSD',
     price: 0,
     fastEMA: 0,
     slowEMA: 0,
@@ -59,11 +67,15 @@ export const useTradeStore = create<TradeState>((set) => ({
   },
   openPositions: [],
   closedPositions: [],
+  structures: {},
+  activeTimeframe: 'M15',
   isLoading: false,
   error: null,
   setAccount: (account) => set({ account }),
   setOpenPositions: (openPositions) => set({ openPositions }),
   setClosedPositions: (closedPositions) => set({ closedPositions }),
+  setStructures: (structures) => set({ structures }),
+  setActiveTimeframe: (activeTimeframe) => set({ activeTimeframe }),
   setLoading: (isLoading) => set({ isLoading }),
   setError: (error) => set({ error }),
 }));
