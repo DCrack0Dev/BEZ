@@ -382,14 +382,37 @@ export const usePolling = () => {
               // --- CHOPPINESS FILTER ---
               const bodyAvg = sortedChart.slice(1, 11).reduce((acc, c) => acc + Math.abs(c.close - c.open), 0) / 10;
               const isChoppy = atr < bodyAvg * 0.8;
+
+              const latest = sortedChart[0];
+              const previous = sortedChart[1];
+              const latestBody = Math.abs(latest.close - latest.open);
+              const prevBodyAbs = Math.abs(previous.close - previous.open);
+              const bullishEngulfing =
+                isBullish(latest) &&
+                isBearish(previous) &&
+                latest.open <= previous.close &&
+                latest.close >= previous.open &&
+                latestBody >= prevBodyAbs * 0.9;
+              const bearishEngulfing =
+                isBearish(latest) &&
+                isBullish(previous) &&
+                latest.open >= previous.close &&
+                latest.close <= previous.open &&
+                latestBody >= prevBodyAbs * 0.9;
+              const bullishReclaim =
+                Boolean(nearestLevel) &&
+                previous.close < nearestLevelPrice &&
+                latest.close > nearestLevelPrice;
+              const bearishReclaim =
+                Boolean(nearestLevel) &&
+                previous.close > nearestLevelPrice &&
+                latest.close < nearestLevelPrice;
               
               // Find nearest key level for debug panel
               if (nearestLevel) {
                 setKeyLevelDistance(nearestLevel.price, Math.abs(nearestLevel.price - price), nearestLevel.type);
               }
               
-              const latest = sortedChart[0];
-              const previous = sortedChart[1];
               const prevBody = Math.abs(previous.close - previous.open);
               const prevLowerWick = Math.min(previous.open, previous.close) - previous.low;
               const prevUpperWick = previous.high - Math.max(previous.open, previous.close);
@@ -416,8 +439,33 @@ export const usePolling = () => {
               // --- SIGNAL LOGIC ---
               const sniperReady = spreadOk && !isChoppy && !inMiddleRange; // BLOCK middle range chop
 
-              // 0. MICRO-REVERSAL FLIP (M1 Chart at structural levels)
-              if (sniperReady && atSupport && m1ReversalBuy && !isChasing && (isOversold || !trendDown)) {
+              // 0. ENGULFING RECLAIM REVERSAL (high priority flip after exhaustion)
+              if (
+                sniperReady &&
+                !isChasing &&
+                bullishEngulfing &&
+                (bullishReclaim || sweep === 'LOW_SWEEP' || atSupport) &&
+                (priceSlowing || detectStrengthDecrease(sortedChart, 3))
+              ) {
+                signal = 'BUY';
+                slPrice = Math.min(latest.low, previous.low) - (atr * 0.35);
+                tpPrice = price + (atr * 2.8);
+                console.log(`✅ ENGULF RECLAIM BUY`);
+              }
+              else if (
+                sniperReady &&
+                !isChasing &&
+                bearishEngulfing &&
+                (bearishReclaim || sweep === 'HIGH_SWEEP' || atResistance) &&
+                (priceSlowing || detectStrengthDecrease(sortedChart, 3))
+              ) {
+                signal = 'SELL';
+                slPrice = Math.max(latest.high, previous.high) + (atr * 0.35);
+                tpPrice = price - (atr * 2.8);
+                console.log(`✅ ENGULF RECLAIM SELL`);
+              }
+              // 1. MICRO-REVERSAL FLIP (M1 Chart at structural levels)
+              else if (sniperReady && atSupport && m1ReversalBuy && !isChasing && (isOversold || !trendDown)) {
                 signal = 'BUY';
                 slPrice = (m1Latest?.low || price) - (atr * 0.3);
                 tpPrice = price + (atr * 2.5);
