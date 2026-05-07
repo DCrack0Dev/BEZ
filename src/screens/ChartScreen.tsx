@@ -25,10 +25,22 @@ type Timeframe = 'M5' | 'M15' | 'H1' | 'H4';
 type RawCandle = { x?: number; time?: number; open: number; high: number; low: number; close: number; tick_volume?: number; volume?: number };
 type Candle = { time: number; open: number; high: number; low: number; close: number; volume: number };
 type CandleMap = Record<Timeframe, Candle[]>;
+type ChartOverlay = { id: string; price: number; label: string; color: string };
+type TradeVisual = {
+  ticket: string;
+  symbol: string;
+  type: 'BUY' | 'SELL';
+  openPrice: number;
+  sl?: number;
+  tp?: number;
+  status: 'open' | 'closed';
+  closedAt?: number;
+};
 
 const TF_COUNTS: Record<Timeframe, number> = { M5: 288, M15: 96, H1: 24, H4: 6 };
 const TF_INTERVAL_SECONDS: Record<Timeframe, number> = { M5: 300, M15: 900, H1: 3600, H4: 14400 };
 const timeframes: Timeframe[] = ['M5', 'M15', 'H1', 'H4'];
+const CLOSED_LINE_FADE_MS = 12000;
 
 const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
 <html>
@@ -44,6 +56,8 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
   <script>
     let chart = null;
     let candleSeries = null;
+    let overlaySeries = [];
+    let latestCandles = [];
     function initChart() {
       chart = LightweightCharts.createChart(document.getElementById('chart'), {
         width: ${Math.max(50, Math.floor(width))},
@@ -70,9 +84,44 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
         wickDownColor: '#ef5350'
       });
     }
+    function clearOverlays() {
+      if (!chart || !Array.isArray(overlaySeries)) return;
+      overlaySeries.forEach((s) => {
+        try { chart.removeSeries(s); } catch (e) {}
+      });
+      overlaySeries = [];
+    }
+    function applyOverlays(overlays) {
+      if (!chart || !Array.isArray(latestCandles) || latestCandles.length === 0) return;
+      clearOverlays();
+      const from = latestCandles[Math.max(0, latestCandles.length - 120)].time;
+      const to = latestCandles[latestCandles.length - 1].time;
+      (Array.isArray(overlays) ? overlays : []).forEach((o) => {
+        if (!o || typeof o.price !== 'number') return;
+        const line = chart.addLineSeries({
+          color: o.color || '#999999',
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          priceLineVisible: true,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        line.setData([{ time: from, value: o.price }, { time: to, value: o.price }]);
+        line.createPriceLine({
+          price: o.price,
+          color: o.color || '#999999',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: o.label || '',
+        });
+        overlaySeries.push(line);
+      });
+    }
     function applyData(candles) {
       if (!candleSeries || !Array.isArray(candles)) return;
       candleSeries.setData(candles);
+      latestCandles = candles;
       chart.timeScale().fitContent();
       const len = candles.length;
       chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len });
@@ -81,6 +130,7 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
       try {
         const msg = JSON.parse(raw);
         if (msg.type === 'SET_DATA') applyData(msg.payload.candles || []);
+        if (msg.type === 'SET_OVERLAYS') applyOverlays(msg.payload.overlays || []);
         if (msg.type === 'RESIZE' && chart) chart.applyOptions({ width: msg.payload.width, height: msg.payload.height });
       } catch (e) {}
     }
@@ -167,8 +217,17 @@ const getRawForTf = (chart: any, tf: Timeframe): RawCandle[] => {
 const toSeriesData = (candles: Candle[]) =>
   candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
 
+const hexToRgba = (hex: string, alpha: number) => {
+  const normalized = hex.replace('#', '');
+  if (normalized.length !== 6) return `rgba(128,128,128,${alpha})`;
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+};
+
 const ChartScreen = () => {
-  const { account, activeTimeframe, setActiveTimeframe } = useTradeStore();
+  const { account, openPositions, activeTimeframe, setActiveTimeframe } = useTradeStore();
   const selectedSymbol = account.eaSymbol || 'BTCUSD';
   const [signal, setSignal] = useState<'BUY' | 'SELL' | 'NONE'>('NONE');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -181,6 +240,8 @@ const ChartScreen = () => {
   const { width, height } = Dimensions.get('window');
   const [inlineChartSize, setInlineChartSize] = useState({ width: Math.max(120, width - SPACING.m * 2 - SPACING.s * 2), height: 300 });
   const [fullChartSize, setFullChartSize] = useState({ width: Math.max(120, height), height: Math.max(120, width) });
+  const [tradeVisuals, setTradeVisuals] = useState<Record<string, TradeVisual>>({});
+  const [fadeTick, setFadeTick] = useState(0);
 
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => setChartReady(true));
@@ -207,10 +268,96 @@ const ChartScreen = () => {
     else setSignal('NONE');
   }, [account.fastEMA, account.slowEMA]);
 
+  useEffect(() => {
+    setTradeVisuals((prev) => {
+      const next: Record<string, TradeVisual> = { ...prev };
+      const openMap = new Map(openPositions.map((p) => [String(p.ticket), p]));
+      const now = Date.now();
+
+      Object.entries(next).forEach(([ticket, visual]) => {
+        if (!openMap.has(ticket) && visual.status === 'open') {
+          next[ticket] = { ...visual, status: 'closed', closedAt: now };
+        }
+      });
+
+      openPositions.forEach((pos) => {
+        const ticket = String(pos.ticket);
+        next[ticket] = {
+          ticket,
+          symbol: String(pos.symbol || selectedSymbol),
+          type: pos.type,
+          openPrice: Number(pos.openPrice || 0),
+          sl: pos.sl,
+          tp: pos.tp,
+          status: 'open',
+        };
+      });
+
+      Object.entries(next).forEach(([ticket, visual]) => {
+        if (visual.status === 'closed' && visual.closedAt && now - visual.closedAt > CLOSED_LINE_FADE_MS) {
+          delete next[ticket];
+        }
+      });
+
+      return next;
+    });
+  }, [openPositions, selectedSymbol]);
+
+  useEffect(() => {
+    const id = setInterval(() => setFadeTick((v) => v + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   const seriesData = useMemo(() => {
     const tf = (activeTimeframe as Timeframe) || 'M15';
     return toSeriesData(cachedCandles[tf] || []);
   }, [activeTimeframe, cachedCandles]);
+
+  const overlays = useMemo<ChartOverlay[]>(() => {
+    const now = Date.now();
+    const rows: ChartOverlay[] = [];
+    const sorted = Object.values(tradeVisuals).filter((t) => t.symbol === selectedSymbol);
+
+    sorted.forEach((t) => {
+      const fadeRatio =
+        t.status === 'closed' && t.closedAt
+          ? Math.max(0, 1 - (now - t.closedAt) / CLOSED_LINE_FADE_MS)
+          : 1;
+      if (fadeRatio <= 0) return;
+
+      const alpha = Math.max(0.18, fadeRatio);
+      const sideColor = t.type === 'BUY' ? '#1E88E5' : '#E53935';
+      const slColor = '#FB8C00';
+      const tpColor = '#43A047';
+
+      if (t.openPrice > 0) {
+        rows.push({
+          id: `${t.ticket}-entry`,
+          price: t.openPrice,
+          label: `#${t.ticket} ENTRY`,
+          color: hexToRgba(sideColor, alpha),
+        });
+      }
+      if ((t.sl || 0) > 0) {
+        rows.push({
+          id: `${t.ticket}-sl`,
+          price: Number(t.sl),
+          label: `#${t.ticket} SL`,
+          color: hexToRgba(slColor, alpha),
+        });
+      }
+      if ((t.tp || 0) > 0) {
+        rows.push({
+          id: `${t.ticket}-tp`,
+          price: Number(t.tp),
+          label: `#${t.ticket} TP`,
+          color: hexToRgba(tpColor, alpha),
+        });
+      }
+    });
+
+    return rows;
+  }, [tradeVisuals, selectedSymbol, fadeTick]);
 
   const postDataToChart = (target: React.RefObject<WebView>, chartWidth: number, chartHeight: number) => {
     if (!target.current || seriesData.length === 0) return;
@@ -219,18 +366,19 @@ const ChartScreen = () => {
         JSON.stringify({ type: 'RESIZE', payload: { width: Math.floor(chartWidth), height: Math.floor(chartHeight) } }),
       );
       target.current?.postMessage(JSON.stringify({ type: 'SET_DATA', payload: { candles: seriesData } }));
+      target.current?.postMessage(JSON.stringify({ type: 'SET_OVERLAYS', payload: { overlays } }));
     });
   };
 
   useEffect(() => {
     if (!chartReady || isSwitchingTimeframe) return;
     postDataToChart(chartWebRef, inlineChartSize.width, inlineChartSize.height);
-  }, [chartReady, seriesData, isSwitchingTimeframe, inlineChartSize.width, inlineChartSize.height]);
+  }, [chartReady, seriesData, overlays, isSwitchingTimeframe, inlineChartSize.width, inlineChartSize.height]);
 
   useEffect(() => {
     if (!chartReady || !isFullscreen || isSwitchingTimeframe) return;
     postDataToChart(fullChartWebRef, fullChartSize.width, fullChartSize.height);
-  }, [chartReady, seriesData, isFullscreen, isSwitchingTimeframe, fullChartSize.width, fullChartSize.height]);
+  }, [chartReady, seriesData, overlays, isFullscreen, isSwitchingTimeframe, fullChartSize.width, fullChartSize.height]);
 
   const onChangeTimeframe = (tf: Timeframe) => {
     if (tf === activeTimeframe) return;

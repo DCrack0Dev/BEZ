@@ -109,6 +109,8 @@ export const usePolling = () => {
         profit: pos.profit || 0,
         pnl: pos.profit || 0,
         openTime: pos.time ? new Date(Number(pos.time) * 1000).toISOString() : new Date().toISOString(),
+        sl: Number(pos.sl || 0) || undefined,
+        tp: Number(pos.tp || 0) || undefined,
       }));
 
       setOpenPositions(mappedPositions);
