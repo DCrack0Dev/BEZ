@@ -1,0 +1,57 @@
+// Append these enums/models to your existing Prisma schema if you already have one.
+// This file is created as a standalone schema because no existing schema.prisma was found.
+
+enum TradingMode {
+  LOCAL
+  BACKEND
+}
+
+enum SignalDirection {
+  BULLISH
+  BEARISH
+  NEUTRAL
+}
+
+enum SignalStatus {
+  PENDING
+  SENT
+  EXECUTED
+  FAILED
+  CANCELLED
+}
+
+model TradingConfig {
+  id          String      @id @default(cuid())
+  userId      String      @unique
+  tradingMode TradingMode @default(LOCAL)
+  isActive    Boolean     @default(false)
+  markets     String[]
+  timeframe   String
+  updatedAt   DateTime    @updatedAt
+  createdAt   DateTime    @default(now())
+
+  // TODO: keep relation name/field synced with your existing User model shape.
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tradingMode, isActive])
+}
+
+model Signal {
+  id              String          @id @default(cuid())
+  userId          String
+  market          String
+  timeframe       String
+  patternName     String
+  signal          SignalDirection
+  confluenceScore Int
+  status          SignalStatus    @default(PENDING)
+  executedAt      DateTime?
+  executionResult Json?
+  createdAt       DateTime        @default(now())
+
+  // TODO: keep relation name/field synced with your existing User model shape.
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
+  @@index([market, timeframe, createdAt])
+}

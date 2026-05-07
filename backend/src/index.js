@@ -1,9 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const SIGNAL_SCAN_INTERVAL_MS = Number(process.env.SIGNAL_SCAN_INTERVAL_MS || 2000);
+const BACKEND_BRAIN_DEFAULT_MODE = String(process.env.BACKEND_BRAIN_DEFAULT_MODE || 'app').toLowerCase();
 
 // In-memory account state - starts empty, populated by EA
 let accountState = {
@@ -34,7 +37,7 @@ let accountState = {
 let closedTrades = [];
 let botControl = {
   autoTradingEnabled: false,
-  executionMode: 'app', // 'app' | 'backend'
+  executionMode: BACKEND_BRAIN_DEFAULT_MODE === 'backend' ? 'backend' : 'app', // 'app' | 'backend'
   defaultLots: 0.01,
   maxOpenTrades: 5,
   trailingStopEnabled: true,
@@ -503,7 +506,7 @@ function runBackendBrain() {
   botControl.lastSignal = signal;
 }
 
-setInterval(runBackendBrain, 2000);
+setInterval(runBackendBrain, SIGNAL_SCAN_INTERVAL_MS);
 
 // Account endpoint - returns current account state
 app.get('/api/account', (req, res) => {
@@ -572,6 +575,39 @@ app.post('/api/bot/config', (req, res) => {
   }
 
   return res.json({ success: true, botControl });
+});
+
+// Trading mode toggle for app brain switch
+app.patch('/api/trading/mode', (req, res) => {
+  const { mode } = req.body || {};
+  const normalized = String(mode || '').toUpperCase();
+  if (normalized !== 'BACKEND' && normalized !== 'LOCAL') {
+    return res.status(400).json({ success: false, message: 'mode must be BACKEND or LOCAL' });
+  }
+
+  if (normalized === 'BACKEND') {
+    botControl.executionMode = 'backend';
+    botControl.autoTradingEnabled = true;
+  } else {
+    botControl.executionMode = 'app';
+    botControl.autoTradingEnabled = false;
+    botControl.pendingSignal = null;
+  }
+
+  return res.json({
+    success: true,
+    tradingMode: normalized,
+    isActive: botControl.executionMode === 'backend' && botControl.autoTradingEnabled,
+    botControl
+  });
+});
+
+app.get('/api/trading/mode', (req, res) => {
+  const tradingMode = botControl.executionMode === 'backend' ? 'BACKEND' : 'LOCAL';
+  return res.json({
+    tradingMode,
+    isActive: botControl.executionMode === 'backend' && botControl.autoTradingEnabled
+  });
 });
 
 // Command queue for EA
@@ -650,6 +686,58 @@ app.get('/api/orders/closed', (req, res) => {
   });
 
   res.json(filtered);
+});
+
+// MT5 bridge callback: execution result
+// TODO: Confirm this path and payload keys match your .mph/.mqh file exactly.
+app.post('/api/ea/trade-executed', (req, res) => {
+  const { apiKey, trade } = req.body || {};
+  const effectiveApiKey = apiKey || req.headers['x-api-key'] || process.env.MT5_BRIDGE_API_KEY;
+  if (process.env.MT5_BRIDGE_API_KEY && effectiveApiKey !== process.env.MT5_BRIDGE_API_KEY) {
+    return res.status(401).json({ success: false, message: 'Invalid MT5 bridge API key' });
+  }
+
+  if (trade && typeof trade === 'object') {
+    closedTrades.unshift({
+      id: `${trade.ticket || 'unknown'}-${Date.now()}`,
+      ticket: String(trade.ticket || ''),
+      symbol: trade.symbol || accountState.eaSymbol || 'BTCUSD',
+      type: trade.type || 'BUY',
+      profit: Number(trade.profit || 0),
+      openTime: new Date().toISOString(),
+      closeTime: new Date().toISOString(),
+      date: new Date().toISOString()
+    });
+    if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
+  }
+
+  return res.json({ success: true });
+});
+
+// MT5 bridge callback: historical sync
+// TODO: Confirm this path and payload shape match your .mph/.mqh file exactly.
+app.post('/api/ea/sync-history', (req, res) => {
+  const { apiKey, trades } = req.body || {};
+  const effectiveApiKey = apiKey || req.headers['x-api-key'] || process.env.MT5_BRIDGE_API_KEY;
+  if (process.env.MT5_BRIDGE_API_KEY && effectiveApiKey !== process.env.MT5_BRIDGE_API_KEY) {
+    return res.status(401).json({ success: false, message: 'Invalid MT5 bridge API key' });
+  }
+
+  if (Array.isArray(trades)) {
+    const mapped = trades.map((t) => ({
+      id: `${t.ticket || 'unknown'}-${Date.now()}-${Math.random()}`,
+      ticket: String(t.ticket || ''),
+      symbol: t.symbol || accountState.eaSymbol || 'BTCUSD',
+      type: t.type || 'BUY',
+      profit: Number(t.profit || 0),
+      openTime: t.openTime || new Date().toISOString(),
+      closeTime: t.closeTime || new Date().toISOString(),
+      date: t.closeTime || new Date().toISOString()
+    }));
+    closedTrades = [...mapped, ...closedTrades].slice(0, 500);
+  }
+
+  return res.json({ success: true });
 });
 
 app.get('/api/signal', (req, res) => {
