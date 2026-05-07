@@ -26,6 +26,7 @@ type RawCandle = { x?: number; time?: number; open: number; high: number; low: n
 type Candle = { time: number; open: number; high: number; low: number; close: number; volume: number };
 type CandleMap = Record<Timeframe, Candle[]>;
 type ChartOverlay = { id: string; price: number; label: string; color: string };
+type ChartMarker = { time: number; position: 'aboveBar' | 'belowBar'; color: string; shape: 'arrowUp' | 'arrowDown'; text: string };
 type TradeVisual = {
   ticket: string;
   symbol: string;
@@ -58,6 +59,7 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
     let candleSeries = null;
     let overlaySeries = [];
     let latestCandles = [];
+    let tradeMarkers = [];
     function initChart() {
       chart = LightweightCharts.createChart(document.getElementById('chart'), {
         width: ${Math.max(50, Math.floor(width))},
@@ -118,6 +120,11 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
         overlaySeries.push(line);
       });
     }
+    function applyMarkers(markers) {
+      if (!candleSeries) return;
+      tradeMarkers = Array.isArray(markers) ? markers : [];
+      candleSeries.setMarkers(tradeMarkers);
+    }
     function applyData(candles) {
       if (!candleSeries || !Array.isArray(candles)) return;
       candleSeries.setData(candles);
@@ -131,6 +138,7 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
         const msg = JSON.parse(raw);
         if (msg.type === 'SET_DATA') applyData(msg.payload.candles || []);
         if (msg.type === 'SET_OVERLAYS') applyOverlays(msg.payload.overlays || []);
+        if (msg.type === 'SET_MARKERS') applyMarkers(msg.payload.markers || []);
         if (msg.type === 'RESIZE' && chart) chart.applyOptions({ width: msg.payload.width, height: msg.payload.height });
       } catch (e) {}
     }
@@ -359,6 +367,31 @@ const ChartScreen = () => {
     return rows;
   }, [tradeVisuals, selectedSymbol, fadeTick]);
 
+  const markers = useMemo<ChartMarker[]>(() => {
+    if (seriesData.length === 0) return [];
+    const markerTime = seriesData[seriesData.length - 1]?.time;
+    if (!markerTime) return [];
+    const now = Date.now();
+
+    return Object.values(tradeVisuals)
+      .filter((t) => t.symbol === selectedSymbol && t.openPrice > 0)
+      .map((t) => {
+        const fadeRatio =
+          t.status === 'closed' && t.closedAt
+            ? Math.max(0, 1 - (now - t.closedAt) / CLOSED_LINE_FADE_MS)
+            : 1;
+        const alpha = Math.max(0.25, fadeRatio);
+        const isBuy = t.type === 'BUY';
+        return {
+          time: markerTime,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: hexToRgba(isBuy ? '#1E88E5' : '#E53935', alpha),
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          text: `${t.type} #${t.ticket}`,
+        };
+      });
+  }, [seriesData, tradeVisuals, selectedSymbol, fadeTick]);
+
   const postDataToChart = (target: React.RefObject<WebView>, chartWidth: number, chartHeight: number) => {
     if (!target.current || seriesData.length === 0) return;
     requestAnimationFrame(() => {
@@ -367,18 +400,19 @@ const ChartScreen = () => {
       );
       target.current?.postMessage(JSON.stringify({ type: 'SET_DATA', payload: { candles: seriesData } }));
       target.current?.postMessage(JSON.stringify({ type: 'SET_OVERLAYS', payload: { overlays } }));
+      target.current?.postMessage(JSON.stringify({ type: 'SET_MARKERS', payload: { markers } }));
     });
   };
 
   useEffect(() => {
     if (!chartReady || isSwitchingTimeframe) return;
     postDataToChart(chartWebRef, inlineChartSize.width, inlineChartSize.height);
-  }, [chartReady, seriesData, overlays, isSwitchingTimeframe, inlineChartSize.width, inlineChartSize.height]);
+  }, [chartReady, seriesData, overlays, markers, isSwitchingTimeframe, inlineChartSize.width, inlineChartSize.height]);
 
   useEffect(() => {
     if (!chartReady || !isFullscreen || isSwitchingTimeframe) return;
     postDataToChart(fullChartWebRef, fullChartSize.width, fullChartSize.height);
-  }, [chartReady, seriesData, overlays, isFullscreen, isSwitchingTimeframe, fullChartSize.width, fullChartSize.height]);
+  }, [chartReady, seriesData, overlays, markers, isFullscreen, isSwitchingTimeframe, fullChartSize.width, fullChartSize.height]);
 
   const onChangeTimeframe = (tf: Timeframe) => {
     if (tf === activeTimeframe) return;
