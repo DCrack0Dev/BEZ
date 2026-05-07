@@ -415,6 +415,118 @@ function calculateKeyLevelDistance(currentPrice, structures) {
   return null;
 }
 
+function toNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeCandle(c) {
+  return {
+    open: toNum(c.open ?? c.o, 0),
+    high: toNum(c.high ?? c.h, 0),
+    low: toNum(c.low ?? c.l, 0),
+    close: toNum(c.close ?? c.c, 0),
+    volume: toNum(c.volume ?? c.tickVolume ?? c.v, 0),
+    time: toNum(c.x ?? c.time ?? c.t ?? 0, 0)
+  };
+}
+
+function getRecentCandles(timeframe = 'M5', lookback = 8) {
+  const raw = accountState.chart && Array.isArray(accountState.chart[timeframe]) ? accountState.chart[timeframe] : [];
+  if (!raw.length) return [];
+
+  const normalized = raw.map(normalizeCandle).filter((c) => c.high >= c.low && c.open > 0 && c.close > 0);
+  normalized.sort((a, b) => a.time - b.time);
+  return normalized.slice(-lookback);
+}
+
+function candleStats(c) {
+  const body = Math.abs(c.close - c.open);
+  const range = Math.max(0.00001, c.high - c.low);
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  return { body, range, upperWick, lowerWick };
+}
+
+function hasRejectionCandle(last, signal) {
+  const s = candleStats(last);
+  if (signal === 'SELL') {
+    return s.upperWick >= s.body * 1.8 && s.upperWick >= s.range * 0.35 && last.close <= last.open;
+  }
+  if (signal === 'BUY') {
+    return s.lowerWick >= s.body * 1.8 && s.lowerWick >= s.range * 0.35 && last.close >= last.open;
+  }
+  return false;
+}
+
+function isMomentumSlowing(candles, signal) {
+  if (candles.length < 4) return false;
+  const c1 = candles[candles.length - 4];
+  const c2 = candles[candles.length - 3];
+  const c3 = candles[candles.length - 2];
+  const c4 = candles[candles.length - 1];
+
+  if (signal === 'SELL') {
+    const pushUpThenSlow = c3.high >= c2.high && c2.high >= c1.high;
+    const rangesShrink = (c4.high - c4.low) < (c2.high - c2.low);
+    const closeStall = c4.close <= c3.close;
+    return pushUpThenSlow && rangesShrink && closeStall;
+  }
+
+  if (signal === 'BUY') {
+    const pushDownThenSlow = c3.low <= c2.low && c2.low <= c1.low;
+    const rangesShrink = (c4.high - c4.low) < (c2.high - c2.low);
+    const closeStall = c4.close >= c3.close;
+    return pushDownThenSlow && rangesShrink && closeStall;
+  }
+
+  return false;
+}
+
+function isVolumeWeakening(candles, signal) {
+  if (candles.length < 4) return false;
+  const v1 = candles[candles.length - 4].volume;
+  const v2 = candles[candles.length - 3].volume;
+  const v3 = candles[candles.length - 2].volume;
+  const v4 = candles[candles.length - 1].volume;
+  if (v1 <= 0 || v2 <= 0 || v3 <= 0 || v4 <= 0) return false;
+
+  const avgPrev = (v1 + v2 + v3) / 3;
+  const weakening = v4 < avgPrev * 0.9;
+  if (signal === 'SELL') return weakening;
+  if (signal === 'BUY') return weakening;
+  return false;
+}
+
+function isStrengthDecreasing(candles) {
+  if (candles.length < 5) return false;
+  const b1 = Math.abs(candles[candles.length - 5].close - candles[candles.length - 5].open);
+  const b2 = Math.abs(candles[candles.length - 4].close - candles[candles.length - 4].open);
+  const b3 = Math.abs(candles[candles.length - 3].close - candles[candles.length - 3].open);
+  const b4 = Math.abs(candles[candles.length - 2].close - candles[candles.length - 2].open);
+  const b5 = Math.abs(candles[candles.length - 1].close - candles[candles.length - 1].open);
+
+  const early = (b1 + b2 + b3) / 3;
+  const late = (b4 + b5) / 2;
+  return late < early * 0.85;
+}
+
+function confirmationsPass(signal, klType, rsi) {
+  const tf = klType.includes('H4') ? 'H4' : klType.includes('H1') ? 'H1' : klType.includes('M15') ? 'M15' : 'M5';
+  const candles = getRecentCandles(tf, 10);
+  if (candles.length < 5) return false;
+
+  const last = candles[candles.length - 1];
+  const rejection = hasRejectionCandle(last, signal);
+  const slowdown = isMomentumSlowing(candles, signal);
+  const volumeWeakening = isVolumeWeakening(candles, signal);
+  const strengthDrop = isStrengthDecreasing(candles);
+  const rsiGate = signal === 'SELL' ? rsi >= 55 : rsi <= 45;
+
+  const extras = [slowdown, volumeWeakening, strengthDrop, rsiGate].filter(Boolean).length;
+  return rejection && extras >= 2;
+}
+
 function runBackendBrain() {
   if (!accountState.ea_connected) return;
   if (!botControl.autoTradingEnabled) return;
@@ -489,6 +601,7 @@ function runBackendBrain() {
   if (klType.includes('SUPPORT') && rsi <= 50 && bullBias) signal = 'BUY';
   if (klType.includes('RESISTANCE') && rsi >= 50 && bearBias) signal = 'SELL';
   if (signal === 'NONE') return;
+  if (!confirmationsPass(signal, klType, rsi)) return;
 
   const hasOpposite = positions.some((p) => String(p.type || '').toUpperCase() !== signal);
   if (hasOpposite) {
