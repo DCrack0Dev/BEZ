@@ -38,7 +38,7 @@ type TradeVisual = {
   closedAt?: number;
 };
 
-const TF_COUNTS: Record<Timeframe, number> = { M5: 288, M15: 96, H1: 24, H4: 6 };
+const TF_COUNTS: Record<Timeframe, number> = { M5: 576, M15: 192, H1: 48, H4: 12 };
 const TF_INTERVAL_SECONDS: Record<Timeframe, number> = { M5: 300, M15: 900, H1: 3600, H4: 14400 };
 const timeframes: Timeframe[] = ['M5', 'M15', 'H1', 'H4'];
 const CLOSED_LINE_FADE_MS = 12000;
@@ -57,9 +57,10 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
   <script>
     let chart = null;
     let candleSeries = null;
-    let overlaySeries = [];
+    let overlayPriceLines = [];
     let latestCandles = [];
     let tradeMarkers = [];
+    let userAtRightEdge = true;
     function initChart() {
       chart = LightweightCharts.createChart(document.getElementById('chart'), {
         width: ${Math.max(50, Math.floor(width))},
@@ -75,9 +76,15 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
           fixLeftEdge: false,
           fixRightEdge: false
         },
-        handleScroll: true,
-        handleScale: true
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true, axisDoubleClickReset: true }
       });
+      chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (!range || !Array.isArray(latestCandles) || latestCandles.length === 0) return;
+        const latestIndex = latestCandles.length - 1;
+        userAtRightEdge = range.to >= latestIndex - 1;
+      });
+
       candleSeries = chart.addCandlestickSeries({
         upColor: '#26a69a',
         downColor: '#ef5350',
@@ -87,37 +94,28 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
       });
     }
     function clearOverlays() {
-      if (!chart || !Array.isArray(overlaySeries)) return;
-      overlaySeries.forEach((s) => {
-        try { chart.removeSeries(s); } catch (e) {}
+      if (!candleSeries || !Array.isArray(overlayPriceLines)) return;
+      overlayPriceLines.forEach((p) => {
+        try { candleSeries.removePriceLine(p); } catch (e) {}
       });
-      overlaySeries = [];
+      overlayPriceLines = [];
     }
     function applyOverlays(overlays) {
-      if (!chart || !Array.isArray(latestCandles) || latestCandles.length === 0) return;
+      if (!candleSeries || !Array.isArray(latestCandles) || latestCandles.length === 0) return;
       clearOverlays();
-      const from = latestCandles[Math.max(0, latestCandles.length - 120)].time;
-      const to = latestCandles[latestCandles.length - 1].time;
       (Array.isArray(overlays) ? overlays : []).forEach((o) => {
         if (!o || typeof o.price !== 'number') return;
-        const line = chart.addLineSeries({
-          color: o.color || '#999999',
-          lineWidth: 2,
-          lineStyle: LightweightCharts.LineStyle.Solid,
-          priceLineVisible: true,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-        });
-        line.setData([{ time: from, value: o.price }, { time: to, value: o.price }]);
-        line.createPriceLine({
-          price: o.price,
+        const numericPrice = Number(o.price);
+        if (!Number.isFinite(numericPrice) || numericPrice <= 0) return;
+        const pl = candleSeries.createPriceLine({
+          price: numericPrice,
           color: o.color || '#999999',
           lineWidth: 1,
           lineStyle: LightweightCharts.LineStyle.Dashed,
           axisLabelVisible: true,
           title: o.label || '',
         });
-        overlaySeries.push(line);
+        overlayPriceLines.push(pl);
       });
     }
     function applyMarkers(markers) {
@@ -129,9 +127,11 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
       if (!candleSeries || !Array.isArray(candles)) return;
       candleSeries.setData(candles);
       latestCandles = candles;
-      chart.timeScale().fitContent();
-      const len = candles.length;
-      chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len });
+      if (!chart) return;
+      if (userAtRightEdge) {
+        const len = candles.length;
+        chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 100), to: len });
+      }
     }
     function onMessage(raw) {
       try {
@@ -235,7 +235,7 @@ const hexToRgba = (hex: string, alpha: number) => {
 };
 
 const ChartScreen = () => {
-  const { account, openPositions, activeTimeframe, setActiveTimeframe } = useTradeStore();
+  const { account, openPositions, activeTimeframe, setActiveTimeframe, lastSignalReason } = useTradeStore();
   const selectedSymbol = account.eaSymbol || 'BTCUSD';
   const [signal, setSignal] = useState<'BUY' | 'SELL' | 'NONE'>('NONE');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -541,6 +541,10 @@ const ChartScreen = () => {
             </View>
           )}
         </View>
+        <View style={styles.debugReasonWrap}>
+          <Text style={styles.debugReasonLabel}>Last Entry Reason</Text>
+          <Text style={styles.debugReasonValue}>{lastSignalReason || 'No recent signal'}</Text>
+        </View>
 
         <View style={styles.signalSection}>
           <Text style={styles.sectionTitle}>Technical Analysis</Text>
@@ -645,6 +649,17 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.s,
   },
   chartTitle: { ...TYPOGRAPHY.caption, color: COLORS.textSecondary, fontWeight: 'bold' },
+  debugReasonWrap: {
+    marginTop: SPACING.s,
+    marginHorizontal: SPACING.m,
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    borderColor: COLORS.border,
+    borderWidth: 1,
+    padding: SPACING.s,
+  },
+  debugReasonLabel: { ...TYPOGRAPHY.caption, color: COLORS.textSecondary, marginBottom: 2 },
+  debugReasonValue: { ...TYPOGRAPHY.body, color: COLORS.primary, fontWeight: '600' },
   webChart: { height: 300, backgroundColor: '#FFFFFF', borderRadius: 12, overflow: 'hidden' },
   webChartInner: { flex: 1, backgroundColor: '#FFFFFF' },
   loaderWrap: { height: 300, justifyContent: 'center', alignItems: 'center' },

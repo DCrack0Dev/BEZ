@@ -40,6 +40,7 @@ interface TradeState {
   closedPositions: Position[];
   structures: any;
   activeTimeframe: string;
+  lastSignalReason: string;
   isLoading: boolean;
   error: string | null;
   setAccount: (account: AccountData) => void;
@@ -47,6 +48,7 @@ interface TradeState {
   setClosedPositions: (positions: Position[]) => void;
   setStructures: (structures: any) => void;
   setActiveTimeframe: (timeframe: string) => void;
+  setLastSignalReason: (reason: string) => void;
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
 }
@@ -69,6 +71,7 @@ export const useTradeStore = create<TradeState>((set) => ({
   closedPositions: [],
   structures: {},
   activeTimeframe: 'M15',
+  lastSignalReason: '',
   isLoading: false,
   error: null,
   setAccount: (account) => set({ account }),
@@ -76,6 +79,7 @@ export const useTradeStore = create<TradeState>((set) => ({
   setClosedPositions: (closedPositions) => set({ closedPositions }),
   setStructures: (structures) => set({ structures }),
   setActiveTimeframe: (activeTimeframe) => set({ activeTimeframe }),
+  setLastSignalReason: (lastSignalReason) => set({ lastSignalReason }),
   setLoading: (isLoading) => set({ isLoading }),
   setError: (error) => set({ error }),
 }));

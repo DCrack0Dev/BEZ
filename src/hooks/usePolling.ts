@@ -37,7 +37,7 @@ interface KeyLevel {
 }
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setError, setLoading } = useTradeStore();
+  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { setKeyLevelDistance, addLog, logs: existingLogs } = useLogStore();
   
@@ -215,6 +215,7 @@ export const usePolling = () => {
           let signal: 'BUY' | 'SELL' | 'NONE' | 'CLOSE_ALL' = 'NONE';
           let slPrice = 0;
           let tpPrice = 0;
+          let signalReason = '';
           
           const totalOpen = openOrders.length;
           const maxOpenTrades = Math.max(1, botSettings.maxOpenTrades || 1);
@@ -450,6 +451,7 @@ export const usePolling = () => {
                 signal = 'BUY';
                 slPrice = Math.min(latest.low, previous.low) - (atr * 0.35);
                 tpPrice = price + (atr * 2.8);
+                signalReason = 'ENGULF_RECLAIM_BUY';
                 console.log(`✅ ENGULF RECLAIM BUY`);
               }
               else if (
@@ -462,6 +464,7 @@ export const usePolling = () => {
                 signal = 'SELL';
                 slPrice = Math.max(latest.high, previous.high) + (atr * 0.35);
                 tpPrice = price - (atr * 2.8);
+                signalReason = 'ENGULF_RECLAIM_SELL';
                 console.log(`✅ ENGULF RECLAIM SELL`);
               }
               // 1. MICRO-REVERSAL FLIP (M1 Chart at structural levels)
@@ -469,12 +472,14 @@ export const usePolling = () => {
                 signal = 'BUY';
                 slPrice = (m1Latest?.low || price) - (atr * 0.3);
                 tpPrice = price + (atr * 2.5);
+                signalReason = 'MICRO_BOS_BUY';
                 console.log(`💎 MICRO-BUY: M1 BOS at Structure`);
               }
               else if (sniperReady && atResistance && m1ReversalSell && !isChasing && (isOverbought || !trendUp)) {
                 signal = 'SELL';
                 slPrice = (m1Latest?.high || price) + (atr * 0.3);
                 tpPrice = price - (atr * 2.5);
+                signalReason = 'MICRO_BOS_SELL';
                 console.log(`💎 MICRO-SELL: M1 BOS at Structure`);
               }
               // 0.5 FAST REVERSAL FLIP (M5 pattern) - Only allow if deeply overbought/oversold
@@ -482,12 +487,14 @@ export const usePolling = () => {
                 signal = 'BUY';
                 slPrice = thirdLast.low - (atr * 0.4);
                 tpPrice = price + (atr * 2.5);
+                signalReason = 'FAST_FLIP_BUY';
                 console.log(`🚀 FAST BUY: Deep Oversold Flip`);
               }
               else if (sniperReady && atResistance && isBearishFlip && !isChasing && isOverbought) {
                 signal = 'SELL';
                 slPrice = thirdLast.high + (atr * 0.4);
                 tpPrice = price - (atr * 2.5);
+                signalReason = 'FAST_FLIP_SELL';
                 console.log(`🚀 FAST SELL: Deep Overbought Flip`);
               }
               // 1. REJECTION AT SUPPORT (Coming down to level)
@@ -496,6 +503,7 @@ export const usePolling = () => {
                 const lowestRecent = Math.min(latest.low, previous.low);
                 slPrice = lowestRecent - (atr * 0.35);
                 tpPrice = price + (atr * 2.5);
+                signalReason = 'SUPPORT_REJECTION_BUY';
                 console.log(`🟢 SUPPORT REJECTION BUY`);
               }
               // 2. REJECTION AT RESISTANCE (Going up to level)
@@ -504,6 +512,7 @@ export const usePolling = () => {
                 const highestRecent = Math.max(latest.high, previous.high);
                 slPrice = highestRecent + (atr * 0.35);
                 tpPrice = price - (atr * 2.5);
+                signalReason = 'RESISTANCE_REJECTION_SELL';
                 console.log(`🔴 RESISTANCE REJECTION SELL`);
               }
               // 3. BREAK AND RETEST (Continuation)
@@ -512,11 +521,13 @@ export const usePolling = () => {
                   signal = 'BUY';
                   slPrice = latest.low - (atr * 0.3);
                   tpPrice = price + (atr * 2.2);
+                  signalReason = 'BREAK_RETEST_BUY';
                   console.log(`🚀 BREAK & RETEST BUY`);
                 } else if (hasBrokenBelow && isBearish(latest)) {
                   signal = 'SELL';
                   slPrice = latest.high + (atr * 0.3);
                   tpPrice = price - (atr * 2.2);
+                  signalReason = 'BREAK_RETEST_SELL';
                   console.log(`🚀 BREAK & RETEST SELL`);
                 }
               }
@@ -527,10 +538,12 @@ export const usePolling = () => {
                   signal = 'BUY';
                   slPrice = previous.low - (atr * 0.3);
                   tpPrice = price + (atr * 2.0);
+                  signalReason = 'TREND_FALLBACK_BUY';
                 } else if (trendDown && isBearish(latest) && latest.close < previous.close) {
                   signal = 'SELL';
                   slPrice = previous.high + (atr * 0.3);
                   tpPrice = price - (atr * 2.0);
+                  signalReason = 'TREND_FALLBACK_SELL';
                 }
               }
 
@@ -564,6 +577,7 @@ export const usePolling = () => {
                   // Add a small delay for the close to process on MT5
                   setTimeout(() => {
                     console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price}`);
+                    setLastSignalReason(signalReason || 'OPPOSITE_CLOSE_THEN_ENTRY');
                     placeOrder({
                       symbol: accountDataSafe.eaSymbol || 'BTCUSD',
                       type: signal,
@@ -575,6 +589,7 @@ export const usePolling = () => {
                 }
 
                 console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price} | SL: ${slPrice} | TP: ${tpPrice}`);
+                setLastSignalReason(signalReason || 'DIRECT_ENTRY');
                 placeOrder({
                   symbol: accountDataSafe.eaSymbol || 'BTCUSD',
                   type: signal as any,
@@ -584,6 +599,7 @@ export const usePolling = () => {
               } else if (signal === 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 2000)) {
                 lastTradeTimeRef.current = now;
                 console.log(`🚀 EXECUTING CLOSE ALL`);
+                setLastSignalReason('TIME_EXIT_CLOSE_ALL');
                 placeOrder({ symbol: accountDataSafe.eaSymbol || 'BTCUSD', type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(e => console.error("SMC close failed:", e));
               }
             }
@@ -596,7 +612,7 @@ export const usePolling = () => {
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [setAccount, setOpenPositions, setStructures, setError, setLoading, botSettings]);
+  }, [setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, botSettings]);
 
   useEffect(() => {
     refresh(true);
