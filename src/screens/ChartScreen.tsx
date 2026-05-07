@@ -100,8 +100,13 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
       });
       overlayPriceLines = [];
     }
+    let latestOverlaysJson = '';
     function applyOverlays(overlays) {
       if (!candleSeries || !Array.isArray(latestCandles) || latestCandles.length === 0) return;
+      
+      const overlaysJson = JSON.stringify(overlays);
+      if (overlaysJson === latestOverlaysJson) return; // Skip if no changes
+      
       clearOverlays();
       (Array.isArray(overlays) ? overlays : []).forEach((o) => {
         if (!o || typeof o.price !== 'number') return;
@@ -117,6 +122,7 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
         });
         overlayPriceLines.push(pl);
       });
+      latestOverlaysJson = overlaysJson;
     }
     function applyMarkers(markers) {
       if (!candleSeries) return;
@@ -124,14 +130,29 @@ const makeChartHtml = (width: number, height: number) => `<!DOCTYPE html>
       candleSeries.setMarkers(tradeMarkers);
     }
     function applyData(candles) {
-      if (!candleSeries || !Array.isArray(candles)) return;
-      candleSeries.setData(candles);
-      latestCandles = candles;
-      if (!chart) return;
-      if (userAtRightEdge) {
-        const len = candles.length;
-        chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 100), to: len });
+      if (!candleSeries || !Array.isArray(candles) || candles.length === 0) return;
+      
+      // Use update() for incremental updates to avoid flickering and scroll resets
+      // Only use setData() if the data is significantly different or it's the first load
+      const isFirstLoad = latestCandles.length === 0;
+      const isTimeframeChange = !isFirstLoad && (candles.length !== latestCandles.length && Math.abs(candles.length - latestCandles.length) > 2);
+      
+      if (isFirstLoad || isTimeframeChange) {
+        candleSeries.setData(candles);
+        if (chart) {
+          const len = candles.length;
+          chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 100), to: len });
+        }
+      } else {
+        // Update last few candles to ensure any recent changes are captured
+        // Lightweight charts update() handles both updating existing and appending new
+        const startIndex = Math.max(0, latestCandles.length - 2);
+        for (let i = startIndex; i < candles.length; i++) {
+          candleSeries.update(candles[i]);
+        }
       }
+      
+      latestCandles = candles;
     }
     function onMessage(raw) {
       try {

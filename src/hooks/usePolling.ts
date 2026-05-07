@@ -36,6 +36,14 @@ interface KeyLevel {
   strength: number;
 }
 
+interface ExitEvent {
+  ticket: string;
+  side: 'BUY' | 'SELL';
+  reason: 'SL' | 'TP';
+  ts: number;
+  consumed: boolean;
+}
+
 export const usePolling = () => {
   const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason } = useTradeStore();
   const { botSettings } = useSettingsStore();
@@ -48,6 +56,8 @@ export const usePolling = () => {
   const autoTradingSyncSentRef = useRef<boolean>(false);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
   const prevExecutionMode = useRef<'app' | 'backend'>(botSettings.executionMode || 'app');
+  const prevOpenOrdersRef = useRef<any[]>([]);
+  const lastExitEventRef = useRef<ExitEvent | null>(null);
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -211,6 +221,41 @@ export const usePolling = () => {
           const sortedH1 = h1Chart.length > 0 ? [...h1Chart].sort((a, b) => b.x - a.x) : [];
           const sortedM15 = m15Chart.length > 0 ? [...m15Chart].sort((a, b) => b.x - a.x) : [];
           const sortedH4 = h4Chart.length > 0 ? [...h4Chart].sort((a, b) => b.x - a.x) : [];
+
+          // Detect freshly closed positions from open-order transitions and tag SL/TP exits.
+          const previousOpen = prevOpenOrdersRef.current || [];
+          const currentTickets = new Set((openOrders || []).map((p: any) => String(p.ticket)));
+          const closedNow = previousOpen
+            .filter((p: any) => !currentTickets.has(String(p.ticket)))
+            .sort((a: any, b: any) => Number(a.time || 0) - Number(b.time || 0));
+
+          if (closedNow.length > 0) {
+            const closed = closedNow[closedNow.length - 1];
+            const side: 'BUY' | 'SELL' = (String(closed.type).toUpperCase() === 'SELL') ? 'SELL' : 'BUY';
+            const sl = Number(closed.sl || 0);
+            const tp = Number(closed.tp || 0);
+            const closeBuffer = atr * 0.15;
+            let reason: 'SL' | 'TP' | null = null;
+
+            if (side === 'BUY') {
+              if (sl > 0 && price <= (sl + closeBuffer)) reason = 'SL';
+              else if (tp > 0 && price >= (tp - closeBuffer)) reason = 'TP';
+            } else {
+              if (sl > 0 && price >= (sl - closeBuffer)) reason = 'SL';
+              else if (tp > 0 && price <= (tp + closeBuffer)) reason = 'TP';
+            }
+
+            if (reason) {
+              lastExitEventRef.current = {
+                ticket: String(closed.ticket || ''),
+                side,
+                reason,
+                ts: Date.now(),
+                consumed: false,
+              };
+              console.log(`🧭 Exit tracked: #${closed.ticket} ${side} ${reason}`);
+            }
+          }
           
           let signal: 'BUY' | 'SELL' | 'NONE' | 'CLOSE_ALL' = 'NONE';
           let slPrice = 0;
@@ -226,6 +271,33 @@ export const usePolling = () => {
             openOrders.forEach(pos => {
               const profit = pos.profit || 0;
               const isBuy = pos.type === 'BUY';
+              const chartAsc = [...sortedChart].sort((a, b) => a.x - b.x);
+              const canTrailAfterSecondClose = (() => {
+                if (chartAsc.length < 4) return false;
+                const openTime = Number(pos.time || 0);
+                if (!openTime) return false;
+
+                const inferredTfSec =
+                  chartAsc.length >= 2
+                    ? Math.max(60, Math.abs(Number(chartAsc[1].x) - Number(chartAsc[0].x)) || 300)
+                    : 300;
+
+                const entryIdx = chartAsc.findIndex((c) => {
+                  const t = Number(c.x);
+                  return t <= openTime && openTime < (t + inferredTfSec);
+                });
+                if (entryIdx < 0) return false;
+
+                const secondAfterEntryIdx = entryIdx + 2;
+                const lastClosedIdx = chartAsc.length - 2; // last bar may still be forming
+                if (secondAfterEntryIdx > lastClosedIdx) return false;
+
+                const entryClose = Number(chartAsc[entryIdx].close);
+                const secondClose = Number(chartAsc[secondAfterEntryIdx].close);
+                if (!Number.isFinite(entryClose) || !Number.isFinite(secondClose)) return false;
+
+                return isBuy ? secondClose > entryClose : secondClose < entryClose;
+              })();
               
               // Emergency Manual Close
               const closeBuffer = atr * 0.1;
@@ -240,6 +312,13 @@ export const usePolling = () => {
 
               // --- IMPROVED TRAILING STOP ($0.50 profit = move to break even, then trail) ---
               if (profit >= 0.50) {
+                if (!canTrailAfterSecondClose) {
+                  if (Math.random() > 0.85) {
+                    console.log(`⏳ Trail blocked for #${pos.ticket}: waiting for 2nd candle close confirmation`);
+                  }
+                  return;
+                }
+
                 const currentSl = pos.sl || 0;
                 let newSlPrice = 0;
                 
@@ -306,7 +385,7 @@ export const usePolling = () => {
               const m15Levels = sortedM15.length > 0 ? findKeyLevels(sortedM15) : [];
               const m5Fvgs = sortedChart.length > 0 ? findFVGs(sortedChart).filter(fvg => !fvg.mitigated) : [];
 
-              const levelDistanceBuffer = Math.max(atr * 0.60, price * 0.001);
+              const levelDistanceBuffer = Math.max(atr * 0.35, price * 0.00025);
               const inOb = (p: number, obs: OrderBlock[]) => obs.some((ob) => p >= (ob.bottom - levelDistanceBuffer) && p <= (ob.top + levelDistanceBuffer));
               const inFvg = (p: number, fvgs: FVG[]) => fvgs.some((fvg) => p >= (fvg.bottom - levelDistanceBuffer) && p <= (fvg.top + levelDistanceBuffer));
               
@@ -337,8 +416,13 @@ export const usePolling = () => {
               const isOversold = rsi < 30;
               const inMiddleRange = rsi > 40 && rsi < 60; // Stop trading in no-man's land
 
-              const atSupport = isNearSupport(price) || sortedChart.slice(0, 3).some(c => isNearSupport(c.low));
-              const atResistance = isNearResistance(price) || sortedChart.slice(0, 3).some(c => isNearResistance(c.high));
+              const supportNearbyNow = isNearSupport(price);
+              const resistanceNearbyNow = isNearResistance(price);
+              const supportRejectedRecently = sortedChart.slice(0, 3).some(c => isNearSupport(c.low));
+              const resistanceRejectedRecently = sortedChart.slice(0, 3).some(c => isNearResistance(c.high));
+              const atSupport = supportNearbyNow || supportRejectedRecently;
+              const atResistance = resistanceNearbyNow || resistanceRejectedRecently;
+              const levelConflict = atSupport && atResistance;
               
               const priceSlowing = detectPriceSlowing(sortedChart, 3);
               const rejection = detectRecentRejection(sortedChart);
@@ -346,6 +430,15 @@ export const usePolling = () => {
               const volumeExpansion = detectVolumeExpansion(sortedChart);
               
               const allLevels = [...h4Levels, ...h1Levels, ...m15Levels];
+              const supportLevels = allLevels.filter(l => l.type === 'SUPPORT');
+              const resistanceLevels = allLevels.filter(l => l.type === 'RESISTANCE');
+              const nearestSupportDistance = supportLevels.length > 0
+                ? Math.min(...supportLevels.map(l => Math.abs(price - l.price)))
+                : Number.POSITIVE_INFINITY;
+              const nearestResistanceDistance = resistanceLevels.length > 0
+                ? Math.min(...resistanceLevels.map(l => Math.abs(price - l.price)))
+                : Number.POSITIVE_INFINITY;
+              const directionalBuffer = atr * 0.45;
               
               // --- MICRO-REVERSAL DETECTION (M1 Confirmation with BOS) ---
               const m1Latest = sortedM1[0];
@@ -400,6 +493,19 @@ export const usePolling = () => {
                 latest.open >= previous.close &&
                 latest.close <= previous.open &&
                 latestBody >= prevBodyAbs * 0.9;
+              const lookbackBeforePrev = sortedChart.slice(2, 8);
+              const prevRangeHigh = lookbackBeforePrev.length > 0 ? Math.max(...lookbackBeforePrev.map(c => c.high)) : previous.high;
+              const prevRangeLow = lookbackBeforePrev.length > 0 ? Math.min(...lookbackBeforePrev.map(c => c.low)) : previous.low;
+              const prevSweptHighAndRejected =
+                previous.high > prevRangeHigh &&
+                previous.close < prevRangeHigh &&
+                (previous.high - Math.max(previous.open, previous.close)) > (prevBodyAbs * 1.1);
+              const prevSweptLowAndRejected =
+                previous.low < prevRangeLow &&
+                previous.close > prevRangeLow &&
+                (Math.min(previous.open, previous.close) - previous.low) > (prevBodyAbs * 1.1);
+              const bearishConfirmAfterPrevSweep = isBearish(latest) && latest.close < previous.close;
+              const bullishConfirmAfterPrevSweep = isBullish(latest) && latest.close > previous.close;
               const bullishReclaim =
                 Boolean(nearestLevel) &&
                 previous.close < nearestLevelPrice &&
@@ -436,12 +542,71 @@ export const usePolling = () => {
               if (!spreadOk) {
                 console.log(`❌ Trade blocked: Spread too high (${spread.toFixed(2)} > 30)`);
               }
+              if (levelConflict) {
+                console.log(`❌ Trade blocked: support/resistance conflict around current price`);
+              }
 
               // --- SIGNAL LOGIC ---
-              const sniperReady = spreadOk && !isChoppy && !inMiddleRange; // BLOCK middle range chop
+              const baseReady = spreadOk && !levelConflict;
+              const sniperReady = baseReady && !isChoppy && !inMiddleRange; // Strict mode for non-sweep setups
 
-              // 0. ENGULFING RECLAIM REVERSAL (high priority flip after exhaustion)
+              const recentExit = lastExitEventRef.current &&
+                !lastExitEventRef.current.consumed &&
+                (Date.now() - lastExitEventRef.current.ts) <= 15 * 60 * 1000;
+
+              // -1. OPPOSITE RE-ENTRY after recent SL/TP if a liquidity sweep forms.
               if (
+                baseReady &&
+                !isChasing &&
+                recentExit &&
+                lastExitEventRef.current
+              ) {
+                const exit = lastExitEventRef.current;
+                const bearishSweepSetup = sweep === 'HIGH_SWEEP' || (prevSweptHighAndRejected && bearishConfirmAfterPrevSweep);
+                const bullishSweepSetup = sweep === 'LOW_SWEEP' || (prevSweptLowAndRejected && bullishConfirmAfterPrevSweep);
+
+                if (exit.side === 'BUY' && bearishSweepSetup) {
+                  signal = 'SELL';
+                  slPrice = Math.max(previous.high, latest.high) + (atr * 0.22);
+                  tpPrice = price - (atr * 2.4);
+                  signalReason = `REENTRY_OPPOSITE_AFTER_${exit.reason}_SELL`;
+                  console.log(`♻️ Opposite re-entry SELL after ${exit.reason} + sweep`);
+                } else if (exit.side === 'SELL' && bullishSweepSetup) {
+                  signal = 'BUY';
+                  slPrice = Math.min(previous.low, latest.low) - (atr * 0.22);
+                  tpPrice = price + (atr * 2.4);
+                  signalReason = `REENTRY_OPPOSITE_AFTER_${exit.reason}_BUY`;
+                  console.log(`♻️ Opposite re-entry BUY after ${exit.reason} + sweep`);
+                }
+              }
+
+              // 0. PREV-CANDLE LIQUIDITY SWEEP + REJECTION (sell/buy on confirmation candle)
+              else if (
+                baseReady &&
+                !isChasing &&
+                prevSweptHighAndRejected &&
+                bearishConfirmAfterPrevSweep
+              ) {
+                signal = 'SELL';
+                slPrice = previous.high + (atr * 0.20);
+                tpPrice = price - (atr * 2.6);
+                signalReason = 'LIQ_SWEEP_PREV_HIGH_SELL';
+                console.log(`🔻 LIQ SWEEP PREV-HIGH SELL`);
+              }
+              else if (
+                baseReady &&
+                !isChasing &&
+                prevSweptLowAndRejected &&
+                bullishConfirmAfterPrevSweep
+              ) {
+                signal = 'BUY';
+                slPrice = previous.low - (atr * 0.20);
+                tpPrice = price + (atr * 2.6);
+                signalReason = 'LIQ_SWEEP_PREV_LOW_BUY';
+                console.log(`🔺 LIQ SWEEP PREV-LOW BUY`);
+              }
+              // 1. ENGULFING RECLAIM REVERSAL (high priority flip after exhaustion)
+              else if (
                 sniperReady &&
                 !isChasing &&
                 bullishEngulfing &&
@@ -548,10 +713,24 @@ export const usePolling = () => {
               }
 
               if (signal === 'NONE') {
-                if (Math.random() > 0.9) {
-                  const reason = isChasing ? "Anti-Chase" : isChoppy ? "Choppy" : "No Setup";
-                  console.log(`🔎 Scan: ${reason} | Price: ${price}`);
+                if (Math.random() > 0.85) {
+                  const blockers: string[] = [];
+                  if (!spreadOk) blockers.push("spread");
+                  if (levelConflict) blockers.push("levelConflict");
+                  if (isChoppy) blockers.push("choppy");
+                  if (inMiddleRange) blockers.push("midRSI");
+                  if (isChasing) blockers.push("chasing");
+                  console.log(`🔎 No trade | Price: ${price.toFixed(3)} | RSI: ${rsi.toFixed(1)} | blockers: ${blockers.length > 0 ? blockers.join(",") : "setup_not_confirmed"}`);
                 }
+              }
+
+              // Final directional sanity check: never sell into nearby support, never buy into nearby resistance.
+              if (signal === 'SELL' && (atSupport || nearestSupportDistance <= directionalBuffer)) {
+                console.log(`❌ SELL cancelled: support too close (${nearestSupportDistance.toFixed(3)})`);
+                signal = 'NONE';
+              } else if (signal === 'BUY' && (atResistance || nearestResistanceDistance <= directionalBuffer)) {
+                console.log(`❌ BUY cancelled: resistance too close (${nearestResistanceDistance.toFixed(3)})`);
+                signal = 'NONE';
               }
 
               if (signal !== 'NONE' && signal !== 'CLOSE_ALL' && lastSignalRef.current === signal && lastSignalCandleRef.current === latestCandleTime) {
@@ -576,6 +755,9 @@ export const usePolling = () => {
                   
                   // Add a small delay for the close to process on MT5
                   setTimeout(() => {
+                    if (signalReason.indexOf('REENTRY_OPPOSITE_AFTER_') === 0 && lastExitEventRef.current) {
+                      lastExitEventRef.current.consumed = true;
+                    }
                     console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price}`);
                     setLastSignalReason(signalReason || 'OPPOSITE_CLOSE_THEN_ENTRY');
                     placeOrder({
@@ -588,6 +770,9 @@ export const usePolling = () => {
                   return; // Exit this polling cycle to wait for close
                 }
 
+                if (signalReason.indexOf('REENTRY_OPPOSITE_AFTER_') === 0 && lastExitEventRef.current) {
+                  lastExitEventRef.current.consumed = true;
+                }
                 console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price} | SL: ${slPrice} | TP: ${tpPrice}`);
                 setLastSignalReason(signalReason || 'DIRECT_ENTRY');
                 placeOrder({
@@ -606,6 +791,8 @@ export const usePolling = () => {
           }
         }
       }
+
+      prevOpenOrdersRef.current = (openOrders || []).map((p: any) => ({ ...p }));
     } catch (error) {
       console.error('Polling error:', error);
       setError('Connection lost. Retrying...');

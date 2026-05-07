@@ -46,6 +46,57 @@ let botControl = {
   pendingSignal: null
 };
 
+function toFiniteNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+function inferCloseReasonFromPrices(type, closePrice, sl, tp, fallback = 'MANUAL') {
+  const normalizedType = String(type || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+  const threshold = Math.max(Math.abs(closePrice) * 0.0002, 0.05);
+  if (sl > 0 && Math.abs(closePrice - sl) <= threshold) return 'SL';
+  if (tp > 0 && Math.abs(closePrice - tp) <= threshold) return 'TP';
+  if (normalizedType === 'BUY' && sl > 0 && closePrice < sl) return 'SL';
+  if (normalizedType === 'SELL' && sl > 0 && closePrice > sl) return 'SL';
+  if (normalizedType === 'BUY' && tp > 0 && closePrice > tp) return 'TP';
+  if (normalizedType === 'SELL' && tp > 0 && closePrice < tp) return 'TP';
+  return fallback;
+}
+
+function normalizeClosedTrade(raw = {}) {
+  const ticket = String(raw.ticket || raw.id || '');
+  const type = String(raw.type || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+  const openPrice = toFiniteNumber(raw.openPrice, raw.priceOpen, raw.entryPrice, raw.price_open);
+  const closePrice = toFiniteNumber(raw.closePrice, raw.priceClose, raw.exitPrice, raw.price_close, raw.price, accountState.price);
+  const sl = toFiniteNumber(raw.sl, raw.stopLoss, raw.stop_loss);
+  const tp = toFiniteNumber(raw.tp, raw.takeProfit, raw.take_profit);
+  const lots = toFiniteNumber(raw.lots, raw.volume, raw.lotSize, raw.size);
+  const profit = toFiniteNumber(raw.profit, raw.pnl);
+  const closeReason = String(raw.closeReason || '').trim()
+    || inferCloseReasonFromPrices(type, closePrice, sl, tp, 'MANUAL');
+
+  return {
+    id: String(raw.id || `${ticket || 'unknown'}-${Date.now()}`),
+    ticket,
+    symbol: raw.symbol || accountState.eaSymbol || 'BTCUSD',
+    type,
+    profit,
+    pnl: profit,
+    lots,
+    openPrice,
+    closePrice,
+    sl,
+    tp,
+    closeReason,
+    openTime: raw.openTime || raw.open_time || raw.timeOpen || new Date().toISOString(),
+    closeTime: raw.closeTime || raw.close_time || raw.timeClose || new Date().toISOString(),
+    date: raw.date || raw.closeTime || raw.close_time || new Date().toISOString(),
+  };
+}
+
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -163,17 +214,26 @@ app.post('/api/ea/update', (req, res) => {
       if (!currentTickets.has(ticket)) {
         const closeTimeIso = new Date().toISOString();
         const openTimeIso = p.time ? new Date(Number(p.time) * 1000).toISOString() : closeTimeIso;
-        const profit = Number(p.profit || 0);
-        closedTrades.unshift({
+        const closePrice = toFiniteNumber(accountData.price, accountState.price);
+        const sl = toFiniteNumber(p.sl, p.stopLoss, p.stop_loss);
+        const tp = toFiniteNumber(p.tp, p.takeProfit, p.take_profit);
+        const normalized = normalizeClosedTrade({
           id: `${ticket}-${Date.now()}`,
           ticket,
           symbol: p.symbol || accountState.eaSymbol || 'BTCUSD',
           type: p.type || 'BUY',
-          profit,
+          profit: toFiniteNumber(p.profit),
+          lots: toFiniteNumber(p.volume, p.lots),
+          openPrice: toFiniteNumber(p.openPrice, p.price, p.entryPrice),
+          closePrice,
+          sl,
+          tp,
+          closeReason: inferCloseReasonFromPrices(p.type, closePrice, sl, tp, 'MANUAL'),
           openTime: openTimeIso,
           closeTime: closeTimeIso,
-          date: closeTimeIso
+          date: closeTimeIso,
         });
+        closedTrades.unshift(normalized);
       }
     });
     if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
@@ -798,7 +858,7 @@ app.get('/api/orders/closed', (req, res) => {
     return Number.isFinite(ts) && ts >= start;
   });
 
-  res.json(filtered);
+  res.json(filtered.map((t) => normalizeClosedTrade(t)));
 });
 
 // MT5 bridge callback: execution result
@@ -811,16 +871,22 @@ app.post('/api/ea/trade-executed', (req, res) => {
   }
 
   if (trade && typeof trade === 'object') {
-    closedTrades.unshift({
+    closedTrades.unshift(normalizeClosedTrade({
       id: `${trade.ticket || 'unknown'}-${Date.now()}`,
-      ticket: String(trade.ticket || ''),
+      ticket: trade.ticket,
       symbol: trade.symbol || accountState.eaSymbol || 'BTCUSD',
       type: trade.type || 'BUY',
-      profit: Number(trade.profit || 0),
-      openTime: new Date().toISOString(),
-      closeTime: new Date().toISOString(),
-      date: new Date().toISOString()
-    });
+      profit: trade.profit,
+      lots: trade.lots || trade.volume,
+      openPrice: trade.openPrice || trade.priceOpen || trade.entryPrice,
+      closePrice: trade.closePrice || trade.priceClose || trade.exitPrice || accountState.price,
+      sl: trade.sl || trade.stopLoss,
+      tp: trade.tp || trade.takeProfit,
+      closeReason: trade.closeReason,
+      openTime: trade.openTime || new Date().toISOString(),
+      closeTime: trade.closeTime || new Date().toISOString(),
+      date: trade.closeTime || new Date().toISOString(),
+    }));
     if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
   }
 
@@ -837,16 +903,24 @@ app.post('/api/ea/sync-history', (req, res) => {
   }
 
   if (Array.isArray(trades)) {
-    const mapped = trades.map((t) => ({
-      id: `${t.ticket || 'unknown'}-${Date.now()}-${Math.random()}`,
-      ticket: String(t.ticket || ''),
-      symbol: t.symbol || accountState.eaSymbol || 'BTCUSD',
-      type: t.type || 'BUY',
-      profit: Number(t.profit || 0),
-      openTime: t.openTime || new Date().toISOString(),
-      closeTime: t.closeTime || new Date().toISOString(),
-      date: t.closeTime || new Date().toISOString()
-    }));
+    const mapped = trades.map((t) =>
+      normalizeClosedTrade({
+        id: `${t.ticket || 'unknown'}-${Date.now()}-${Math.random()}`,
+        ticket: t.ticket,
+        symbol: t.symbol || accountState.eaSymbol || 'BTCUSD',
+        type: t.type || 'BUY',
+        profit: t.profit,
+        lots: t.lots || t.volume,
+        openPrice: t.openPrice || t.priceOpen || t.entryPrice,
+        closePrice: t.closePrice || t.priceClose || t.exitPrice,
+        sl: t.sl || t.stopLoss,
+        tp: t.tp || t.takeProfit,
+        closeReason: t.closeReason,
+        openTime: t.openTime || new Date().toISOString(),
+        closeTime: t.closeTime || new Date().toISOString(),
+        date: t.closeTime || new Date().toISOString(),
+      })
+    );
     closedTrades = [...mapped, ...closedTrades].slice(0, 500);
   }
 
