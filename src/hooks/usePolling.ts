@@ -13,7 +13,7 @@ import { useLogStore } from '../store/useLogStore';
 // ... (existing interfaces)
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setError, setLoading } = useTradeStore();
+  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { addLog } = useLogStore();
   
