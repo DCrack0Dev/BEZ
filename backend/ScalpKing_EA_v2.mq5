@@ -15,7 +15,7 @@
 #include "FxScalpKing_HTTP.mqh"
 
 // Embed the logo as a resource (Place logo.png in the same folder as this MQ5)
-#resource "logo.png"
+//#resource "logo.png"
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -49,6 +49,8 @@ CTrade            trade;
 CPositionInfo     posInfo;
 
 int            handle_FastEMA_M5, handle_SlowEMA_M5;
+int            handle_EMA5, handle_EMA10, handle_EMA20;
+int            handle_Stoch, handle_CCI, handle_SAR;
 int            handle_FastEMA_M1, handle_SlowEMA_M1;
 int            handle_BB_M5;
 int            handle_RSI7_M5;
@@ -104,7 +106,16 @@ int OnInit()
    // Initialize Indicators
    handle_FastEMA_M5 = iMA(_Symbol, PERIOD_M5, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    handle_SlowEMA_M5 = iMA(_Symbol, PERIOD_M5, SlowEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-   handle_BB_M5      = iBands(_Symbol, PERIOD_M5, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
+   
+   // Aggressive Scalper Indicators
+   handle_EMA5       = iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE);
+   handle_EMA10      = iMA(_Symbol, PERIOD_M1, 10, 0, MODE_EMA, PRICE_CLOSE);
+   handle_EMA20      = iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE);
+   handle_Stoch      = iStochastic(_Symbol, PERIOD_M1, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+   handle_CCI        = iCCI(_Symbol, PERIOD_M1, 14, PRICE_TYPICAL);
+   handle_SAR        = iSAR(_Symbol, PERIOD_M1, 0.02, 0.2);
+
+   handle_BB_M5      = iBands(_Symbol, PERIOD_M5, 10, 0, 2.0, PRICE_CLOSE);
    handle_RSI7_M5    = iRSI(_Symbol, PERIOD_M5, 7, PRICE_CLOSE);
    handle_ATR_M5     = iATR(_Symbol, PERIOD_M5, 14);
    handle_FastEMA_M1 = iMA(_Symbol, PERIOD_M1, FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
@@ -337,7 +348,9 @@ void SendHeartbeat()
 
    if(GetIndicatorData()) {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      FxScalpKing.SetMarketData(bid, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0]);
+      int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      long tickVolume = (long)SymbolInfoInteger(_Symbol, SYMBOL_VOLUME);
+      FxScalpKing.SetMarketData(bid, fastEMA_M5[0], slowEMA_M5[0], bb_upper[0], bb_lower[0], rsi7_M5[0], 0, 0, spread, tickVolume);
    }
 
    string commands[];

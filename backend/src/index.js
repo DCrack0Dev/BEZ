@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -14,6 +16,7 @@ let accountState = {
   equity: 200000,
   positions: [],
   lastSeen: new Date().toISOString(),
+  lastEaUpdate: 0, // Timestamp of last EA heartbeat
   profit: 0,
   pnl_today: 0,
   ea_connected: false,
@@ -35,6 +38,8 @@ let accountState = {
   logs: [], // Store logs from EA
 };
 let closedTrades = [];
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const CLOSED_TRADES_FILE = path.join(DATA_DIR, 'closed-trades.json');
 let botControl = {
   autoTradingEnabled: false,
   executionMode: BACKEND_BRAIN_DEFAULT_MODE === 'backend' ? 'backend' : 'app', // 'app' | 'backend'
@@ -97,6 +102,36 @@ function normalizeClosedTrade(raw = {}) {
   };
 }
 
+function loadClosedTradesFromDisk() {
+  try {
+    if (!fs.existsSync(CLOSED_TRADES_FILE)) {
+      closedTrades = [];
+      return;
+    }
+
+    const raw = fs.readFileSync(CLOSED_TRADES_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed) ? parsed : [];
+    closedTrades = arr.map((t) => normalizeClosedTrade(t)).slice(0, 500);
+    console.log(`[PERSIST] Loaded ${closedTrades.length} closed trades from disk`);
+  } catch (err) {
+    console.error('[PERSIST] Failed to load closed trades:', err.message);
+    closedTrades = [];
+  }
+}
+
+function saveClosedTradesToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const normalized = (closedTrades || []).map((t) => normalizeClosedTrade(t)).slice(0, 500);
+    fs.writeFileSync(CLOSED_TRADES_FILE, JSON.stringify(normalized, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[PERSIST] Failed to save closed trades:', err.message);
+  }
+}
+
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -152,10 +187,11 @@ app.get('/test', (req, res) => {
 // EA validation endpoint
 app.post('/api/ea/validate', (req, res) => {
   const { apiKey } = req.body;
-  console.log('[EA] License validation request:', apiKey);
+  console.log(`[EA] 🔑 License validation request for key: ${apiKey}`);
   
   // Simple validation - accept any key starting with FXSK-
   if (apiKey && apiKey.startsWith('FXSK-')) {
+    console.log(`[EA] ✅ License validated for key: ${apiKey}`);
     const maxOpenTrades = 5;
     res.json({
       valid: true,
@@ -176,9 +212,8 @@ app.post('/api/ea/validate', (req, res) => {
 
 // EA heartbeat endpoint - receives real data from EA
 app.post('/api/ea/update', (req, res) => {
-  console.log(' [Backend] EA heartbeat received');
-  
-  const { accountData, testStructures, structures, positions, chart, logs: eaLogs } = req.body;
+  const { accountData, testStructures, structures, positions, chart, logs: eaLogs, apiKey } = req.body;
+  console.log(`[EA] ❤️ Heartbeat received from ${apiKey || 'unknown EA'}`);
   
   // Update account state with real EA data
   if (accountData) {
@@ -194,6 +229,8 @@ app.post('/api/ea/update', (req, res) => {
     // MT5 EA sends positions at top-level; keep accountData fallback for compatibility
     accountState.positions = positions || accountData.positions || accountState.positions;
     accountState.ea_connected = true;
+    accountState.lastEaUpdate = Date.now();
+    accountState.lastSeen = new Date().toISOString();
     accountState.eaSymbol = accountData.eaSymbol || accountData.symbol || accountState.eaSymbol || 'BTCUSD';
     accountState.fastEMA = accountData.fastEMA || 0;
     accountState.slowEMA = accountData.slowEMA || 0;
@@ -237,6 +274,7 @@ app.post('/api/ea/update', (req, res) => {
       }
     });
     if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
+    saveClosedTradesToDisk();
     
     // Enhanced logging
     console.log(` [Backend] Market Data - Price: ${accountState.price} | EMA: ${accountState.fastEMA}/${accountState.slowEMA} | RSI: ${accountState.rsi}`);
@@ -253,14 +291,7 @@ app.post('/api/ea/update', (req, res) => {
       console.log(` [Backend] Structures generated from chart data`);
     }
     
-    // Calculate key level distances
-    const keyLevelInfo = calculateKeyLevelDistance(accountState.price, accountState.structures);
-    if (keyLevelInfo) {
-      console.log(` [Backend] Next Key Level - ${keyLevelInfo.type} at ${keyLevelInfo.level} (${keyLevelInfo.distance.toFixed(2)}pts away)`);
-      accountState.keyLevelInfo = keyLevelInfo;
-    } else {
-      accountState.keyLevelInfo = null;
-    }
+    accountState.keyLevelInfo = null; // Key level info deprecated in favor of SMC structures
 
     // Add logs from EA
     if (Array.isArray(eaLogs)) {
@@ -352,263 +383,119 @@ app.post('/api/ea/update', (req, res) => {
   });
 });
 
-function normalizeStructuresForSignal(rawStructures, currentPrice) {
-  const base = (rawStructures && typeof rawStructures === 'object') ? rawStructures : {};
-  const tfList = ['M5', 'M15', 'H1', 'H4'];
-  const out = {};
-
-  tfList.forEach((tf) => {
-    const tfData = (base[tf] && typeof base[tf] === 'object') ? base[tf] : {};
-    out[tf] = {
-      keyLevels: Array.isArray(tfData.keyLevels) ? tfData.keyLevels : [],
-      orderBlocks: Array.isArray(tfData.orderBlocks) ? tfData.orderBlocks : [],
-      fvgs: Array.isArray(tfData.fvgs) ? tfData.fvgs : []
-    };
-  });
-
-  const totalLevels = tfList.reduce((sum, tf) => sum + out[tf].keyLevels.length, 0);
-  if (totalLevels === 0 && currentPrice > 0) {
-    out.M5.keyLevels.push({
-      type: 'SUPPORT',
-      price: Number((currentPrice - 20).toFixed(2)),
-      strength: 1
-    });
-    out.M5.keyLevels.push({
-      type: 'RESISTANCE',
-      price: Number((currentPrice + 20).toFixed(2)),
-      strength: 1
-    });
-  }
-
-  return out;
-}
-
 function generateBasicStructures(charts) {
   const structures = {};
   const tfs = Object.keys(charts);
   
   tfs.forEach(tf => {
     const candles = charts[tf];
-    if (!Array.isArray(candles) || candles.length < 10) return;
+    if (!Array.isArray(candles) || candles.length < 20) return;
     
-    const keyLevels = [];
-    const sorted = [...candles].sort((a, b) => b.x - a.x); // Newest first
+    const sorted = [...candles].sort((a, b) => a.x - b.x); // Oldest first
     
-    // Simple Peak/Trough detection for Key Levels
-    for (let i = 2; i < Math.min(sorted.length - 2, 50); i++) {
-      // Resistance (Peak)
-      if (sorted[i].high > sorted[i-1].high && sorted[i].high > sorted[i-2].high &&
-          sorted[i].high > sorted[i+1].high && sorted[i].high > sorted[i+2].high) {
-        keyLevels.push({ price: sorted[i].high, type: 'RESISTANCE', strength: 1 });
+    // 1. Order Blocks
+    const orderBlocks = [];
+    for (let i = 1; i < sorted.length - 2; i++) {
+      const c = sorted[i];
+      const p1 = sorted[i+1];
+      const body = Math.abs(c.close - c.open);
+      const range = Math.max(c.high - c.low, 0.00001);
+      if (body > range * 0.6) {
+        const isBullish = c.close > c.open;
+        orderBlocks.push({
+          type: isBullish ? 'BULLISH' : 'BEARISH',
+          top: c.high,
+          bottom: c.low,
+          time: c.x,
+          label: `${tf} ${isBullish ? 'BULL' : 'BEAR'} OB`
+        });
       }
-      // Support (Trough)
-      if (sorted[i].low < sorted[i-1].low && sorted[i].low < sorted[i-2].low &&
-          sorted[i].low < sorted[i+1].low && sorted[i].low < sorted[i+2].low) {
-        keyLevels.push({ price: sorted[i].low, type: 'SUPPORT', strength: 1 });
+    }
+
+    // 2. Fair Value Gaps (FVG)
+    const fvgs = [];
+    for (let i = 2; i < sorted.length; i++) {
+      const c1 = sorted[i-2];
+      const c2 = sorted[i-1];
+      const c3 = sorted[i];
+      if (c1.high < c3.low) { // Bullish FVG
+        fvgs.push({ type: 'BULLISH', top: c3.low, bottom: c1.high, time: c2.x });
+      } else if (c1.low > c3.high) { // Bearish FVG
+        fvgs.push({ type: 'BEARISH', top: c1.low, bottom: c3.high, time: c2.x });
+      }
+    }
+
+    // 3. Market Structure (BOS/CHoCH)
+    let trend = 'NEUTRAL';
+    const ms = [];
+    let lastHigh = sorted[0].high;
+    let lastLow = sorted[0].low;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].close > lastHigh) {
+        ms.push({ type: trend === 'BEARISH' ? 'CHoCH' : 'BOS', side: 'BULLISH', price: sorted[i].close, time: sorted[i].x });
+        trend = 'BULLISH';
+        lastHigh = sorted[i].high;
+      } else if (sorted[i].close < lastLow) {
+        ms.push({ type: trend === 'BULLISH' ? 'CHoCH' : 'BOS', side: 'BEARISH', price: sorted[i].close, time: sorted[i].x });
+        trend = 'BEARISH';
+        lastLow = sorted[i].low;
       }
     }
     
     structures[tf] = {
-      keyLevels: keyLevels.slice(0, 5), // Keep top 5 per TF
-      orderBlocks: [],
-      fvgs: []
+      orderBlocks: orderBlocks.slice(-5),
+      fvgs: fvgs.slice(-5),
+      marketStructure: ms.slice(-3),
+      trend
     };
   });
   
   return structures;
 }
 
-// Helper function to calculate key level distances
-function calculateKeyLevelDistance(currentPrice, structures) {
-  if (!structures || !currentPrice) return null;
-  
-  let nearestLevel = null;
-  let minDistance = Infinity;
-  let nearestType = '';
-  
-  // Check all timeframes for key levels
-  ['M5', 'M15', 'H1', 'H4'].forEach(timeframe => {
-    if (structures[timeframe]) {
-      const tfStructures = structures[timeframe];
-      
-      // Check key levels
-      if (tfStructures.keyLevels) {
-        tfStructures.keyLevels.forEach(level => {
-          const distance = Math.abs(currentPrice - level.price);
-          if (distance < minDistance) {
-            minDistance = distance;
-            nearestLevel = level.price;
-            nearestType = `${timeframe} ${level.type}`;
-          }
-        });
-      }
-      
-      // Check order blocks
-      if (tfStructures.orderBlocks) {
-        tfStructures.orderBlocks.forEach(ob => {
-          const distance = Math.abs(currentPrice - ob.top);
-          if (distance < minDistance) {
-            minDistance = distance;
-            nearestLevel = ob.top;
-            nearestType = `${timeframe} OB Top`;
-          }
-          
-          const bottomDistance = Math.abs(currentPrice - ob.bottom);
-          if (bottomDistance < minDistance) {
-            minDistance = bottomDistance;
-            nearestLevel = ob.bottom;
-            nearestType = `${timeframe} OB Bottom`;
-          }
-        });
-      }
-    }
-  });
-  
-  if (nearestLevel !== null) {
-    return {
-      level: nearestLevel,
-      distance: minDistance,
-      type: nearestType
-    };
-  }
-  
-  return null;
-}
-
-function toNum(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function normalizeCandle(c) {
-  return {
-    open: toNum(c.open ?? c.o, 0),
-    high: toNum(c.high ?? c.h, 0),
-    low: toNum(c.low ?? c.l, 0),
-    close: toNum(c.close ?? c.c, 0),
-    volume: toNum(c.volume ?? c.tickVolume ?? c.v, 0),
-    time: toNum(c.x ?? c.time ?? c.t ?? 0, 0)
-  };
-}
-
-function getRecentCandles(timeframe = 'M5', lookback = 8) {
-  const raw = accountState.chart && Array.isArray(accountState.chart[timeframe]) ? accountState.chart[timeframe] : [];
-  if (!raw.length) return [];
-
-  const normalized = raw.map(normalizeCandle).filter((c) => c.high >= c.low && c.open > 0 && c.close > 0);
-  normalized.sort((a, b) => a.time - b.time);
-  return normalized.slice(-lookback);
-}
-
-function candleStats(c) {
-  const body = Math.abs(c.close - c.open);
-  const range = Math.max(0.00001, c.high - c.low);
-  const upperWick = c.high - Math.max(c.open, c.close);
-  const lowerWick = Math.min(c.open, c.close) - c.low;
-  return { body, range, upperWick, lowerWick };
-}
-
-function hasRejectionCandle(last, signal) {
-  const s = candleStats(last);
-  if (signal === 'SELL') {
-    return s.upperWick >= s.body * 1.8 && s.upperWick >= s.range * 0.35 && last.close <= last.open;
-  }
-  if (signal === 'BUY') {
-    return s.lowerWick >= s.body * 1.8 && s.lowerWick >= s.range * 0.35 && last.close >= last.open;
-  }
-  return false;
-}
-
-function isMomentumSlowing(candles, signal) {
-  if (candles.length < 4) return false;
-  const c1 = candles[candles.length - 4];
-  const c2 = candles[candles.length - 3];
-  const c3 = candles[candles.length - 2];
-  const c4 = candles[candles.length - 1];
-
-  if (signal === 'SELL') {
-    const pushUpThenSlow = c3.high >= c2.high && c2.high >= c1.high;
-    const rangesShrink = (c4.high - c4.low) < (c2.high - c2.low);
-    const closeStall = c4.close <= c3.close;
-    return pushUpThenSlow && rangesShrink && closeStall;
-  }
-
-  if (signal === 'BUY') {
-    const pushDownThenSlow = c3.low <= c2.low && c2.low <= c1.low;
-    const rangesShrink = (c4.high - c4.low) < (c2.high - c2.low);
-    const closeStall = c4.close >= c3.close;
-    return pushDownThenSlow && rangesShrink && closeStall;
-  }
-
-  return false;
-}
-
-function isVolumeWeakening(candles, signal) {
-  if (candles.length < 4) return false;
-  const v1 = candles[candles.length - 4].volume;
-  const v2 = candles[candles.length - 3].volume;
-  const v3 = candles[candles.length - 2].volume;
-  const v4 = candles[candles.length - 1].volume;
-  if (v1 <= 0 || v2 <= 0 || v3 <= 0 || v4 <= 0) return false;
-
-  const avgPrev = (v1 + v2 + v3) / 3;
-  const weakening = v4 < avgPrev * 0.9;
-  if (signal === 'SELL') return weakening;
-  if (signal === 'BUY') return weakening;
-  return false;
-}
-
-function isStrengthDecreasing(candles) {
-  if (candles.length < 5) return false;
-  const b1 = Math.abs(candles[candles.length - 5].close - candles[candles.length - 5].open);
-  const b2 = Math.abs(candles[candles.length - 4].close - candles[candles.length - 4].open);
-  const b3 = Math.abs(candles[candles.length - 3].close - candles[candles.length - 3].open);
-  const b4 = Math.abs(candles[candles.length - 2].close - candles[candles.length - 2].open);
-  const b5 = Math.abs(candles[candles.length - 1].close - candles[candles.length - 1].open);
-
-  const early = (b1 + b2 + b3) / 3;
-  const late = (b4 + b5) / 2;
-  return late < early * 0.85;
-}
-
-function confirmationsPass(signal, klType, rsi) {
+function confirmationsPass(signal, klType, price) {
   const tf = klType.includes('H4') ? 'H4' : klType.includes('H1') ? 'H1' : klType.includes('M15') ? 'M15' : 'M5';
-  const candles = getRecentCandles(tf, 10);
-  if (candles.length < 5) return false;
+  const candles = getRecentCandles(tf, 5);
+  if (candles.length < 2) return false;
 
   const last = candles[candles.length - 1];
-  const rejection = hasRejectionCandle(last, signal);
-  const slowdown = isMomentumSlowing(candles, signal);
-  const volumeWeakening = isVolumeWeakening(candles, signal);
-  const strengthDrop = isStrengthDecreasing(candles);
-  const rsiGate = signal === 'SELL' ? rsi >= 55 : rsi <= 45;
+  const prev = candles[candles.length - 2];
+  
+  // Candlestick Patterns
+  const body = Math.abs(last.close - last.open);
+  const range = Math.max(0.00001, last.high - last.low);
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
 
-  const extras = [slowdown, volumeWeakening, strengthDrop, rsiGate].filter(Boolean).length;
-  return rejection && extras >= 2;
+  if (signal === 'BUY') {
+    const isHammer = lowerWick >= body * 2 && upperWick <= body * 0.5;
+    const isEngulfing = last.close > prev.open && last.open < prev.close && last.close > last.open && prev.close < prev.open;
+    return isHammer || isEngulfing;
+  } else if (signal === 'SELL') {
+    const isShootingStar = upperWick >= body * 2 && lowerWick <= body * 0.5;
+    const isEngulfing = last.close < prev.open && last.open > prev.close && last.close < last.open && prev.close > prev.open;
+    return isShootingStar || isEngulfing;
+  }
+  return false;
 }
 
 function runBackendBrain() {
-  if (!accountState.ea_connected) return;
-  if (!botControl.autoTradingEnabled) return;
-  if (botControl.executionMode !== 'backend') return;
+  if (!accountState.ea_connected || !botControl.autoTradingEnabled || botControl.executionMode !== 'backend') return;
 
   const now = Date.now();
   if (now - botControl.lastActionAt < 3000) return;
 
   const positions = Array.isArray(accountState.positions) ? accountState.positions : [];
   const openCount = positions.length;
-  const maxOpen = Math.max(1, Number(botControl.maxOpenTrades || 1));
+  const maxOpen = Math.max(1, Number(botControl.maxOpenTrades || 5));
   const price = Number(accountState.price || 0);
   const atr = Math.max(Number(accountState.atr || 0), 0.01);
   const spread = Number(accountState.spread || 0);
-  const rsi = Number(accountState.rsi || 50);
-  const fastEMA = Number(accountState.fastEMA || 0);
-  const slowEMA = Number(accountState.slowEMA || 0);
-  const kl = accountState.keyLevelInfo;
+  const structures = accountState.structures || {};
 
   if (spread > 35 || !price) return;
 
-  // Trailing runs only in backend mode and only if enabled.
+  // 1. Trailing Stop Logic (KEEP)
   if (botControl.trailingStopEnabled && openCount > 0) {
     positions.forEach((pos) => {
       const profit = Number(pos.profit || 0);
@@ -641,28 +528,48 @@ function runBackendBrain() {
     });
   }
 
-  // Execute pending signal after CLOSE_ALL has had a cycle to process.
-  if (botControl.pendingSignal && openCount === 0) {
-    const side = botControl.pendingSignal;
-    queueCommand(side, { sl: 0, tp: 0, symbol: accountState.eaSymbol, lots: botControl.defaultLots });
-    botControl.lastActionAt = now;
-    botControl.lastSignal = side;
-    botControl.pendingSignal = null;
-    return;
-  }
+  // 2. Pyramiding / Add Trades Logic (KEEP)
+  if (openCount >= maxOpen) return;
 
-  if (!kl || openCount >= maxOpen) return;
-
-  const klType = String(kl.type || '').toUpperCase();
-  const bullBias = fastEMA >= slowEMA;
-  const bearBias = fastEMA <= slowEMA;
+  // 3. SMC Signal Logic (OB + FVG + BOS/CHoCH)
   let signal = 'NONE';
+  let zoneType = '';
 
-  if (klType.includes('SUPPORT') && rsi <= 50 && bullBias) signal = 'BUY';
-  if (klType.includes('RESISTANCE') && rsi >= 50 && bearBias) signal = 'SELL';
+  // Check multiple timeframes for SMC zones
+  ['M5', 'M15', 'H1'].forEach(tf => {
+    if (signal !== 'NONE' || !structures[tf]) return;
+    
+    const { orderBlocks, fvgs, trend } = structures[tf];
+    
+    // Check Order Blocks
+    orderBlocks.forEach(ob => {
+      if (ob.type === 'BULLISH' && price <= ob.top && price >= ob.bottom) {
+        signal = 'BUY';
+        zoneType = `${tf} BULL OB`;
+      } else if (ob.type === 'BEARISH' && price >= ob.bottom && price <= ob.top) {
+        signal = 'SELL';
+        zoneType = `${tf} BEAR OB`;
+      }
+    });
+
+    // Check FVGs
+    fvgs.forEach(fvg => {
+      if (fvg.type === 'BULLISH' && price <= fvg.top && price >= fvg.bottom) {
+        signal = 'BUY';
+        zoneType = `${tf} BULL FVG`;
+      } else if (fvg.type === 'BEARISH' && price >= fvg.bottom && price <= fvg.top) {
+        signal = 'SELL';
+        zoneType = `${tf} BEAR FVG`;
+      }
+    });
+  });
+
   if (signal === 'NONE') return;
-  if (!confirmationsPass(signal, klType, rsi)) return;
 
+  // 4. Candlestick Confirmation (KEEP)
+  if (!confirmationsPass(signal, zoneType, price)) return;
+
+  // 5. Execution
   const hasOpposite = positions.some((p) => String(p.type || '').toUpperCase() !== signal);
   if (hasOpposite) {
     queueCommand('CLOSE_ALL', { symbol: accountState.eaSymbol });
@@ -671,9 +578,7 @@ function runBackendBrain() {
     return;
   }
 
-  const hasSameSide = positions.some((p) => String(p.type || '').toUpperCase() === signal);
-  if (hasSameSide) return;
-
+  // Allow adding more trades of the same type (Pyramiding)
   queueCommand(signal, { sl: 0, tp: 0, symbol: accountState.eaSymbol, lots: botControl.defaultLots });
   botControl.lastActionAt = now;
   botControl.lastSignal = signal;
@@ -683,8 +588,13 @@ setInterval(runBackendBrain, SIGNAL_SCAN_INTERVAL_MS);
 
 // Account endpoint - returns current account state
 app.get('/api/account', (req, res) => {
-  console.log('[ACCOUNT] Account data requested');
-  accountState.lastSeen = new Date().toISOString();
+  // Check if EA has gone offline (no heartbeat for 60 seconds)
+  if (accountState.ea_connected && (Date.now() - accountState.lastEaUpdate > 60000)) {
+    console.log('[EA] ⚠️ EA detected as offline (heartbeat timeout)');
+    accountState.ea_connected = false;
+  }
+
+  console.log(`[ACCOUNT] Data requested. EA Status: ${accountState.ea_connected ? 'ONLINE' : 'OFFLINE'}`);
   
   // Ensure equity is calculated correctly
   const totalProfit = accountState.positions.reduce((sum, pos) => {
@@ -709,7 +619,8 @@ app.get('/api/account', (req, res) => {
     profit: totalProfit,
     pnl_today: totalProfit,
     equity: accountState.balance + totalProfit,
-    botControl
+    botControl,
+    lastSeen: accountState.lastEaUpdate > 0 ? new Date(accountState.lastEaUpdate).toISOString() : accountState.lastSeen
   };
   
   res.json(responseState);
@@ -888,6 +799,7 @@ app.post('/api/ea/trade-executed', (req, res) => {
       date: trade.closeTime || new Date().toISOString(),
     }));
     if (closedTrades.length > 500) closedTrades = closedTrades.slice(0, 500);
+    saveClosedTradesToDisk();
   }
 
   return res.json({ success: true });
@@ -922,6 +834,7 @@ app.post('/api/ea/sync-history', (req, res) => {
       })
     );
     closedTrades = [...mapped, ...closedTrades].slice(0, 500);
+    saveClosedTradesToDisk();
   }
 
   return res.json({ success: true });
@@ -930,15 +843,10 @@ app.post('/api/ea/sync-history', (req, res) => {
 app.get('/api/signal', (req, res) => {
   const { symbol = 'BTCUSD', tf = 'M5' } = req.query;
   const currentPrice = Number(accountState.price || 0);
-  const fastEMA = Number(accountState.fastEMA || 0);
-  const slowEMA = Number(accountState.slowEMA || 0);
-  const rsi = Number(accountState.rsi || 0);
   const spread = Number(accountState.spread || 0);
-  const atr = Number(accountState.atr || 0);
-  const structures = normalizeStructuresForSignal(accountState.structures, currentPrice);
+  const structures = accountState.structures || {};
   const timeframe = String(tf).toUpperCase();
-  const tfStructures = structures[timeframe] || structures.M5;
-  const keyLevels = tfStructures.keyLevels || [];
+  const tfStructures = structures[timeframe] || {};
   const orderBlocks = tfStructures.orderBlocks || [];
   const fvgs = tfStructures.fvgs || [];
 
@@ -952,52 +860,47 @@ app.get('/api/signal', (req, res) => {
     });
   }
 
-  if (spread > 35 || atr > 6.0) {
+  if (spread > 35) {
     return res.json({
       symbol,
       tf: timeframe,
       signal: 'HOLD',
       confidence: 15,
-      reason: `Risk filter active (spread=${spread}, atr=${atr})`
+      reason: `High spread: ${spread}`
     });
   }
 
-  const nearestKeyLevel = keyLevels.reduce((best, level) => {
-    const dist = Math.abs(currentPrice - Number(level.price || 0));
-    if (!best || dist < best.dist) return { level, dist };
-    return best;
-  }, null);
-
-  const hasBullOB = orderBlocks.some((ob) => String(ob.type || '').toUpperCase().includes('BULL'));
-  const hasBearOB = orderBlocks.some((ob) => String(ob.type || '').toUpperCase().includes('BEAR'));
-  const hasBullFVG = fvgs.some((g) => String(g.type || '').toUpperCase().includes('BULL'));
-  const hasBearFVG = fvgs.some((g) => String(g.type || '').toUpperCase().includes('BEAR'));
-
-  const emaBull = fastEMA > 0 && slowEMA > 0 && fastEMA > slowEMA;
-  const emaBear = fastEMA > 0 && slowEMA > 0 && fastEMA < slowEMA;
-  const nearLevel = nearestKeyLevel && nearestKeyLevel.dist <= Math.max(currentPrice * 0.002, 8);
-  const levelType = nearestKeyLevel ? String(nearestKeyLevel.level.type || '').toUpperCase() : '';
-
   let signal = 'HOLD';
-  let confidence = 30;
-  let reason = 'No clean confluence yet';
+  let confidence = 0;
+  let reason = 'Searching for SMC setup...';
 
-  if (emaBull && rsi <= 65 && (hasBullOB || hasBullFVG) && nearLevel && levelType.includes('SUPPORT')) {
-    signal = 'BUY';
-    confidence = 78;
-    reason = 'SMC bullish confluence at support + EMA confirmation';
-  } else if (emaBear && rsi >= 35 && (hasBearOB || hasBearFVG) && nearLevel && levelType.includes('RESISTANCE')) {
-    signal = 'SELL';
-    confidence = 78;
-    reason = 'SMC bearish confluence at resistance + EMA confirmation';
-  } else if (emaBull && rsi < 70) {
-    signal = 'BUY';
-    confidence = 55;
-    reason = 'Trend-following fallback: EMA bullish with acceptable RSI';
-  } else if (emaBear && rsi > 30) {
-    signal = 'SELL';
-    confidence = 55;
-    reason = 'Trend-following fallback: EMA bearish with acceptable RSI';
+  // Check for Order Block entry
+  const ob = orderBlocks.find(o => currentPrice <= o.top && currentPrice >= o.bottom);
+  if (ob) {
+    signal = ob.type === 'BULLISH' ? 'BUY' : 'SELL';
+    confidence = 75;
+    reason = `SMC: Price inside ${tf} ${ob.type} Order Block`;
+  }
+
+  // Check for FVG entry
+  if (signal === 'HOLD') {
+    const fvg = fvgs.find(f => currentPrice <= f.top && currentPrice >= f.bottom);
+    if (fvg) {
+      signal = fvg.type === 'BULLISH' ? 'BUY' : 'SELL';
+      confidence = 70;
+      reason = `SMC: Price inside ${tf} ${fvg.type} FVG`;
+    }
+  }
+
+  // Candlestick Confirmation
+  if (signal !== 'HOLD') {
+    if (confirmationsPass(signal, reason, currentPrice)) {
+      confidence += 20;
+      reason += ' + Candlestick confirmation';
+    } else {
+      confidence -= 30;
+      reason += ' (Waiting for candlestick confirmation)';
+    }
   }
 
   res.json({
@@ -1005,24 +908,12 @@ app.get('/api/signal', (req, res) => {
     tf: timeframe,
     signal,
     confidence,
-    reason,
-    price: currentPrice,
-    indicators: {
-      fastEMA,
-      slowEMA,
-      rsi,
-      atr,
-      spread
-    },
-    structures: {
-      keyLevels: keyLevels.length,
-      orderBlocks: orderBlocks.length,
-      fvgs: fvgs.length
-    }
+    reason
   });
 });
 
 // Start server
+loadClosedTradesFromDisk();
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Initial Account State: Balance: R${accountState.balance}, Equity: R${accountState.equity}, Positions: ${accountState.positions.length}`);

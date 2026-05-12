@@ -1,63 +1,81 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getAccountData, getOpenOrders, placeOrder, setBotConfig } from '../api/orders';
+import { io, Socket } from 'socket.io-client';
+import { getAccountData, placeOrder } from '../api/orders';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
 
-// --- HELPER TYPES ---
-interface Candle {
-  x: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  tick_volume?: number;
-}
+/**
+ * usePolling.ts (Execution Brain)
+ * Mobile app's execution brain. Manages real-time WebSocket signals and polling.
+ */
 
-interface OrderBlock {
-  top: number;
-  bottom: number;
-  type: 'BULLISH' | 'BEARISH';
-  index: number;
-  mitigated: boolean;
-}
-
-interface FVG {
-  top: number;
-  bottom: number;
-  type: 'BULLISH' | 'BEARISH';
-  index: number;
-  mitigated: boolean;
-}
-
-interface KeyLevel {
-  price: number;
-  type: 'SUPPORT' | 'RESISTANCE';
-  strength: number;
-}
-
-interface ExitEvent {
-  ticket: string;
-  side: 'BUY' | 'SELL';
-  reason: 'SL' | 'TP';
-  ts: number;
-  consumed: boolean;
-}
+// ... (existing interfaces)
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason } = useTradeStore();
+  const { setAccount, setOpenPositions, setStructures, setError, setLoading } = useTradeStore();
   const { botSettings } = useSettingsStore();
-  const { setKeyLevelDistance, addLog, logs: existingLogs } = useLogStore();
+  const { addLog } = useLogStore();
   
-  const lastTradeTimeRef = useRef<number>(0);
-  const lastDrawTimeRef = useRef<number>(0);
-  const lastSignalRef = useRef<string>('NONE');
-  const lastSignalCandleRef = useRef<number>(0);
-  const autoTradingSyncSentRef = useRef<boolean>(false);
-  const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
-  const prevExecutionMode = useRef<'app' | 'backend'>(botSettings.executionMode || 'app');
-  const prevOpenOrdersRef = useRef<any[]>([]);
-  const lastExitEventRef = useRef<ExitEvent | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  
+  // Initialize WebSocket for real-time signals and stop updates
+  useEffect(() => {
+    socketRef.current = io('https://liquibot-back.onrender.com');
+
+    socketRef.current.on('TRADE_SIGNAL', (data) => {
+      const { signal, requiresConfirmation } = data;
+      addLog({ level: 'info', message: `🚀 Signal Received: ${signal.symbol} ${signal.direction}`, timestamp: new Date().toISOString() });
+      
+      // Auto-execute if configured
+      if (!requiresConfirmation) {
+        handleExecuteSignal(signal);
+      }
+    });
+
+    socketRef.current.on('STOP_UPDATE', (data) => {
+      const { positionTicket, newStopLoss, phase } = data;
+      addLog({ level: 'info', message: `🛡️ Trail Stop Update: #${positionTicket} to ${newStopLoss} (Phase ${phase})`, timestamp: new Date().toISOString() });
+      handleModifyStop(positionTicket, newStopLoss);
+    });
+
+    socketRef.current.on('SCALEIN_TRIGGER', (data) => {
+      const { signalId, level, price, lotSize, newStopLoss } = data;
+      addLog({ level: 'info', message: `➕ Scale-In Triggered: Level ${level} at ${price}`, timestamp: new Date().toISOString() });
+      handleScaleIn(signalId, level, lotSize, newStopLoss);
+    });
+
+    return () => {
+      socketRef.current?.disconnect();
+    };
+  }, []);
+
+  const handleExecuteSignal = async (signal: any) => {
+    try {
+      await placeOrder({
+        action: 'BUY',
+        symbol: signal.symbol,
+        lots: signal.lotSizes.entry1,
+        sl: signal.stopLoss,
+        tp: signal.tpLevels[0]
+      });
+      addLog({ level: 'success', message: `✅ Entry 1 Executed for ${signal.symbol}`, timestamp: new Date().toISOString() });
+    } catch (err) {
+      addLog({ level: 'error', message: `❌ Entry 1 Failed: ${err}`, timestamp: new Date().toISOString() });
+    }
+  };
+
+  const handleModifyStop = async (ticket: string, newSL: number) => {
+    try {
+      await placeOrder({ action: 'MODIFY_SL', ticket, sl: newSL });
+    } catch (err) {
+      console.error('Stop update failed', err);
+    }
+  };
+
+  const handleScaleIn = async (signalId: string, level: number, lots: number, sl: number) => {
+    // Logic for scale-in execution
+  };
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -493,6 +511,19 @@ export const usePolling = () => {
                 latest.open >= previous.close &&
                 latest.close <= previous.open &&
                 latestBody >= prevBodyAbs * 0.9;
+              const lookbackRecent = sortedChart.slice(1, 8);
+              const recentSwingHigh = lookbackRecent.length > 0 ? Math.max(...lookbackRecent.map(c => c.high)) : previous.high;
+              const recentSwingLow = lookbackRecent.length > 0 ? Math.min(...lookbackRecent.map(c => c.low)) : previous.low;
+              const currentSweptHighAndRejected =
+                latest.high > recentSwingHigh &&
+                latest.close < recentSwingHigh &&
+                isBearish(latest) &&
+                (latest.high - Math.max(latest.open, latest.close)) > (latestBody * 1.0);
+              const currentSweptLowAndRejected =
+                latest.low < recentSwingLow &&
+                latest.close > recentSwingLow &&
+                isBullish(latest) &&
+                (Math.min(latest.open, latest.close) - latest.low) > (latestBody * 1.0);
               const lookbackBeforePrev = sortedChart.slice(2, 8);
               const prevRangeHigh = lookbackBeforePrev.length > 0 ? Math.max(...lookbackBeforePrev.map(c => c.high)) : previous.high;
               const prevRangeLow = lookbackBeforePrev.length > 0 ? Math.min(...lookbackBeforePrev.map(c => c.low)) : previous.low;
@@ -554,8 +585,31 @@ export const usePolling = () => {
                 !lastExitEventRef.current.consumed &&
                 (Date.now() - lastExitEventRef.current.ts) <= 15 * 60 * 1000;
 
-              // -1. OPPOSITE RE-ENTRY after recent SL/TP if a liquidity sweep forms.
+              // -2. INSTANT LIQUIDITY SWEEP ENTRY (same candle rejection).
               if (
+                baseReady &&
+                !isChasing &&
+                (currentSweptHighAndRejected && (atResistance || sweep === 'HIGH_SWEEP'))
+              ) {
+                signal = 'SELL';
+                slPrice = latest.high + (atr * 0.12);
+                tpPrice = price - (atr * 2.4);
+                signalReason = 'LIQ_SWEEP_INSTANT_SELL';
+                console.log(`⚡ INSTANT LIQ SWEEP SELL`);
+              }
+              else if (
+                baseReady &&
+                !isChasing &&
+                (currentSweptLowAndRejected && (atSupport || sweep === 'LOW_SWEEP'))
+              ) {
+                signal = 'BUY';
+                slPrice = latest.low - (atr * 0.12);
+                tpPrice = price + (atr * 2.4);
+                signalReason = 'LIQ_SWEEP_INSTANT_BUY';
+                console.log(`⚡ INSTANT LIQ SWEEP BUY`);
+              }
+              // -1. OPPOSITE RE-ENTRY after recent SL/TP if a liquidity sweep forms.
+              else if (
                 baseReady &&
                 !isChasing &&
                 recentExit &&
@@ -731,6 +785,16 @@ export const usePolling = () => {
               } else if (signal === 'BUY' && (atResistance || nearestResistanceDistance <= directionalBuffer)) {
                 console.log(`❌ BUY cancelled: resistance too close (${nearestResistanceDistance.toFixed(3)})`);
                 signal = 'NONE';
+              }
+
+              // Hard risk gate: do not enter if SL distance is wider than 3 points.
+              const maxSlDistancePoints = 3.0;
+              if ((signal === 'BUY' || signal === 'SELL') && slPrice > 0) {
+                const slDistance = Math.abs(price - slPrice);
+                if (slDistance > maxSlDistancePoints) {
+                  console.log(`❌ ${signal} cancelled: SL too wide (${slDistance.toFixed(3)} > ${maxSlDistancePoints.toFixed(3)} points)`);
+                  signal = 'NONE';
+                }
               }
 
               if (signal !== 'NONE' && signal !== 'CLOSE_ALL' && lastSignalRef.current === signal && lastSignalCandleRef.current === latestCandleTime) {

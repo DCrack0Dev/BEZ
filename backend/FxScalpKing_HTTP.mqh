@@ -167,6 +167,18 @@ public:
    //| SEND HEARTBEAT & GET COMMANDS                                    |
    //| Returns: array of pending commands                               |
    //+------------------------------------------------------------------+
+   //+------------------------------------------------------------------+
+   //| GET INDICATOR VALUE HELPER                                       |
+   //+------------------------------------------------------------------+
+   double GetIndicatorValue(int handle, int bufferNum, int index)
+   {
+      double buffer[];
+      ArraySetAsSeries(buffer, true);
+      if(CopyBuffer(handle, bufferNum, index, 1, buffer) > 0)
+         return buffer[0];
+      return 0;
+   }
+
    bool SendHeartbeat(string &commands[])
    {
       if(m_apiKey == "")
@@ -207,6 +219,12 @@ public:
             "\"rsi\":" + DoubleToString(m_rsi, 5) + ","
             "\"atr\":" + DoubleToString(m_atr, 5) + ","
             "\"vwap\":" + DoubleToString(m_vwap, 5) + ","
+            "\"ema5\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
+            "\"ema10\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 10, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
+            "\"ema20_scalp\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
+            "\"stochK\":" + DoubleToString(GetIndicatorValue(iStochastic(_Symbol, PERIOD_M1, 5, 3, 3, MODE_SMA, STO_LOWHIGH), 0, 0), 2) + ","
+            "\"cci\":" + DoubleToString(GetIndicatorValue(iCCI(_Symbol, PERIOD_M1, 14, PRICE_TYPICAL), 0, 0), 2) + ","
+            "\"sar\":" + DoubleToString(GetIndicatorValue(iSAR(_Symbol, PERIOD_M1, 0.02, 0.2), 0, 0), 5) + ","
             "\"spread\":" + IntegerToString(m_spread) + ","
             "\"tickVolume\":" + IntegerToString(m_tickVolume) +
          "},"
@@ -281,11 +299,15 @@ public:
       
       // Add open positions (Fixed position iteration logic)
       bool first = true;
+      int positionsCount = 0;
       for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
          ulong ticket = PositionGetTicket(i);
          if(ticket <= 0) continue;
          if(!PositionSelectByTicket(ticket)) continue;
+         
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+            positionsCount++;
          
          if(PositionGetString(POSITION_SYMBOL) != _Symbol)
             continue;
@@ -298,7 +320,6 @@ public:
          ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
          json += "{";
          json += "\"ticket\":" + IntegerToString(PositionGetInteger(POSITION_TICKET)) + ",";
-         json += "\"time\":" + IntegerToString(PositionGetInteger(POSITION_TIME)) + ",";
          json += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
          json += "\"symbol\":\"" + PositionGetString(POSITION_SYMBOL) + "\",";
          json += "\"volume\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) + ",";
@@ -309,7 +330,33 @@ public:
          json += "}";
       }
       
-      json += "]}";
+      json += "],";
+      json += "\"openPositionsCount\":" + IntegerToString(positionsCount) + ",";
+      
+      // Short specific fields
+      double swingHighs[3], swingLows[3];
+      // Logic to find last 3 swing highs/lows on chart
+      for(int i=0; i<3; i++) {
+         swingHighs[i] = iHigh(_Symbol, PERIOD_CURRENT, iHighest(_Symbol, PERIOD_CURRENT, MODE_HIGH, 20, i*20));
+         swingLows[i] = iLow(_Symbol, PERIOD_CURRENT, iLowest(_Symbol, PERIOD_CURRENT, MODE_LOW, 20, i*20));
+      }
+      
+      json += "\"swingHighs\":[" + DoubleToString(swingHighs[0], 5) + "," + DoubleToString(swingHighs[1], 5) + "," + DoubleToString(swingHighs[2], 5) + "],";
+      json += "\"swingLows\":[" + DoubleToString(swingLows[0], 5) + "," + DoubleToString(swingLows[1], 5) + "," + DoubleToString(swingLows[2], 5) + "],";
+      
+      double ema20 = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 0);
+      double emaPrev = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 1);
+      
+      json += "\"ema20\":" + DoubleToString(ema20, 5) + ",";
+      json += "\"emaSlopingDown\":" + (ema20 < emaPrev ? "true" : "false") + ",";
+      json += "\"atr14\":" + DoubleToString(iATR(_Symbol, PERIOD_CURRENT, 14), 5) + ",";
+      json += "\"newsFilterActive\":false,"; // Placeholder for news filter
+      
+      json += "\"contractSize\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE), 2) + ",";
+      json += "\"minLot\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2) + ",";
+      json += "\"maxLot\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), 2) + ",";
+      json += "\"minLotStep\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 2);
+      json += "}";
       
       string headers = "Content-Type: application/json";
       string response;
