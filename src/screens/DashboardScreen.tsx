@@ -24,7 +24,7 @@ const DashboardScreen = () => {
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [pendingOrder, setPendingOrder] = useState<{ type: 'BUY' | 'SELL', symbol: string } | null>(null);
 
-  const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'BTCUSD';
+  const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'XAUUSD';
   
   // Calculate key level for display from account data if store is empty
   const displayKeyLevel = keyLevelDistance || (account.keyLevelInfo ? { 

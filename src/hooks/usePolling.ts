@@ -209,12 +209,15 @@ export const usePolling = () => {
       const balance = Number(accountData.balance || 0);
       const pnlToday = Number(accountData.pnl_today || accountData.pnlToday || 0);
       
+      // Map backend fields to frontend fields robustly
+      const eaSymbol = accountData.symbol || accountData.eaSymbol || accountData.ea_symbol || 'XAUUSD';
+      
       const accountDataSafe = {
         balance,
         equity: Number(accountData.equity || 0),
         pnlToday,
         eaConnected: accountData.ea_connected || accountData.eaConnected || false,
-        eaSymbol: accountData.symbol || accountData.eaSymbol || accountData.ea_symbol || 'XAUUSD',
+        eaSymbol: eaSymbol,
         price: Number(accountData.price || 0),
         fastEMA: Number(accountData.ema20 || 0),
         slowEMA: Number(accountData.ema20Prev || 0),
