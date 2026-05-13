@@ -72,14 +72,20 @@ function loadClosedTradesFromDisk() {
 // --- EA ENDPOINTS ---
 
 app.post('/api/ea/update', (req, res) => {
-  const { accountData, positions, chart, logs, apiKey } = req.body;
+  const data = req.body;
+  const apiKey = data.apiKey;
   
-  if (accountData) {
+  // Accept both nested accountData and flat root fields (compatible with all EA versions)
+  const accountData = data.accountData || data;
+  const positions = data.positions || data.openPositions || [];
+  const chart = data.chart || {};
+
+  if (accountData.symbol || accountData.balance) {
     accountState = {
       ...accountState,
       ...accountData,
-      positions: positions || accountState.positions,
-      chart: chart || accountState.chart,
+      positions: positions,
+      chart: chart,
       ea_connected: true,
       lastEaUpdate: Date.now()
     };
@@ -98,7 +104,7 @@ app.post('/api/ea/update', (req, res) => {
         scaleInLevels: pos.scaleInLevels || [],
         tpLevels: pos.tpLevels || [],
         spread: accountState.spread,
-        pipSize: 0.0001, // Should be dynamic
+        pipSize: 0.0001, 
         pointSize: 0.01
       };
 
@@ -120,10 +126,13 @@ app.post('/api/ea/update', (req, res) => {
     });
   }
 
+  res.json({ success: true });
+});
+
+app.get('/api/ea/commands', (req, res) => {
   const commands = [...pendingCommands];
   pendingCommands = [];
-  
-  res.json({ commands });
+  res.json(commands);
 });
 
 // --- APP ENDPOINTS ---
