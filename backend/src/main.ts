@@ -113,10 +113,24 @@ app.get('/api/account', (req, res) => {
   res.json(accountState);
 });
 
+// App Closed Trades (Relay or Local Store)
+app.get('/api/orders/closed', (req, res) => {
+  const { filter } = req.query;
+  // For now, return empty or mock data if not implementing local DB
+  res.json([]);
+});
+
 // App Order Relay (Execution Brain -> EA)
 app.post('/api/order', (req, res) => {
   log(`📥 App Order Relay: ${req.body.action} ${req.body.symbol}`);
   pendingCommands.push(req.body);
+  res.json({ success: true });
+});
+
+// Bot Config Sync
+app.post('/api/bot/config', (req, res) => {
+  log(`⚙️ Bot Config Sync: ${JSON.stringify(req.body)}`);
+  pendingCommands.push({ action: 'CONFIG_SYNC', ...req.body });
   res.json({ success: true });
 });
 
