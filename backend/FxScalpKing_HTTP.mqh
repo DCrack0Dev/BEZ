@@ -337,25 +337,6 @@ public:
       json += "],";
       json += "\"openPositionsCount\":" + IntegerToString(positionsCount) + ",";
       
-      // Short specific fields
-      double swingHighs[3], swingLows[3];
-      // Logic to find last 3 swing highs/lows on chart
-      for(int i=0; i<3; i++) {
-         swingHighs[i] = iHigh(_Symbol, PERIOD_CURRENT, iHighest(_Symbol, PERIOD_CURRENT, MODE_HIGH, 20, i*20));
-         swingLows[i] = iLow(_Symbol, PERIOD_CURRENT, iLowest(_Symbol, PERIOD_CURRENT, MODE_LOW, 20, i*20));
-      }
-      
-      json += "\"swingHighs\":[" + DoubleToString(swingHighs[0], 5) + "," + DoubleToString(swingHighs[1], 5) + "," + DoubleToString(swingHighs[2], 5) + "],";
-      json += "\"swingLows\":[" + DoubleToString(swingLows[0], 5) + "," + DoubleToString(swingLows[1], 5) + "," + DoubleToString(swingLows[2], 5) + "],";
-      
-      double ema20 = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 0);
-      double emaPrev = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 1);
-      
-      json += "\"ema20\":" + DoubleToString(ema20, 5) + ",";
-      json += "\"emaSlopingDown\":" + (ema20 < emaPrev ? "true" : "false") + ",";
-      json += "\"atr14\":" + DoubleToString(iATR(_Symbol, PERIOD_CURRENT, 14), 5) + ",";
-      json += "\"newsFilterActive\":false,"; // Placeholder for news filter
-      
       json += "\"contractSize\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE), 2) + ",";
       json += "\"minLot\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2) + ",";
       json += "\"maxLot\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), 2) + ",";
