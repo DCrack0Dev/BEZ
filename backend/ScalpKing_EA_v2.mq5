@@ -22,6 +22,9 @@ input int      MagicNumber       = 20260101;
 input int      HeartbeatInterval = 1; // 1 second for aggressive updates
 input int      CommandInterval   = 500; // 500ms polling
 
+// BROKER NOTE: Deriv Gold baseline spread is ~25 points. 
+// The maxSpreadPoints filter is set to 30 to allow for normal trading while blocking spikes.
+
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
 //+------------------------------------------------------------------+

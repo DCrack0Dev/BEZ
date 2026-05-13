@@ -129,7 +129,7 @@ export const validateSignal = (payload: MT5Payload): TradeSignal | null => {
   } else {
     // ATR STOP (XAUUSD)
     if (CONFIG.useAtrStop) {
-      stopLoss = currentCandle.high + (atr14 * CONFIG.atrMultiplier);
+      stopLoss = currentCandle.high + (atr14 * CONFIG.atrMultiplier) + (CONFIG.spreadBuffer * pointSize);
     } else {
       stopLoss = priorCandle.high;
     }

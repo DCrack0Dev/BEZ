@@ -129,7 +129,7 @@ export const calculateRisk = (params: RiskParams): Partial<TradeSignal> => {
     tp3 = priorTarget;
 
     si2Price = new Decimal(entryPrice).sub(new Decimal(entryPrice).sub(tp1).mul(CONFIG.scaleIn2PositionRatio)).toNumber();
-    si2Stop = new Decimal(entryPrice).sub(spread).toNumber(); // Breakeven short
+    si2Stop = new Decimal(entryPrice).sub(new Decimal(spread).add(new Decimal(CONFIG.spreadBuffer).mul(pointSize))).toNumber(); // Breakeven short with buffer
 
     si3Price = new Decimal(entryPrice).sub(new Decimal(entryPrice).sub(tp2).mul(CONFIG.scaleIn3PositionRatio)).toNumber();
     si3Stop = new Decimal(si2Price).add(spread).toNumber(); // Lock ScaleIn2 profit

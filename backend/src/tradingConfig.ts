@@ -16,13 +16,14 @@ export const CONFIG = {
   minCandleBodyPoints: 50,        // short XAUUSD minimum body (50 points)
   volumeMultiplier: 1.5,
   maxSpreadPips: 2.0,             // forex
-  maxSpreadPoints: 35,            // XAUUSD (35 points)
+  maxSpreadPoints: 30,            // XAUUSD (30 points for Deriv)
+  spreadBuffer: 30,               // Deriv Gold buffer (30 points)
   supportProximityPips: 10,       // long: how close to support
   resistanceProximityPoints: 100, // short XAUUSD: how close to resistance
 
   // ATR stop (XAUUSD short preferred)
   useAtrStop: true,
-  atrMultiplier: 1.0,
+  atrMultiplier: 1.2,             // Deriv Gold (1.2 multiplier)
 
   // Take profit R:R
   tp1RR: 1.5,
