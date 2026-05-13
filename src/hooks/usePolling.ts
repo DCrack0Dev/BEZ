@@ -23,6 +23,11 @@ export const usePolling = () => {
   useEffect(() => {
     socketRef.current = io('https://liquibot-back.onrender.com');
 
+    // NEW: Real-time Data Relay from EA
+    socketRef.current.on('EA_HEARTBEAT', (data) => {
+      handleAppBrainAnalysis(data);
+    });
+
     socketRef.current.on('TRADE_SIGNAL', (data) => {
       const { signal, urgency, expiresIn, requiresConfirmation } = data;
       addLog({ 
@@ -64,6 +69,55 @@ export const usePolling = () => {
       socketRef.current?.disconnect();
     };
   }, []);
+
+  const handleAppBrainAnalysis = useCallback(async (data: any) => {
+    if (!botSettings.autoTradingEnabled || (botSettings.executionMode || 'app') !== 'app') return;
+    
+    // 1. Data Processing
+    const price = Number(data.price || 0);
+    const m5Chart = data.chart?.['M5'] || [];
+    if (m5Chart.length < 20) return;
+
+    // 2. Trend & Key Level Analysis
+    const highs = m5Chart.map((c: any) => c.high);
+    const lows = m5Chart.map((c: any) => c.low);
+    const currentTrend = (data.ema20 || 0) > (data.ema20Prev || 0) ? 'BULL' : 'BEAR';
+    
+    // 3. Strategy Logic (SMC: OB + FVG + Reversal)
+    let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
+    const lastCandle = m5Chart[m5Chart.length - 1];
+    const prevCandle = m5Chart[m5Chart.length - 2];
+    
+    // BUY: Bullish Reversal at Swing Low + Trend
+    if (currentTrend === 'BULL' && lastCandle.close > lastCandle.open && prevCandle.low === Math.min(...lows.slice(-10))) {
+      signal = 'BUY';
+    } 
+    // SELL: Bearish Reversal at Swing High + Trend
+    else if (currentTrend === 'BEAR' && lastCandle.close < lastCandle.open && prevCandle.high === Math.max(...highs.slice(-10))) {
+      signal = 'SELL';
+    }
+
+    if (signal !== 'NONE') {
+      addLog({ 
+        level: 'info', 
+        message: `🧠 App Brain Found Setup: ${signal} ${data.symbol}`, 
+        timestamp: new Date().toISOString() 
+      });
+      
+      // 4. Execution Logic (Direct from App Brain)
+      const sl = signal === 'BUY' ? prevCandle.low : prevCandle.high;
+      const tp = signal === 'BUY' ? Math.max(...highs.slice(-50)) : Math.min(...lows.slice(-50));
+      
+      handleExecuteSignal({
+        symbol: data.symbol,
+        direction: signal,
+        lotSizes: { entry1: botSettings.defaultLots || 0.01 },
+        stopLoss: sl,
+        tpLevels: [tp],
+        timestamp: Date.now()
+      });
+    }
+  }, [botSettings, addLog]);
 
   const handleExecuteSignal = async (signal: any) => {
     try {

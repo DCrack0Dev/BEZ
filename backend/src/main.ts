@@ -1,15 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import fs from 'fs';
-import path from 'path';
 import { Server } from 'socket.io';
 import http from 'http';
 import dotenv from 'dotenv';
-import { CONFIG } from './tradingConfig';
-import { validateSignal, MT5Payload } from './signalValidator';
-import { processTrailingStop, PositionState } from './trailingStopManager';
-import { initEmitter, emitSignal, emitStopUpdate } from './signalEmitter';
 
 dotenv.config();
 
@@ -23,7 +17,12 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // Initialize WebSocket
-initEmitter(server);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
 // State
 let accountState: any = {
@@ -72,7 +71,10 @@ app.post('/api/ea/validate', (req, res) => {
   res.status(401).json({ valid: false, message: 'Invalid API Key' });
 });
 
-// EA Update (Heartbeat)
+/**
+ * EA Update (Heartbeat Relay)
+ * The backend acts ONLY as a relay. It receives data from EA and pushes it to App via WS.
+ */
 app.post('/api/ea/update', (req, res) => {
   const data = req.body;
   
@@ -90,39 +92,10 @@ app.post('/api/ea/update', (req, res) => {
     lastUpdate: Date.now()
   };
 
-  log(`💓 Heartbeat: ${data.symbol} | Price: ${data.price} | Positions: ${accountState.positions.length}`);
+  log(`💓 Heartbeat Relay: ${data.symbol} | Price: ${data.price} | Positions: ${accountState.positions.length}`);
 
-  // Process Trailing Stops
-  accountState.positions.forEach((pos: any) => {
-    const state: PositionState = {
-      ticket: pos.ticket,
-      signalId: '',
-      symbol: data.symbol,
-      direction: pos.type,
-      openPrice: pos.price,
-      currentSL: pos.sl,
-      currentPrice: data.price,
-      phase: 1,
-      scaleInLevels: [],
-      tpLevels: [],
-      spread: data.spread,
-      pipSize: 0.0001,
-      pointSize: 0.01
-    };
-    
-    const update = processTrailingStop(state);
-    if (update) {
-      log(`🛡️ Trail Update: #${pos.ticket} -> SL: ${update.newSL}`);
-      pendingCommands.push({ action: 'MODIFY_SL', ticket: pos.ticket, sl: update.newSL });
-      emitStopUpdate({
-        positionTicket: String(pos.ticket),
-        newStopLoss: update.newSL,
-        phase: update.phase as any,
-        isRiskFree: update.phase >= 2,
-        direction: pos.type
-      });
-    }
-  });
+  // Push raw EA data to App Brain for analysis
+  io.emit('EA_HEARTBEAT', accountState);
 
   res.json({ success: true });
 });
@@ -140,64 +113,13 @@ app.get('/api/account', (req, res) => {
   res.json(accountState);
 });
 
-// App Manual Order
+// App Order Relay (Execution Brain -> EA)
 app.post('/api/order', (req, res) => {
-  log(`📥 App Order: ${req.body.action} ${req.body.symbol}`);
+  log(`📥 App Order Relay: ${req.body.action} ${req.body.symbol}`);
   pendingCommands.push(req.body);
   res.json({ success: true });
 });
 
-// --- BRAIN SCAN ---
-setInterval(() => {
-  if (!accountState.ea_connected || !accountState.chart['M5'] || accountState.chart['M5'].length < 100) return;
-
-  const m5Candles = accountState.chart['M5'];
-  
-  // Dynamic Swing Highs/Lows calculation for Key Levels (using 48h data)
-  const highs = m5Candles.map((c: any) => c.high);
-  const lows = m5Candles.map((c: any) => c.low);
-  
-  const swingHighs = [
-    Math.max(...highs.slice(-100)), // Recent 8h
-    Math.max(...highs.slice(-300)), // Recent 24h
-    Math.max(...highs.slice(-576))  // Full 48h
-  ].filter(v => !isNaN(v));
-
-  const swingLows = [
-    Math.min(...lows.slice(-100)),
-    Math.min(...lows.slice(-300)),
-    Math.min(...lows.slice(-576))
-  ].filter(v => !isNaN(v));
-
-  const payload: MT5Payload = {
-    symbol: accountState.symbol,
-    timeframe: 'M5',
-    candles: m5Candles,
-    spread: accountState.spread,
-    balance: accountState.balance,
-    equity: accountState.equity,
-    pipSize: accountState.pipSize || 0.0001,
-    pointSize: accountState.pointSize || 0.01,
-    pipValue: accountState.pipValue || 10,
-    minLot: accountState.minLot || 0.01,
-    maxLot: accountState.maxLot || 100,
-    minLotStep: accountState.minLotStep || 0.01,
-    swingHighs,
-    swingLows,
-    openPositionsCount: accountState.positions.length,
-    ema20: accountState.ema20 || 0,
-    ema20Prev: accountState.ema20Prev || 0,
-    atr14: accountState.atr14 || 0,
-    newsFilterActive: false
-  };
-
-  const signal = validateSignal(payload);
-  if (signal) {
-    log(`🎯 SIGNAL: ${signal.direction} ${signal.symbol} @ ${signal.entryPrice}`);
-    emitSignal(signal as any);
-  }
-}, 1000);
-
 server.listen(PORT, () => {
-  log(`🚀 Backend Brain v2.12 Live on port ${PORT}`);
+  log(`🚀 Backend Relay v2.13 Live on port ${PORT}`);
 });
