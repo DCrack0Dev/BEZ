@@ -1,0 +1,29 @@
+// Add this to your schema.prisma file
+
+enum SignalStrength {
+  LOW_PROBABILITY
+  MEDIUM_PROBABILITY
+  HIGH_PROBABILITY
+  ELITE_SIGNAL
+}
+
+enum PatternSignal {
+  BULLISH
+  BEARISH
+  NEUTRAL
+}
+
+model TradeSignal {
+  id              String         @id @default(cuid())
+  market          String         // e.g., "XAU/USD", "BTC/USD"
+  timeframe       String         // e.g., "H1", "H4"
+  patternName     String
+  signal          PatternSignal
+  confluenceScore Int
+  strength        SignalStrength
+  factors         String[]       // Array of strings describing confluence factors
+  price           Float?
+  timestamp       DateTime       @default(now())
+  
+  @@index([market, timeframe, timestamp])
+}
