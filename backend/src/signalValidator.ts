@@ -1,5 +1,5 @@
 import { CONFIG } from './tradingConfig';
-import { calculateRisk, RiskParams, CalculatedRisk } from './riskEngine';
+import { calculateRisk, RiskParams, TradeSignal } from './riskEngine';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -23,131 +23,140 @@ export interface MT5Payload {
   spread: number;
   balance: number;
   equity: number;
-  margin: number;
   pipSize: number;
-  contractSize: number;
-  exchangeRate: number;
+  pointSize: number;
+  pipValue: number;
   minLot: number;
   maxLot: number;
   minLotStep: number;
-  supportLevels: number[]; // pre-calculated swing lows
-  resistanceLevels: number[]; // pre-calculated swing highs
+  swingHighs: number[]; // pre-calculated swing highs
+  swingLows: number[]; // pre-calculated swing lows
   openPositionsCount: number;
-  // --- Scalping Additions ---
-  ema5: number;
-  ema10: number;
   ema20: number;
-  stochK: number;
-  stochD: number;
-  cci: number;
-  sar: number;
-}
-
-export interface TradeSignal {
-  id: string;
-  symbol: string;
-  direction: "BUY" | "SELL";
-  entryPrice: number;
-  stopLoss: number;
-  tpLevels: number[];
-  scaleInLevels: any[];
-  lotSizes: { entry1: number; entry2: number; entry3: number };
-  riskPercent: number;
-  timestamp: number;
-  confidence: number;
+  ema20Prev: number;
+  atr14: number;
+  newsFilterActive: boolean;
 }
 
 /**
- * Aggressive Scalper Validation
+ * JSDoc: Validates trade signals based on complex SMC and momentum rules.
+ * @param payload - The data packet from MT5.
+ * @returns TradeSignal or null if conditions are not met.
  */
 export const validateSignal = (payload: MT5Payload): TradeSignal | null => {
   const { 
-    candles, spread, balance, equity, pipSize, 
-    ema5, ema10, ema20, stochK, stochD, cci, sar, 
-    openPositionsCount 
+    symbol, candles, spread, balance, equity, pipSize, pointSize,
+    ema20, ema20Prev, atr14, newsFilterActive,
+    openPositionsCount, swingHighs, swingLows
   } = payload;
   
-  if (candles.length < 20) return null;
+  const N = CONFIG.reversalCandleCount;
+  if (candles.length < N + 1) return null;
 
   const currentCandle = candles[candles.length - 1];
+  const priorCandle = candles[candles.length - 2];
   const price = currentCandle.close;
+  const isXAUUSD = symbol.includes("XAU") || symbol.includes("GOLD");
 
-  // --- 1. AGGRESSIVE TREND CONFIRMATION ---
-  // Fast EMA Stack: 5 > 10 > 20 for BUY
-  const isEmaBullish = ema5 > ema10 && ema10 > ema20;
-  const isEmaBearish = ema5 < ema10 && ema10 < ema20;
-  
-  // Parabolic SAR confirmation
-  const isSarBullish = price > sar;
-  const isSarBearish = price < sar;
+  // 1. Drawdown Check
+  const drawdown = ((balance - equity) / balance) * 100;
+  if (drawdown > CONFIG.maxDrawdownPercent) return null;
 
-  // --- 2. MOMENTUM CONFIRMATION ---
-  // Stochastic Oversold/Overbought Hook
-  const isStochBullish = stochK > stochD && stochK < 40;
-  const isStochBearish = stochK < stochD && stochK > 60;
-  
-  // CCI Zero-Line Cross
-  const isCciBullish = cci > 0;
-  const isCciBearish = cci < 0;
+  // 2. Open Trades Limit
+  const maxOpen = isXAUUSD ? 2 : CONFIG.maxOpenTrades;
+  if (openPositionsCount >= maxOpen) return null;
+
+  // 3. Spread Filter
+  const maxSpread = isXAUUSD ? CONFIG.maxSpreadPoints * pointSize : CONFIG.maxSpreadPips * pipSize;
+  if (spread > maxSpread) return null;
 
   let direction: "BUY" | "SELL" | null = null;
-  if (isEmaBullish && isSarBullish && (isStochBullish || isCciBullish)) direction = "BUY";
-  else if (isEmaBearish && isSarBearish && (isStochBearish || isCciBearish)) direction = "SELL";
+
+  // --- BUY CONDITIONS ---
+  const isBullish = currentCandle.close > currentCandle.open;
+  const isLowestLow = priorCandle.low === Math.min(...candles.slice(-(N+1), -1).map(c => c.low));
+  const closesAboveMidpoint = currentCandle.close > (priorCandle.open + priorCandle.close) / 2;
+  const isEngulfingBull = currentCandle.close > priorCandle.high && currentCandle.open < priorCandle.low;
+  const bodySizePips = Math.abs(currentCandle.close - currentCandle.open) / pipSize;
+  const isBodyLargeEnoughLong = bodySizePips >= CONFIG.minCandleBodyPips;
+  
+  const avgVolume = candles.slice(-20).reduce((acc, c) => acc + c.volume, 0) / 20;
+  const isVolumeSpike = currentCandle.volume >= avgVolume * CONFIG.volumeMultiplier;
+  
+  const nearestSupport = Math.max(...swingLows.filter(l => l <= price));
+  const isNearSupport = (price - nearestSupport) / pipSize <= CONFIG.supportProximityPips;
+
+  if (
+    isBullish && isLowestLow && (closesAboveMidpoint || isEngulfingBull) &&
+    isBodyLargeEnoughLong && isVolumeSpike && isNearSupport
+  ) {
+    direction = "BUY";
+  }
+
+  // --- SELL CONDITIONS (XAUUSD Focus) ---
+  const isBearish = currentCandle.close < currentCandle.open;
+  const isHighestHigh = priorCandle.high === Math.max(...candles.slice(-(N+1), -1).map(c => c.high));
+  const isBelowEma = price < ema20;
+  const isEmaSlopingDown = ema20 < ema20Prev;
+  const closesBelowMidpoint = currentCandle.close < (priorCandle.open + priorCandle.close) / 2;
+  const isEngulfingBear = currentCandle.close < priorCandle.low && currentCandle.open > priorCandle.high;
+  const upperWick = currentCandle.high - Math.max(currentCandle.open, currentCandle.close);
+  const candleBody = Math.abs(currentCandle.close - currentCandle.open);
+  const isShootingStar = upperWick >= 2 * candleBody;
+  
+  const bodySizePoints = candleBody / pointSize;
+  const isBodyLargeEnoughShort = isXAUUSD ? bodySizePoints >= CONFIG.minCandleBodyPoints : bodySizePips >= CONFIG.minCandleBodyPips;
+
+  const nearestResistance = Math.min(...swingHighs.filter(h => h >= price));
+  const isNearResistance = isXAUUSD 
+    ? (nearestResistance - price) / pointSize <= CONFIG.resistanceProximityPoints
+    : (nearestResistance - price) / pipSize <= CONFIG.supportProximityPips;
+
+  if (
+    !direction && isBearish && isHighestHigh && isBelowEma && isEmaSlopingDown &&
+    (closesBelowMidpoint || isEngulfingBear || isShootingStar) &&
+    isBodyLargeEnoughShort && isVolumeSpike && isNearResistance && !newsFilterActive
+  ) {
+    direction = "SELL";
+  }
 
   if (!direction) return null;
 
-  // --- 3. VOLUME & BODY SENSITIVITY ---
-  const bodySizePips = Math.abs(currentCandle.close - currentCandle.open) / pipSize;
-  if (bodySizePips < (CONFIG as any).minCandleBodyPips) return null;
-
-  const avgVolume = candles.slice(-10).reduce((acc, c) => acc + c.volume, 0) / 10;
-  if (currentCandle.volume < avgVolume * (CONFIG as any).volumeMultiplier) return null;
-
-  // --- 4. SAFETY & LIMITS ---
-  if (spread > (CONFIG as any).maxSpreadPips * pipSize) return null;
-  if (openPositionsCount >= (CONFIG as any).maxOpenTrades) return null;
-  
-  const drawdown = (balance - equity) / balance * 100;
-  if (drawdown > (CONFIG as any).maxDrawdownPercent) return null;
-
-  // --- SUCCESS: CALCULATE AGGRESSIVE RISK ---
-  const isBuy = direction === "BUY";
-  const stopLoss = isBuy 
-    ? price - ((CONFIG as any).stopLossPips * pipSize)
-    : price + ((CONFIG as any).stopLossPips * pipSize);
+  // --- SUCCESS: CALCULATE RISK ---
+  let stopLoss: number;
+  if (direction === "BUY") {
+    stopLoss = priorCandle.low;
+  } else {
+    // ATR STOP (XAUUSD)
+    if (CONFIG.useAtrStop) {
+      stopLoss = currentCandle.high + (atr14 * CONFIG.atrMultiplier);
+    } else {
+      stopLoss = priorCandle.high;
+    }
+  }
 
   const riskParams: RiskParams = {
     accountBalance: balance,
     entryPrice: price,
     stopLoss,
     pipSize,
-    contractSize: payload.contractSize,
-    accountCurrencyExchangeRate: payload.exchangeRate,
+    pointSize,
+    pipValue: payload.pipValue,
     minLot: payload.minLot,
     maxLot: payload.maxLot,
     minLotStep: payload.minLotStep,
-    priorResistanceLevel: isBuy ? price + (15 * pipSize) : price - (15 * pipSize)
+    priorTarget: direction === "BUY" ? nearestResistance : nearestSupport,
+    direction,
+    spread
   };
 
   const risk = calculateRisk(riskParams);
 
   return {
+    ...risk,
     id: uuidv4(),
     symbol: payload.symbol,
-    direction,
-    entryPrice: price,
-    stopLoss,
-    tpLevels: isBuy 
-      ? [price + (5 * pipSize), price + (10 * pipSize), price + (15 * pipSize)]
-      : [price - (5 * pipSize), price - (10 * pipSize), price - (15 * pipSize)],
-    scaleInLevels: [], 
-    lotSizes: {
-      entry1: risk.entry1.lotSize,
-      entry2: risk.entry2.lotSize,
-      entry3: risk.entry3.lotSize
-    },
-    riskPercent: (CONFIG as any).riskPercentPerTrade,
-    timestamp: Date.now(),
-    confidence: 100
-  };
+    timeframe: payload.timeframe,
+    confidence: 85 // Base confidence for meeting all rules
+  } as TradeSignal;
 };

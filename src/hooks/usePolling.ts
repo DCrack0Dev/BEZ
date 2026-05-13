@@ -24,25 +24,40 @@ export const usePolling = () => {
     socketRef.current = io('https://liquibot-back.onrender.com');
 
     socketRef.current.on('TRADE_SIGNAL', (data) => {
-      const { signal, requiresConfirmation } = data;
-      addLog({ level: 'info', message: `🚀 Signal Received: ${signal.symbol} ${signal.direction}`, timestamp: new Date().toISOString() });
+      const { signal, urgency, expiresIn, requiresConfirmation } = data;
+      addLog({ 
+        level: 'info', 
+        message: `🚀 ${urgency} Signal Received: ${signal.symbol} ${signal.direction}`, 
+        timestamp: new Date().toISOString() 
+      });
       
-      // Auto-execute if configured
-      if (!requiresConfirmation) {
+      // Auto-execute if configured or expires soon
+      const isExpired = Date.now() > signal.timestamp + expiresIn * 1000;
+      if (!isExpired && (!requiresConfirmation || botSettings.autoTradingEnabled)) {
         handleExecuteSignal(signal);
+      } else if (isExpired) {
+        addLog({ level: 'warning', message: `⏳ Signal for ${signal.symbol} expired`, timestamp: new Date().toISOString() });
       }
     });
 
     socketRef.current.on('STOP_UPDATE', (data) => {
-      const { positionTicket, newStopLoss, phase } = data;
-      addLog({ level: 'info', message: `🛡️ Trail Stop Update: #${positionTicket} to ${newStopLoss} (Phase ${phase})`, timestamp: new Date().toISOString() });
+      const { positionTicket, newStopLoss, phase, direction, isRiskFree } = data;
+      addLog({ 
+        level: 'info', 
+        message: `🛡️ Phase ${phase} Stop: #${positionTicket} -> ${newStopLoss} ${isRiskFree ? '(RISK FREE)' : ''}`, 
+        timestamp: new Date().toISOString() 
+      });
       handleModifyStop(positionTicket, newStopLoss);
     });
 
     socketRef.current.on('SCALEIN_TRIGGER', (data) => {
-      const { signalId, level, price, lotSize, newStopLoss } = data;
-      addLog({ level: 'info', message: `➕ Scale-In Triggered: Level ${level} at ${price}`, timestamp: new Date().toISOString() });
-      handleScaleIn(signalId, level, lotSize, newStopLoss);
+      const { signalId, level, price, lotSize, newStopLoss, direction, symbol } = data;
+      addLog({ 
+        level: 'success', 
+        message: `➕ Scale-In L${level} Triggered for ${symbol} at ${price}`, 
+        timestamp: new Date().toISOString() 
+      });
+      handleScaleIn(signalId, level, lotSize, newStopLoss, direction, symbol);
     });
 
     return () => {
@@ -73,8 +88,19 @@ export const usePolling = () => {
     }
   };
 
-  const handleScaleIn = async (signalId: string, level: number, lots: number, sl: number) => {
-    // Logic for scale-in execution
+  const handleScaleIn = async (signalId: string, level: number, lots: number, sl: number, direction: string, symbol: string) => {
+    try {
+      // 1. Open scale-in position
+      await placeOrder({
+        type: direction,
+        symbol: symbol,
+        lots: lots,
+        sl: sl
+      });
+      addLog({ level: 'success', message: `✅ Scale-In L${level} Executed for ${symbol}`, timestamp: new Date().toISOString() });
+    } catch (err) {
+      addLog({ level: 'error', message: `❌ Scale-In Failed: ${err}`, timestamp: new Date().toISOString() });
+    }
   };
 
   const refresh = useCallback(async (showLoading = false) => {

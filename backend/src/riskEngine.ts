@@ -4,6 +4,7 @@ import { CONFIG } from './tradingConfig';
 /**
  * riskEngine.ts
  * Handles all lot size, risk distribution, and TP/SL level calculations.
+ * Supports both Forex (Pips) and XAUUSD (Points).
  */
 
 export interface RiskParams {
@@ -11,61 +12,86 @@ export interface RiskParams {
   entryPrice: number;
   stopLoss: number;
   pipSize: number;
-  contractSize: number;
-  accountCurrencyExchangeRate: number; // Rate to convert symbol profit to account currency
+  pointSize: number;
+  pipValue: number; // Always live from MT5
   minLot: number;
   maxLot: number;
   minLotStep: number;
-  priorResistanceLevel: number;
+  priorTarget: number; // Prior Resistance (Long) or Next Swing Low (Short)
+  direction: "BUY" | "SELL";
+  spread: number;
 }
 
-export interface CalculatedRisk {
-  entry1: { lotSize: number; riskAmount: number };
-  entry2: { lotSize: number; riskAmount: number };
-  entry3: { lotSize: number; riskAmount: number };
-  tp1: number;
-  tp2: number;
-  tp3: number;
-  stopLossPips: number;
-  scaleIn2: { price: number; newStop: number };
-  scaleIn3: { price: number; newStop: number };
+export interface ScaleInLevel {
+  price: number;
+  lotSize: number;
+  newStopLoss: number;
+  isRiskFree: boolean;
+}
+
+export interface LotSizeMap {
+  entry1: number;
+  entry2: number;
+  entry3: number;
+}
+
+export interface TradeSignal {
+  id: string;
+  symbol: string;
+  direction: "BUY" | "SELL";
+  entryPrice: number;
+  stopLoss: number;
+  takeProfitLevels: number[];      // [TP1, TP2, TP3]
+  scaleInLevels: ScaleInLevel[];
+  lotSizes: LotSizeMap;
+  riskPercent: number;
+  pipValue: number;
+  timestamp: number;
+  timeframe: string;
+  confidence: number;
 }
 
 /**
  * Calculates all risk-related parameters for a trade signal.
  * @param params - The current account and symbol parameters.
- * @returns A structured object containing lot sizes, TP levels, and scale-in triggers.
+ * @returns A structured TradeSignal object.
  */
-export const calculateRisk = (params: RiskParams): CalculatedRisk => {
+export const calculateRisk = (params: RiskParams): Partial<TradeSignal> => {
   const {
     accountBalance,
     entryPrice,
     stopLoss,
     pipSize,
-    contractSize,
-    accountCurrencyExchangeRate,
+    pointSize,
+    pipValue,
     minLot,
     maxLot,
     minLotStep,
-    priorResistanceLevel
+    priorTarget,
+    direction,
+    spread
   } = params;
 
-  // 1. Calculate Risk Amounts (1.0% total split 50/30/20)
-  const totalRiskAmount = new Decimal(accountBalance).mul(CONFIG.riskPercentPerTrade / 100);
-  const entry1Risk = totalRiskAmount.mul(0.5);
-  const entry2Risk = totalRiskAmount.mul(0.3);
-  const entry3Risk = totalRiskAmount.mul(0.2);
-
-  // 2. Calculate Pip Value and SL Distance
-  const stopLossPips = new Decimal(entryPrice).sub(stopLoss).abs().div(pipSize);
+  const isBuy = direction === "BUY";
+  const riskPercent = isBuy ? CONFIG.riskPercentPerTrade : 0.75; // 0.75 for short XAUUSD
+  const totalRiskAmount = new Decimal(accountBalance).mul(riskPercent / 100);
   
-  // pipValue = (contract size * pip size) / exchange rate
-  const pipValue = new Decimal(contractSize).mul(pipSize).div(accountCurrencyExchangeRate);
+  // Risk split: 50%, 30%, 20%
+  const entry1Risk = totalRiskAmount.mul(0.50);
+  const entry2Risk = totalRiskAmount.mul(0.30);
+  const entry3Risk = totalRiskAmount.mul(0.20);
 
-  // 3. Calculate Lot Sizes
+  let slDistance: Decimal;
+  if (isBuy) {
+    slDistance = new Decimal(entryPrice).sub(stopLoss).div(pipSize);
+  } else {
+    slDistance = new Decimal(stopLoss).sub(entryPrice).div(pointSize);
+  }
+
   const calculateLots = (risk: Decimal): number => {
-    // lotSize = riskAmount / (stopLossPips * pipValue)
-    let lots = risk.div(stopLossPips.mul(pipValue));
+    if (slDistance.isZero()) return minLot;
+    // lotSize = riskAmount / (stopLossDistance * pipValue)
+    let lots = risk.div(slDistance.mul(pipValue));
     
     // Round down to broker's lot step
     const steps = lots.div(minLotStep).floor();
@@ -77,39 +103,54 @@ export const calculateRisk = (params: RiskParams): CalculatedRisk => {
     return lots.toNumber();
   };
 
-  const entry1Lots = calculateLots(entry1Risk);
-  const entry2Lots = calculateLots(entry2Risk);
-  const entry3Lots = calculateLots(entry3Risk);
+  const e1Lots = calculateLots(entry1Risk);
+  const e2Lots = calculateLots(entry2Risk);
+  const e3Lots = calculateLots(entry3Risk);
 
-  // 4. Calculate Take Profit Levels
-  // TP1 = entryPrice + (stopLossPips * 1.5) * pipSize
-  const tp1 = new Decimal(entryPrice).add(stopLossPips.mul(CONFIG.tp1RR).mul(pipSize)).toNumber();
-  // TP2 = entryPrice + (stopLossPips * 3.0) * pipSize
-  const tp2 = new Decimal(entryPrice).add(stopLossPips.mul(CONFIG.tp2RR).mul(pipSize)).toNumber();
-  // TP3 = Prior Resistance (Swing High)
-  const tp3 = priorResistanceLevel;
+  let tp1: number, tp2: number, tp3: number;
+  let si2Price: number, si2Stop: number;
+  let si3Price: number, si3Stop: number;
 
-  // 5. Calculate Scale-In Trigger Levels
-  // ScaleIn2: 40% of the way to TP1
-  const si2Price = new Decimal(entryPrice).add(new Decimal(tp1).sub(entryPrice).mul(CONFIG.scaleIn2PositionRatio)).toNumber();
-  // ScaleIn3: 55% of the way to TP2
-  const si3Price = new Decimal(entryPrice).add(new Decimal(tp2).sub(entryPrice).mul(CONFIG.scaleIn3PositionRatio)).toNumber();
+  if (isBuy) {
+    // LONG MATH
+    tp1 = new Decimal(entryPrice).add(slDistance.mul(CONFIG.tp1RR).mul(pipSize)).toNumber();
+    tp2 = new Decimal(entryPrice).add(slDistance.mul(CONFIG.tp2RR).mul(pipSize)).toNumber();
+    tp3 = priorTarget;
+
+    si2Price = new Decimal(entryPrice).add(new Decimal(tp1).sub(entryPrice).mul(CONFIG.scaleIn2PositionRatio)).toNumber();
+    si2Stop = new Decimal(entryPrice).add(spread).toNumber(); // Breakeven
+
+    si3Price = new Decimal(entryPrice).add(new Decimal(tp2).sub(entryPrice).mul(CONFIG.scaleIn3PositionRatio)).toNumber();
+    si3Stop = new Decimal(si2Price).add(spread).toNumber(); // Lock ScaleIn2 profit
+  } else {
+    // SHORT MATH (XAUUSD points)
+    tp1 = new Decimal(entryPrice).sub(slDistance.mul(CONFIG.tp1RR).mul(pointSize)).toNumber();
+    tp2 = new Decimal(entryPrice).sub(slDistance.mul(CONFIG.tp2RR).mul(pointSize)).toNumber();
+    tp3 = priorTarget;
+
+    si2Price = new Decimal(entryPrice).sub(new Decimal(entryPrice).sub(tp1).mul(CONFIG.scaleIn2PositionRatio)).toNumber();
+    si2Stop = new Decimal(entryPrice).sub(spread).toNumber(); // Breakeven short
+
+    si3Price = new Decimal(entryPrice).sub(new Decimal(entryPrice).sub(tp2).mul(CONFIG.scaleIn3PositionRatio)).toNumber();
+    si3Stop = new Decimal(si2Price).add(spread).toNumber(); // Lock ScaleIn2 profit
+  }
 
   return {
-    entry1: { lotSize: entry1Lots, riskAmount: entry1Risk.toNumber() },
-    entry2: { lotSize: entry2Lots, riskAmount: entry2Risk.toNumber() },
-    entry3: { lotSize: entry3Lots, riskAmount: entry3Risk.toNumber() },
-    tp1,
-    tp2,
-    tp3,
-    stopLossPips: stopLossPips.toNumber(),
-    scaleIn2: {
-      price: si2Price,
-      newStop: entryPrice // Move stop to entry 1 breakeven
+    direction,
+    entryPrice,
+    stopLoss,
+    takeProfitLevels: [tp1, tp2, tp3],
+    lotSizes: {
+      entry1: e1Lots,
+      entry2: e2Lots,
+      entry3: e3Lots
     },
-    scaleIn3: {
-      price: si3Price,
-      newStop: si2Price // Lock in scale-in 2 profits
-    }
+    scaleInLevels: [
+      { price: si2Price, lotSize: e2Lots, newStopLoss: si2Stop, isRiskFree: true },
+      { price: si3Price, lotSize: e3Lots, newStopLoss: si3Stop, isRiskFree: true }
+    ],
+    riskPercent,
+    pipValue,
+    timestamp: Date.now()
   };
 };
