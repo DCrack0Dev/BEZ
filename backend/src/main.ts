@@ -27,15 +27,15 @@ app.use(bodyParser.json());
 
 // In-memory state
 let accountState: any = {
-  balance: 200000,
-  equity: 200000,
+  balance: 0,
+  equity: 0,
   positions: [],
   lastSeen: new Date().toISOString(),
   lastEaUpdate: 0,
   profit: 0,
   pnl_today: 0,
   ea_connected: false,
-  eaSymbol: 'BTCUSD',
+  eaSymbol: '',
   currency: 'USD',
   price: 0,
   spread: 0,
