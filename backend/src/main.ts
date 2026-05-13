@@ -81,13 +81,17 @@ app.post('/api/ea/update', (req, res) => {
   const chart = data.chart || {};
 
   if (accountData.symbol || accountData.balance) {
+    console.log(`[EA] 💓 Heartbeat from ${accountData.symbol || accountData.eaSymbol} | Price: ${accountData.price} | Spread: ${accountData.spread}`);
+    
     accountState = {
       ...accountState,
       ...accountData,
+      symbol: accountData.symbol || accountData.eaSymbol, // Ensure symbol is mapped for App
       positions: positions,
       chart: chart,
       ea_connected: true,
-      lastEaUpdate: Date.now()
+      lastEaUpdate: Date.now(),
+      lastSeen: new Date().toISOString()
     };
 
     // Run Trailing Stop Manager for each position
@@ -170,31 +174,40 @@ app.post('/api/order', (req, res) => {
 setInterval(() => {
   if (!accountState.ea_connected) return;
 
+  const currentSymbol = accountState.symbol || accountState.eaSymbol;
+  const currentChart = accountState.chart['M5'] || accountState.chart['PERIOD_M5'] || [];
+
+  if (currentChart.length < 20) {
+    if (Date.now() % 60000 < 5000) console.log(`[BRAIN] ⚠️ Waiting for more chart data... (${currentChart.length}/20 candles)`);
+    return;
+  }
+
   // Build payload for validator
   const payload: MT5Payload = {
-    symbol: accountState.eaSymbol || 'BTCUSD',
+    symbol: currentSymbol,
     timeframe: 'M5',
-    candles: accountState.chart['M5'] || [],
-    spread: accountState.spread,
-    balance: accountState.balance,
-    equity: accountState.equity,
-    pipSize: 0.0001,
-    pointSize: 0.01,
-    pipValue: 10,
-    minLot: 0.01,
-    maxLot: 100,
-    minLotStep: 0.01,
-    swingHighs: [],
-    swingLows: [],
+    candles: currentChart,
+    spread: accountState.spread || 0,
+    balance: accountState.balance || 0,
+    equity: accountState.equity || 0,
+    pipSize: accountState.pipSize || 0.0001,
+    pointSize: accountState.pointSize || 0.01,
+    pipValue: accountState.pipValue || 10,
+    minLot: accountState.minLot || 0.01,
+    maxLot: accountState.maxLot || 100,
+    minLotStep: accountState.minLotStep || 0.01,
+    swingHighs: accountState.swingHighs || [],
+    swingLows: accountState.swingLows || [],
     openPositionsCount: accountState.positions.length,
-    ema20: 0,
-    ema20Prev: 0,
-    atr14: 0,
-    newsFilterActive: false
+    ema20: accountState.ema20 || 0,
+    ema20Prev: accountState.ema20Prev || 0,
+    atr14: accountState.atr14 || 0,
+    newsFilterActive: accountState.newsFilterActive || false
   };
 
   const signal = validateSignal(payload);
   if (signal) {
+    console.log(`[BRAIN] 🎯 SIGNAL GENERATED: ${signal.direction} ${signal.symbol} @ ${signal.entryPrice}`);
     emitSignal(signal as any);
   }
 }, CONFIG.commandPollIntervalMs);
