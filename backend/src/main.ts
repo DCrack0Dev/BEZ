@@ -128,6 +128,25 @@ app.post('/api/ea/update', (req, res) => {
 
 // --- APP ENDPOINTS ---
 
+app.post('/api/ea/validate', (req, res) => {
+  const { apiKey } = req.body;
+  console.log(`[AUTH] 🔑 Validating API Key: ${apiKey}`);
+
+  if (apiKey && apiKey.startsWith('FXSK-')) {
+    res.json({
+      valid: true,
+      token: 'sk_live_' + Buffer.from(apiKey).toString('base64'),
+      expiry: '2027-12-31',
+      plan: 'Lifetime Pro'
+    });
+  } else {
+    res.status(401).json({
+      valid: false,
+      message: 'Invalid API Key format. Must start with FXSK-'
+    });
+  }
+});
+
 app.get('/api/account', (req, res) => {
   res.json(accountState);
 });
