@@ -123,20 +123,22 @@ void SendHeartbeat()
    }
    json += "],";
    
-   // Last 20 Candles
+   // Send 48 hours of M5 candles (approximately 576 candles)
    json += "\"candles\":[";
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, _Period, 0, 20, rates) > 0)
+   int lookback = 576; // 48 hours * 12 candles per hour (M5)
+   if(CopyRates(_Symbol, _Period, 0, lookback, rates) > 0)
    {
-      for(int i=0; i<20; i++)
+      int actual_copied = ArraySize(rates);
+      for(int i=0; i<actual_copied; i++)
       {
          json += "{\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
          json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
          json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
          json += "\"close\":" + DoubleToString(rates[i].close, _Digits) + ",";
          json += "\"timestamp\":" + IntegerToString(rates[i].time) + "}";
-         if(i < 19) json += ",";
+         if(i < actual_copied - 1) json += ",";
       }
    }
    json += "]}";

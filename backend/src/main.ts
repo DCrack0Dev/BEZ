@@ -149,33 +149,51 @@ app.post('/api/order', (req, res) => {
 
 // --- BRAIN SCAN ---
 setInterval(() => {
-  if (!accountState.ea_connected || !accountState.chart['M5'] || accountState.chart['M5'].length < 20) return;
+  if (!accountState.ea_connected || !accountState.chart['M5'] || accountState.chart['M5'].length < 100) return;
+
+  const m5Candles = accountState.chart['M5'];
+  
+  // Dynamic Swing Highs/Lows calculation for Key Levels (using 48h data)
+  const highs = m5Candles.map((c: any) => c.high);
+  const lows = m5Candles.map((c: any) => c.low);
+  
+  const swingHighs = [
+    Math.max(...highs.slice(-100)), // Recent 8h
+    Math.max(...highs.slice(-300)), // Recent 24h
+    Math.max(...highs.slice(-576))  // Full 48h
+  ].filter(v => !isNaN(v));
+
+  const swingLows = [
+    Math.min(...lows.slice(-100)),
+    Math.min(...lows.slice(-300)),
+    Math.min(...lows.slice(-576))
+  ].filter(v => !isNaN(v));
 
   const payload: MT5Payload = {
     symbol: accountState.symbol,
     timeframe: 'M5',
-    candles: accountState.chart['M5'],
+    candles: m5Candles,
     spread: accountState.spread,
     balance: accountState.balance,
     equity: accountState.equity,
-    pipSize: 0.0001,
-    pointSize: 0.01,
-    pipValue: 10,
-    minLot: 0.01,
-    maxLot: 100,
-    minLotStep: 0.01,
-    swingHighs: [],
-    swingLows: [],
+    pipSize: accountState.pipSize || 0.0001,
+    pointSize: accountState.pointSize || 0.01,
+    pipValue: accountState.pipValue || 10,
+    minLot: accountState.minLot || 0.01,
+    maxLot: accountState.maxLot || 100,
+    minLotStep: accountState.minLotStep || 0.01,
+    swingHighs,
+    swingLows,
     openPositionsCount: accountState.positions.length,
     ema20: accountState.ema20 || 0,
-    ema20Prev: 0,
+    ema20Prev: accountState.ema20Prev || 0,
     atr14: accountState.atr14 || 0,
     newsFilterActive: false
   };
 
   const signal = validateSignal(payload);
   if (signal) {
-    log(`🎯 SIGNAL: ${signal.direction} ${signal.symbol}`);
+    log(`🎯 SIGNAL: ${signal.direction} ${signal.symbol} @ ${signal.entryPrice}`);
     emitSignal(signal as any);
   }
 }, 1000);
