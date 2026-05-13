@@ -49,6 +49,7 @@ interface TradeState {
   setStructures: (structures: any) => void;
   setActiveTimeframe: (timeframe: string) => void;
   setLastSignalReason: (reason: string) => void;
+  setKeyLevelInfo: (info: { level: number; distance: number; type: string }) => void;
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
 }
@@ -80,6 +81,7 @@ export const useTradeStore = create<TradeState>((set) => ({
   setStructures: (structures) => set({ structures }),
   setActiveTimeframe: (activeTimeframe) => set({ activeTimeframe }),
   setLastSignalReason: (lastSignalReason) => set({ lastSignalReason }),
+  setKeyLevelInfo: (keyLevelInfo) => set((state) => ({ account: { ...state.account, keyLevelInfo } })),
   setLoading: (isLoading) => set({ isLoading }),
   setError: (error) => set({ error }),
 }));

@@ -13,7 +13,7 @@ import { useLogStore } from '../store/useLogStore';
 // ... (existing interfaces)
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason } = useTradeStore();
+  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, setKeyLevelInfo } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { addLog } = useLogStore();
   
@@ -98,7 +98,7 @@ export const usePolling = () => {
         : nearestResistance;
       
       if (primaryLevel) {
-        setKeyLevelDistance(primaryLevel.price, Math.abs(primaryLevel.price - price), primaryLevel.type);
+        setKeyLevelInfo({ level: primaryLevel.price, distance: Math.abs(primaryLevel.price - price), type: primaryLevel.type });
       }
     }
 
@@ -655,7 +655,7 @@ export const usePolling = () => {
               
               // Find nearest key level for debug panel
               if (nearestLevel) {
-                setKeyLevelDistance(nearestLevel.price, Math.abs(nearestLevel.price - price), nearestLevel.type);
+                setKeyLevelInfo({ level: nearestLevel.price, distance: Math.abs(nearestLevel.price - price), type: nearestLevel.type });
               }
               
               const prevBody = Math.abs(previous.close - previous.open);
