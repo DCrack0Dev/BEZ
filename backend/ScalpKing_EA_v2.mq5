@@ -146,7 +146,11 @@ void SendHeartbeat()
    string resp;
    if(FxScalpKing.SendHeartbeat(json, resp))
    {
-      // Optional: Parse immediate response if needed
+      Print("💓 Heartbeat Sent Successfully");
+   }
+   else
+   {
+      Print("❌ Heartbeat Failed");
    }
 }
 
