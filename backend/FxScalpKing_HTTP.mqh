@@ -196,6 +196,17 @@ public:
       double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
       double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
       
+      // Get technical data for Brain
+      double ema20 = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 0);
+      double ema20Prev = GetIndicatorValue(iMA(_Symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 1);
+      double atr14 = iATR(_Symbol, PERIOD_CURRENT, 14);
+      
+      double swingHighs[3], swingLows[3];
+      for(int i=0; i<3; i++) {
+         swingHighs[i] = iHigh(_Symbol, PERIOD_CURRENT, iHighest(_Symbol, PERIOD_CURRENT, MODE_HIGH, 20, i*20));
+         swingLows[i] = iLow(_Symbol, PERIOD_CURRENT, iLowest(_Symbol, PERIOD_CURRENT, MODE_LOW, 20, i*20));
+      }
+
       string json = "{"
          "\"apiKey\":\"" + m_apiKey + "\","
          "\"accountData\":{"
@@ -209,24 +220,17 @@ public:
             "\"eaSymbol\":\"" + _Symbol + "\","
             "\"digits\":" + IntegerToString(digits) + ","
             "\"point\":" + DoubleToString(point, 10) + ","
+            "\"pointSize\":" + DoubleToString(point, 10) + ","
+            "\"pipSize\":" + DoubleToString(point * 10, 10) + ","
             "\"tickSize\":" + DoubleToString(tickSize, 10) + ","
             "\"tickValue\":" + DoubleToString(tickValue, 10) + ","
             "\"price\":" + DoubleToString(m_lastPrice, 5) + ","
-            "\"fastEMA\":" + DoubleToString(m_fastEMA, 5) + ","
-            "\"slowEMA\":" + DoubleToString(m_slowEMA, 5) + ","
-            "\"bbUpper\":" + DoubleToString(m_bbUpper, 5) + ","
-            "\"bbLower\":" + DoubleToString(m_bbLower, 5) + ","
-            "\"rsi\":" + DoubleToString(m_rsi, 5) + ","
-            "\"atr\":" + DoubleToString(m_atr, 5) + ","
-            "\"vwap\":" + DoubleToString(m_vwap, 5) + ","
-            "\"ema5\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
-            "\"ema10\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 10, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
-            "\"ema20_scalp\":" + DoubleToString(GetIndicatorValue(iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE), 0, 0), 5) + ","
-            "\"stochK\":" + DoubleToString(GetIndicatorValue(iStochastic(_Symbol, PERIOD_M1, 5, 3, 3, MODE_SMA, STO_LOWHIGH), 0, 0), 2) + ","
-            "\"cci\":" + DoubleToString(GetIndicatorValue(iCCI(_Symbol, PERIOD_M1, 14, PRICE_TYPICAL), 0, 0), 2) + ","
-            "\"sar\":" + DoubleToString(GetIndicatorValue(iSAR(_Symbol, PERIOD_M1, 0.02, 0.2), 0, 0), 5) + ","
             "\"spread\":" + IntegerToString(m_spread) + ","
-            "\"tickVolume\":" + IntegerToString(m_tickVolume) +
+            "\"ema20\":" + DoubleToString(ema20, 5) + ","
+            "\"ema20Prev\":" + DoubleToString(ema20Prev, 5) + ","
+            "\"atr14\":" + DoubleToString(atr14, 5) + ","
+            "\"swingHighs\":[" + DoubleToString(swingHighs[0], 5) + "," + DoubleToString(swingHighs[1], 5) + "," + DoubleToString(swingHighs[2], 5) + "],"
+            "\"swingLows\":[" + DoubleToString(swingLows[0], 5) + "," + DoubleToString(swingLows[1], 5) + "," + DoubleToString(swingLows[2], 5) + "]"
          "},"
          "\"structures\":" + m_structuresJson + ","
          "\"chart\":{";
@@ -527,6 +531,30 @@ public:
          response,
          respCode
       );
+   }
+   
+   //+------------------------------------------------------------------+
+   //| SIMPLE POST HELPER                                               |
+   //+------------------------------------------------------------------+
+   bool Post(string endpoint, string body)
+   {
+      string response;
+      int respCode;
+      string headers = "Content-Type: application/json\r\n";
+      return HttpRequest("POST", m_serverUrl + endpoint, headers, body, response, respCode);
+   }
+
+   //+------------------------------------------------------------------+
+   //| SIMPLE GET HELPER                                                |
+   //+------------------------------------------------------------------+
+   string Get(string endpoint)
+   {
+      string response;
+      int respCode;
+      string headers = "Content-Type: application/json\r\n";
+      if(HttpRequest("GET", m_serverUrl + endpoint, headers, "", response, respCode))
+         return response;
+      return "";
    }
    
    //+------------------------------------------------------------------+
