@@ -75,41 +75,68 @@ export const usePolling = () => {
     
     // 1. Data Processing
     const price = Number(data.price || 0);
-    const m5Chart = data.chart?.['M5'] || [];
-    if (m5Chart.length < 20) return;
+    const m5Chart = data.chart?.['M5'] || data.candles || [];
+    if (m5Chart.length < 50) return;
 
-    // 2. Trend & Key Level Analysis
-    const highs = m5Chart.map((c: any) => c.high);
-    const lows = m5Chart.map((c: any) => c.low);
-    const currentTrend = (data.ema20 || 0) > (data.ema20Prev || 0) ? 'BULL' : 'BEAR';
+    const atr = Number(data.atr14 || data.atr || 0);
+    const spread = Number(data.spread || 0);
+
+    // 2. Key Level Analysis (using 48h data)
+    const levels = findKeyLevels(m5Chart);
+    const orderBlocks = findOrderBlocks(m5Chart);
+    const fvgs = findFVGs(m5Chart);
+
+    // Update UI Key Levels
+    const supportLevels = levels.filter(l => l.type === 'SUPPORT').sort((a, b) => b.price - a.price);
+    const resistanceLevels = levels.filter(l => l.type === 'RESISTANCE').sort((a, b) => a.price - b.price);
+    const nearestSupport = supportLevels.find(l => l.price < price);
+    const nearestResistance = resistanceLevels.find(l => l.price > price);
+
+    if (nearestSupport || nearestResistance) {
+      const primaryLevel = (nearestSupport && (price - nearestSupport.price < (nearestResistance?.price - price || 9999))) 
+        ? nearestSupport 
+        : nearestResistance;
+      
+      if (primaryLevel) {
+        setKeyLevelDistance(primaryLevel.price, Math.abs(primaryLevel.price - price), primaryLevel.type);
+      }
+    }
+
+    // 3. Trend Detection
+    const fastEMA = Number(data.ema20 || 0);
+    const slowEMA = Number(data.ema20Prev || 0);
+    const currentTrend = fastEMA > slowEMA ? 'BULL' : 'BEAR';
     
-    // 3. Strategy Logic (SMC: OB + FVG + Reversal)
+    // 4. Strategy Logic (SMC: OB + FVG + Reversal)
     let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
-    const lastCandle = m5Chart[m5Chart.length - 1];
-    const prevCandle = m5Chart[m5Chart.length - 2];
+    const sortedChart = [...m5Chart].sort((a, b) => b.timestamp - a.timestamp);
+    const lastCandle = sortedChart[0];
+    const prevCandle = sortedChart[1];
     
-    // BUY: Bullish Reversal at Swing Low + Trend
-    if (currentTrend === 'BULL' && lastCandle.close > lastCandle.open && prevCandle.low === Math.min(...lows.slice(-10))) {
+    const atSupport = nearestSupport && (price - nearestSupport.price) < (atr * 1.5);
+    const atResistance = nearestResistance && (nearestResistance.price - price) < (atr * 1.5);
+
+    // BUY: Bullish Reversal at Support/OB/FVG + Trend
+    if (currentTrend === 'BULL' && lastCandle.close > lastCandle.open && atSupport) {
       signal = 'BUY';
     } 
-    // SELL: Bearish Reversal at Swing High + Trend
-    else if (currentTrend === 'BEAR' && lastCandle.close < lastCandle.open && prevCandle.high === Math.max(...highs.slice(-10))) {
+    // SELL: Bearish Reversal at Resistance/OB/FVG + Trend
+    else if (currentTrend === 'BEAR' && lastCandle.close < lastCandle.open && atResistance) {
       signal = 'SELL';
     }
 
-    if (signal !== 'NONE') {
+    if (signal !== 'NONE' && spread <= 30) {
       addLog({ 
         level: 'info', 
-        message: `🧠 App Brain Found Setup: ${signal} ${data.symbol}`, 
+        message: `🧠 App Brain Signal: ${signal} ${data.symbol || 'XAUUSD'} @ ${price}`, 
         timestamp: new Date().toISOString() 
       });
       
-      // 4. Execution Logic (Direct from App Brain)
-      const sl = signal === 'BUY' ? prevCandle.low : prevCandle.high;
-      const tp = signal === 'BUY' ? Math.max(...highs.slice(-50)) : Math.min(...lows.slice(-50));
+      const sl = signal === 'BUY' ? (nearestSupport?.price || lastCandle.low) - (atr * 1.2) : (nearestResistance?.price || lastCandle.high) + (atr * 1.2);
+      const tp = signal === 'BUY' ? price + (atr * 3) : price - (atr * 3);
       
       handleExecuteSignal({
-        symbol: data.symbol,
+        symbol: data.symbol || 'XAUUSD',
         direction: signal,
         lotSizes: { entry1: botSettings.defaultLots || 0.01 },
         stopLoss: sl,
@@ -117,7 +144,7 @@ export const usePolling = () => {
         timestamp: Date.now()
       });
     }
-  }, [botSettings, addLog]);
+  }, [botSettings, addLog, setKeyLevelDistance]);
 
   const handleExecuteSignal = async (signal: any) => {
     try {
@@ -187,14 +214,14 @@ export const usePolling = () => {
         equity: Number(accountData.equity || 0),
         pnlToday,
         eaConnected: accountData.ea_connected || accountData.eaConnected || false,
-        eaSymbol: accountData.eaSymbol || accountData.ea_symbol || 'BTCUSD',
+        eaSymbol: accountData.symbol || accountData.eaSymbol || accountData.ea_symbol || 'XAUUSD',
         price: Number(accountData.price || 0),
-        fastEMA: Number(accountData.fastEMA || 0),
-        slowEMA: Number(accountData.slowEMA || 0),
+        fastEMA: Number(accountData.ema20 || 0),
+        slowEMA: Number(accountData.ema20Prev || 0),
         bbUpper: Number(accountData.bbUpper || 0),
         bbLower: Number(accountData.bbLower || 0),
         rsi: Number(accountData.rsi || 0),
-        atr: Number(accountData.atr || 0),
+        atr: Number(accountData.atr14 || accountData.atr || 0),
         vwap: Number(accountData.vwap || 0),
         spread: Number(accountData.spread || 0),
         tickVolume: Number(accountData.tickVolume || 0),
