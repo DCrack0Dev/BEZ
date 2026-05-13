@@ -11,19 +11,16 @@ export interface LogEntry {
 
 interface LogState {
   logs: LogEntry[];
-  keyLevelDistance: { level: number; distance: number; type: string } | null;
   addLog: (entry: Omit<LogEntry, 'id' | 'timestamp'>) => void;
   addSystemLog: (message: string, level?: LogEntry['level']) => void;
   addEALog: (message: string, level?: LogEntry['level'], details?: string) => void;
   addBackendLog: (message: string, level?: LogEntry['level'], details?: string) => void;
   addAppLog: (message: string, level?: LogEntry['level'], details?: string) => void;
   clearLogs: () => void;
-  setKeyLevelDistance: (level: number, distance: number, type: string) => void;
 }
 
 export const useLogStore = create<LogState>((set, get) => ({
   logs: [],
-  keyLevelDistance: null,
 
   addLog: (entry) => {
     const newLog: LogEntry = {
@@ -55,10 +52,6 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   clearLogs: () => {
     set({ logs: [] });
-  },
-
-  setKeyLevelDistance: (level, distance, type) => {
-    set({ keyLevelDistance: { level, distance, type } });
   },
 }));
 

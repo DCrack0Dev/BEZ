@@ -144,7 +144,7 @@ export const usePolling = () => {
         timestamp: Date.now()
       });
     }
-  }, [botSettings, addLog, setKeyLevelDistance]);
+  }, [botSettings, addLog, setKeyLevelInfo]);
 
   const handleExecuteSignal = async (signal: any) => {
     try {
@@ -209,15 +209,12 @@ export const usePolling = () => {
       const balance = Number(accountData.balance || 0);
       const pnlToday = Number(accountData.pnl_today || accountData.pnlToday || 0);
       
-      // Map backend fields to frontend fields robustly
-      const eaSymbol = accountData.symbol || accountData.eaSymbol || accountData.ea_symbol || 'XAUUSD';
-      
       const accountDataSafe = {
         balance,
         equity: Number(accountData.equity || 0),
         pnlToday,
         eaConnected: accountData.ea_connected || accountData.eaConnected || false,
-        eaSymbol: eaSymbol,
+        eaSymbol: accountData.symbol || accountData.eaSymbol || accountData.ea_symbol || 'XAUUSD',
         price: Number(accountData.price || 0),
         fastEMA: Number(accountData.ema20 || 0),
         slowEMA: Number(accountData.ema20Prev || 0),
@@ -257,11 +254,11 @@ export const usePolling = () => {
 
        // Update key level distance from backend data if available
         if (accountData.keyLevelInfo) {
-          setKeyLevelDistance(
-            accountData.keyLevelInfo.level,
-            accountData.keyLevelInfo.distance,
-            accountData.keyLevelInfo.type
-          );
+          setKeyLevelInfo({
+            level: accountData.keyLevelInfo.level,
+            distance: accountData.keyLevelInfo.distance,
+            type: accountData.keyLevelInfo.type
+          });
         }
 
         // Process incoming logs from EA/Backend
