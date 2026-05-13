@@ -145,7 +145,11 @@ app.post('/api/ea/validate', (req, res) => {
   const { apiKey } = req.body;
   console.log(`[AUTH] 🔑 Validating API Key: ${apiKey}`);
 
-  if (apiKey && apiKey.startsWith('FXSK-')) {
+  // Accept the specific key from your screenshot
+  const validKeys = ['FXSK-90e36448c3d1ef9d749aa155ba228541'];
+
+  if (apiKey && (apiKey.startsWith('FXSK-') || validKeys.includes(apiKey))) {
+    console.log(`[AUTH] ✅ Key Validated: ${apiKey}`);
     res.json({
       valid: true,
       token: 'sk_live_' + Buffer.from(apiKey).toString('base64'),
@@ -153,6 +157,7 @@ app.post('/api/ea/validate', (req, res) => {
       plan: 'Lifetime Pro'
     });
   } else {
+    console.log(`[AUTH] ❌ Key Rejected: ${apiKey}`);
     res.status(401).json({
       valid: false,
       message: 'Invalid API Key format. Must start with FXSK-'
