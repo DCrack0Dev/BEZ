@@ -15,7 +15,7 @@ import { useLogStore } from '../store/useLogStore';
 export const usePolling = () => {
   const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, setKeyLevelInfo } = useTradeStore();
   const { botSettings } = useSettingsStore();
-  const { addLog } = useLogStore();
+  const { addLog, setKeyLevelDistance } = useLogStore();
   
   const socketRef = useRef<Socket | null>(null);
   
@@ -98,7 +98,9 @@ export const usePolling = () => {
         : nearestResistance;
       
       if (primaryLevel) {
-        setKeyLevelInfo({ level: primaryLevel.price, distance: Math.abs(primaryLevel.price - price), type: primaryLevel.type });
+        const distance = Math.abs(primaryLevel.price - price);
+        setKeyLevelInfo({ level: primaryLevel.price, distance, type: primaryLevel.type });
+        setKeyLevelDistance(primaryLevel.price, distance, primaryLevel.type);
       }
     }
 
@@ -144,7 +146,7 @@ export const usePolling = () => {
         timestamp: Date.now()
       });
     }
-  }, [botSettings, addLog, setKeyLevelInfo]);
+  }, [botSettings, addLog, setKeyLevelInfo, setKeyLevelDistance]);
 
   const handleExecuteSignal = async (signal: any) => {
     try {
@@ -254,11 +256,11 @@ export const usePolling = () => {
 
        // Update key level distance from backend data if available
         if (accountData.keyLevelInfo) {
-          setKeyLevelInfo({
-            level: accountData.keyLevelInfo.level,
-            distance: accountData.keyLevelInfo.distance,
-            type: accountData.keyLevelInfo.type
-          });
+          setKeyLevelDistance(
+            accountData.keyLevelInfo.level,
+            accountData.keyLevelInfo.distance,
+            accountData.keyLevelInfo.type
+          );
         }
 
         // Process incoming logs from EA/Backend
@@ -655,7 +657,9 @@ export const usePolling = () => {
               
               // Find nearest key level for debug panel
               if (nearestLevel) {
-                setKeyLevelInfo({ level: nearestLevel.price, distance: Math.abs(nearestLevel.price - price), type: nearestLevel.type });
+                const distance = Math.abs(nearestLevel.price - price);
+                setKeyLevelInfo({ level: nearestLevel.price, distance, type: nearestLevel.type });
+                setKeyLevelDistance(nearestLevel.price, distance, nearestLevel.type);
               }
               
               const prevBody = Math.abs(previous.close - previous.open);
@@ -677,11 +681,11 @@ export const usePolling = () => {
               
               const spreadOk = spread <= 30;
               
-              if (!spreadOk) {
-                console.log(`❌ Trade blocked: Spread too high (${spread.toFixed(2)} > 30)`);
+              if (!spreadOk && Math.random() > 0.95) {
+                addLog({ level: 'warning', message: `⚠️ Trade blocked: Spread too high (${spread.toFixed(2)})`, timestamp: new Date().toISOString() });
               }
-              if (levelConflict) {
-                console.log(`❌ Trade blocked: support/resistance conflict around current price`);
+              if (levelConflict && Math.random() > 0.95) {
+                addLog({ level: 'warning', message: `⚠️ Trade blocked: S/R conflict nearby`, timestamp: new Date().toISOString() });
               }
 
               // --- SIGNAL LOGIC ---
@@ -874,23 +878,23 @@ export const usePolling = () => {
               }
 
               if (signal === 'NONE') {
-                if (Math.random() > 0.85) {
+                if (Math.random() > 0.98) {
                   const blockers: string[] = [];
                   if (!spreadOk) blockers.push("spread");
                   if (levelConflict) blockers.push("levelConflict");
                   if (isChoppy) blockers.push("choppy");
                   if (inMiddleRange) blockers.push("midRSI");
                   if (isChasing) blockers.push("chasing");
-                  console.log(`🔎 No trade | Price: ${price.toFixed(3)} | RSI: ${rsi.toFixed(1)} | blockers: ${blockers.length > 0 ? blockers.join(",") : "setup_not_confirmed"}`);
+                  addLog({ level: 'info', message: `🔎 Scanning | Price: ${price.toFixed(2)} | RSI: ${rsi.toFixed(0)} ${blockers.length > 0 ? `| Blocked: ${blockers.join(",")}` : ""}`, timestamp: new Date().toISOString() });
                 }
               }
 
               // Final directional sanity check: never sell into nearby support, never buy into nearby resistance.
               if (signal === 'SELL' && (atSupport || nearestSupportDistance <= directionalBuffer)) {
-                console.log(`❌ SELL cancelled: support too close (${nearestSupportDistance.toFixed(3)})`);
+                addLog({ level: 'warning', message: `❌ SELL cancelled: Support too close`, timestamp: new Date().toISOString() });
                 signal = 'NONE';
               } else if (signal === 'BUY' && (atResistance || nearestResistanceDistance <= directionalBuffer)) {
-                console.log(`❌ BUY cancelled: resistance too close (${nearestResistanceDistance.toFixed(3)})`);
+                addLog({ level: 'warning', message: `❌ BUY cancelled: Resistance too close`, timestamp: new Date().toISOString() });
                 signal = 'NONE';
               }
 
@@ -899,7 +903,7 @@ export const usePolling = () => {
               if ((signal === 'BUY' || signal === 'SELL') && slPrice > 0) {
                 const slDistance = Math.abs(price - slPrice);
                 if (slDistance > maxSlDistancePoints) {
-                  console.log(`❌ ${signal} cancelled: SL too wide (${slDistance.toFixed(3)} > ${maxSlDistancePoints.toFixed(3)} points)`);
+                  addLog({ level: 'warning', message: `❌ ${signal} cancelled: SL too wide (${slDistance.toFixed(2)})`, timestamp: new Date().toISOString() });
                   signal = 'NONE';
                 }
               }
@@ -970,7 +974,7 @@ export const usePolling = () => {
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, botSettings]);
+  }, [setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, setKeyLevelInfo, setKeyLevelDistance, addLog, botSettings]);
 
   useEffect(() => {
     refresh(true);
