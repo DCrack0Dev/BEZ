@@ -151,7 +151,7 @@ export const usePolling = () => {
   const handleExecuteSignal = async (signal: any) => {
     try {
       await placeOrder({
-        action: 'BUY',
+        type: signal.direction,
         symbol: signal.symbol,
         lots: signal.lotSizes.entry1,
         sl: signal.stopLoss,
@@ -505,11 +505,20 @@ export const usePolling = () => {
             
             if (canStack) {
               const latestCandleTime = sortedChart[0]?.x || 0;
+              
+              // App Brain Level Calculation
               const h4Obs = sortedH4.length > 0 ? findOrderBlocks(sortedH4).filter(ob => !ob.mitigated) : [];
               const h4Levels = sortedH4.length > 0 ? findKeyLevels(sortedH4) : [];
               const h1Levels = sortedH1.length > 0 ? findKeyLevels(sortedH1) : [];
-              const m15Obs = sortedM15.length > 0 ? findOrderBlocks(sortedM15).filter(ob => !ob.mitigated) : [];
               const m15Levels = sortedM15.length > 0 ? findKeyLevels(sortedM15) : [];
+              
+              const allLevels = [...h4Levels, ...h1Levels, ...m15Levels];
+              
+              if (allLevels.length > 0 && Math.random() > 0.99) {
+                addLog({ level: 'info', message: `🧠 App Brain: Calculated ${allLevels.length} key levels from HTF data`, timestamp: new Date().toISOString() });
+              }
+
+              const m15Obs = sortedM15.length > 0 ? findOrderBlocks(sortedM15).filter(ob => !ob.mitigated) : [];
               const m5Fvgs = sortedChart.length > 0 ? findFVGs(sortedChart).filter(fvg => !fvg.mitigated) : [];
 
               const levelDistanceBuffer = Math.max(atr * 0.35, price * 0.00025);
@@ -933,14 +942,19 @@ export const usePolling = () => {
                     if (signalReason.indexOf('REENTRY_OPPOSITE_AFTER_') === 0 && lastExitEventRef.current) {
                       lastExitEventRef.current.consumed = true;
                     }
-                    console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price}`);
+                    addLog({ level: 'info', message: `🚀 Executing ${signal} signal: ${signalReason}`, timestamp: new Date().toISOString() });
                     setLastSignalReason(signalReason || 'OPPOSITE_CLOSE_THEN_ENTRY');
                     placeOrder({
                       symbol: accountDataSafe.eaSymbol || 'BTCUSD',
                       type: signal,
                       lots: botSettings.defaultLots || 0.01,
                       sl: slPrice, tp: tpPrice
-                    }).catch(e => console.error("SMC execution failed:", e));
+                    }).then(() => {
+                      addLog({ level: 'success', message: `✅ ${signal} trade placed successfully on MT5`, timestamp: new Date().toISOString() });
+                    }).catch(e => {
+                      addLog({ level: 'error', message: `❌ ${signal} trade failed: ${e.message}`, timestamp: new Date().toISOString() });
+                      console.error("SMC execution failed:", e);
+                    });
                   }, 500);
                   return; // Exit this polling cycle to wait for close
                 }
@@ -948,19 +962,26 @@ export const usePolling = () => {
                 if (signalReason.indexOf('REENTRY_OPPOSITE_AFTER_') === 0 && lastExitEventRef.current) {
                   lastExitEventRef.current.consumed = true;
                 }
-                console.log(`🚀 EXECUTING SIGNAL: ${signal} | Price: ${price} | SL: ${slPrice} | TP: ${tpPrice}`);
+                addLog({ level: 'info', message: `🚀 Executing ${signal} signal: ${signalReason}`, timestamp: new Date().toISOString() });
                 setLastSignalReason(signalReason || 'DIRECT_ENTRY');
                 placeOrder({
                   symbol: accountDataSafe.eaSymbol || 'BTCUSD',
                   type: signal as any,
                   lots: botSettings.defaultLots || 0.01,
                   sl: slPrice, tp: tpPrice
-                }).catch(e => console.error("SMC execution failed:", e));
+                }).then(() => {
+                  addLog({ level: 'success', message: `✅ ${signal} trade placed successfully on MT5`, timestamp: new Date().toISOString() });
+                }).catch(e => {
+                  addLog({ level: 'error', message: `❌ ${signal} trade failed: ${e.message}`, timestamp: new Date().toISOString() });
+                  console.error("SMC execution failed:", e);
+                });
               } else if (signal === 'CLOSE_ALL' && (now - lastTradeTimeRef.current > 2000)) {
                 lastTradeTimeRef.current = now;
-                console.log(`🚀 EXECUTING CLOSE ALL`);
+                addLog({ level: 'info', message: `🚀 Executing CLOSE ALL command`, timestamp: new Date().toISOString() });
                 setLastSignalReason('TIME_EXIT_CLOSE_ALL');
-                placeOrder({ symbol: accountDataSafe.eaSymbol || 'BTCUSD', type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(e => console.error("SMC close failed:", e));
+                placeOrder({ symbol: accountDataSafe.eaSymbol || 'BTCUSD', type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 })
+                  .then(() => addLog({ level: 'success', message: `✅ All trades closed successfully`, timestamp: new Date().toISOString() }))
+                  .catch(e => addLog({ level: 'error', message: `❌ Close All failed: ${e.message}`, timestamp: new Date().toISOString() }));
               }
             }
           }
