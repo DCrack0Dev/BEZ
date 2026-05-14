@@ -257,7 +257,7 @@ const hexToRgba = (hex: string, alpha: number) => {
 
 const ChartScreen = () => {
   const { account, openPositions, activeTimeframe, setActiveTimeframe, lastSignalReason } = useTradeStore();
-  const selectedSymbol = account.eaSymbol || 'BTCUSD';
+  const selectedSymbol = account.eaSymbol || 'XAUUSD';
   const [signal, setSignal] = useState<'BUY' | 'SELL' | 'NONE'>('NONE');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isSwitchingTimeframe, setIsSwitchingTimeframe] = useState(false);

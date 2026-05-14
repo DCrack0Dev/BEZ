@@ -61,7 +61,7 @@ export const useTradeStore = create<TradeState>((set) => ({
     equity: 0,
     pnlToday: 0,
     eaConnected: false,
-    eaSymbol: 'BTCUSD',
+    eaSymbol: '---',
     price: 0,
     fastEMA: 0,
     slowEMA: 0,

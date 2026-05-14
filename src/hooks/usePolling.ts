@@ -136,6 +136,7 @@ export const usePolling = () => {
       setAccount({
         ...accountData,
         eaConnected: accountData.ea_connected,
+        eaSymbol: accountData.symbol || 'XAUUSD',
         price: Number(accountData.price || 0),
         equity: Number(accountData.equity || 0),
         balance: Number(accountData.balance || 0),
