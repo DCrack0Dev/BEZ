@@ -13,7 +13,16 @@ import { useLogStore } from '../store/useLogStore';
 // ... (existing interfaces)
 
 export const usePolling = () => {
-  const { setAccount, setOpenPositions, setStructures, setError, setLoading, setLastSignalReason, setKeyLevelInfo } = useTradeStore();
+  const { 
+    setAccount, 
+    setAccountPrice,
+    setOpenPositions, 
+    setStructures, 
+    setError, 
+    setLoading, 
+    setLastSignalReason, 
+    setKeyLevelInfo 
+  } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { addLog, setKeyLevelDistance } = useLogStore();
   
@@ -25,6 +34,10 @@ export const usePolling = () => {
 
     // NEW: Real-time Data Relay from EA
     socketRef.current.on('EA_HEARTBEAT', (data) => {
+      // Update account price immediately for smoother UI
+      if (data.price) {
+        setAccountPrice(Number(data.price));
+      }
       handleAppBrainAnalysis(data);
     });
 
@@ -93,7 +106,7 @@ export const usePolling = () => {
     const nearestResistance = resistanceLevels.find(l => l.price > price);
 
     if (nearestSupport || nearestResistance) {
-      const primaryLevel = (nearestSupport && (price - nearestSupport.price < (nearestResistance?.price - price || 9999))) 
+      const primaryLevel = (nearestSupport && (!nearestResistance || (price - nearestSupport.price < nearestResistance.price - price))) 
         ? nearestSupport 
         : nearestResistance;
       
@@ -207,6 +220,15 @@ export const usePolling = () => {
             const distance = Math.abs(primaryLevelLocal.price - price);
             setKeyLevelInfo({ level: primaryLevelLocal.price, distance, type: primaryLevelLocal.type });
             setKeyLevelDistance(primaryLevelLocal.price, distance, primaryLevelLocal.type);
+            
+            // Add a log periodically to show key levels are being tracked
+            if (Math.random() > 0.9) {
+              addLog({ 
+                level: 'info', 
+                message: `🔍 Tracking Key Level: ${primaryLevelLocal.type} @ ${primaryLevelLocal.price.toFixed(2)} (${distance.toFixed(2)} pts)`,
+                timestamp: new Date().toISOString()
+              });
+            }
           }
         }
       }
@@ -259,14 +281,19 @@ export const usePolling = () => {
         const lots = Number(pos.volume || pos.lots || 0);
         const currentPrice = Number(accountData.price || pos.price || 0);
         
-        // Manual PnL calculation if backend doesn't provide it live
+        // ALWAYS calculate PnL manually for real-time responsiveness if we have prices
         let profit = Number(pos.profit || 0);
-        if (profit === 0 && openPrice > 0 && currentPrice > 0) {
+        if (openPrice > 0 && currentPrice > 0) {
           const point = accountDataSafe.eaSymbol.includes('JPY') || accountDataSafe.eaSymbol.includes('XAU') ? 0.01 : 0.0001;
           const diff = type === 'BUY' ? (currentPrice - openPrice) : (openPrice - currentPrice);
-          // Rough estimate: profit = pips * lots * 10 (standard lot size 100k)
-          // This is a fallback; better if backend sends real profit.
-          profit = (diff / point) * lots * (accountDataSafe.eaSymbol.includes('XAU') ? 1 : 10);
+          // If backend profit is very different from calculated, use backend as it might include swaps/commission
+          // But for "monitoring" we want the live price-based profit.
+          const calculatedProfit = (diff / point) * lots * (accountDataSafe.eaSymbol.includes('XAU') ? 1 : 10);
+          
+          // Use calculated profit if backend is 0 or if they are reasonably close (to allow for live updates)
+          if (profit === 0 || Math.abs(profit - calculatedProfit) < 10) {
+            profit = calculatedProfit;
+          }
         }
 
         return {
@@ -470,11 +497,11 @@ export const usePolling = () => {
               const closeBuffer = atr * 0.1;
               if (pos.tp > 0 && ((isBuy && price >= pos.tp - closeBuffer) || (!isBuy && price <= pos.tp + closeBuffer))) {
                 console.log(`🚨 Emergency TP Close for #${pos.ticket}`);
-                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
+                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', action: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
               }
               if (pos.sl > 0 && ((isBuy && price <= pos.sl + closeBuffer) || (!isBuy && price >= pos.sl - closeBuffer))) {
                 console.log(`🚨 Emergency SL Close for #${pos.ticket}`);
-                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
+                placeOrder({ symbol: accountDataSafe.eaSymbol, type: 'CLOSE_ALL', action: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 }).catch(() => {});
               }
 
               // --- IMPROVED TRAILING STOP ($0.50 profit = move to break even, then trail) ---
@@ -973,6 +1000,7 @@ export const usePolling = () => {
                   placeOrder({ 
                     symbol: accountDataSafe.eaSymbol || 'BTCUSD', 
                     type: 'CLOSE_ALL', 
+                    action: 'CLOSE_ALL',
                     lots: 0, sl: 0, tp: 0 
                   }).catch(e => console.error("Auto-close opposite failed:", e));
                   
@@ -1080,11 +1108,29 @@ function findFVGs(chart: Candle[]): FVG[] {
 }
 
 function findKeyLevels(chart: Candle[]): KeyLevel[] {
+  if (!Array.isArray(chart) || chart.length < 5) return [];
   const levels: KeyLevel[] = [];
-  for (let i = 2; i < chart.length - 2; i++) {
-    if (chart[i].low < chart[i-1].low && chart[i].low < chart[i+1].low) levels.push({ price: chart[i].low, type: 'SUPPORT', strength: 1 });
-    if (chart[i].high > chart[i-1].high && chart[i].high > chart[i+1].high) levels.push({ price: chart[i].high, type: 'RESISTANCE', strength: 1 });
+  // Use a slightly larger window for pivots to avoid noise
+  for (let i = 5; i < chart.length - 5; i++) {
+    const curr = chart[i];
+    const prev = chart.slice(i - 5, i);
+    const next = chart.slice(i + 1, i + 6);
+    
+    const isMin = prev.every(c => curr.low <= c.low) && next.every(c => curr.low <= c.low);
+    const isMax = prev.every(c => curr.high >= c.high) && next.every(c => curr.high >= c.high);
+    
+    if (isMin) levels.push({ price: curr.low, type: 'SUPPORT', strength: 1 });
+    if (isMax) levels.push({ price: curr.high, type: 'RESISTANCE', strength: 1 });
   }
+  
+  // If no levels found with strict pivots, use simple ones
+  if (levels.length === 0) {
+    for (let i = 2; i < chart.length - 2; i++) {
+      if (chart[i].low < chart[i-1].low && chart[i].low < chart[i+1].low) levels.push({ price: chart[i].low, type: 'SUPPORT', strength: 1 });
+      if (chart[i].high > chart[i-1].high && chart[i].high > chart[i+1].high) levels.push({ price: chart[i].high, type: 'RESISTANCE', strength: 1 });
+    }
+  }
+  
   return levels;
 }
 

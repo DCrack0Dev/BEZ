@@ -44,6 +44,7 @@ interface TradeState {
   isLoading: boolean;
   error: string | null;
   setAccount: (account: AccountData) => void;
+  setAccountPrice: (price: number) => void;
   setOpenPositions: (positions: Position[]) => void;
   setClosedPositions: (positions: Position[]) => void;
   setStructures: (structures: any) => void;
@@ -76,6 +77,16 @@ export const useTradeStore = create<TradeState>((set) => ({
   isLoading: false,
   error: null,
   setAccount: (account) => set({ account }),
+  setAccountPrice: (price) => set((state) => ({ 
+    account: { ...state.account, price },
+    openPositions: state.openPositions.map(pos => {
+      // Auto-update PnL when price changes
+      const point = state.account.eaSymbol.includes('JPY') || state.account.eaSymbol.includes('XAU') ? 0.01 : 0.0001;
+      const diff = pos.type === 'BUY' ? (price - pos.openPrice) : (pos.openPrice - price);
+      const profit = (diff / point) * pos.lots * (state.account.eaSymbol.includes('XAU') ? 1 : 10);
+      return { ...pos, currentPrice: price, pnl: profit, profit };
+    })
+  })),
   setOpenPositions: (openPositions) => set({ openPositions }),
   setClosedPositions: (closedPositions) => set({ closedPositions }),
   setStructures: (structures) => set({ structures }),

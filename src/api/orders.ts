@@ -32,18 +32,13 @@ export const placeOrder = async (orderData: {
   lots: number;
   sl?: number;
   tp?: number;
-  top?: number;
-  bottom?: number;
-  zoneType?: string;
-  time?: number;
-  price?: number;
-  levelType?: string;
+  action?: string;
   ticket?: string | number;
 }) => {
   const { apiKey } = useAuthStore.getState();
   const payload = {
     ...orderData,
-    action: orderData.type,
+    action: orderData.action || orderData.type,
     apiKey
   };
   const response = await apiClient.post('/api/order', payload);
