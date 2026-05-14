@@ -20,7 +20,7 @@ const LoginScreen = () => {
 
     setLoading(true);
     try {
-      const response = await validateApiKey(apiKey);
+      const response = await validateApiKey(apiKey, serverUrl);
       if (response.token) {
         await setAuth(apiKey, serverUrl, response.token);
       } else {

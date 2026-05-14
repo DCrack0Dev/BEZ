@@ -12,8 +12,12 @@ interface AccountCardProps {
   currency?: string;
 }
 
-const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, eaConnected, currency = 'USD' }) => {
-  const isPositive = pnlToday >= 0;
+const AccountCard: React.FC<AccountCardProps> = ({ balance = 0, equity = 0, pnlToday = 0, eaConnected, currency = 'USD' }) => {
+  const safeBalance = balance || 0;
+  const safeEquity = equity || 0;
+  const safePnlToday = pnlToday || 0;
+  
+  const isPositive = safePnlToday >= 0;
   const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
 
   return (
@@ -21,7 +25,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, ea
       <View style={styles.header}>
         <View>
           <Text style={TYPOGRAPHY.caption}>Account Balance</Text>
-          <Text style={styles.balance}>{symbol}{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
+          <Text style={styles.balance}>{symbol}{safeBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: eaConnected ? COLORS.buy + '20' : COLORS.sell + '20' }]}>
           <View style={[styles.statusDot, { backgroundColor: eaConnected ? COLORS.buy : COLORS.sell }]} />
@@ -34,12 +38,12 @@ const AccountCard: React.FC<AccountCardProps> = ({ balance, equity, pnlToday, ea
       <View style={styles.footer}>
         <View>
           <Text style={TYPOGRAPHY.caption}>Equity</Text>
-          <Text style={TYPOGRAPHY.mono}>{symbol}{equity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
+          <Text style={TYPOGRAPHY.mono}>{symbol}{safeEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
         </View>
         <View style={styles.pnlContainer}>
           <Text style={[TYPOGRAPHY.caption, { textAlign: 'right' }]}>Today's P&L</Text>
           <Text style={[TYPOGRAPHY.mono, { color: isPositive ? COLORS.buy : COLORS.sell }]}>
-            {isPositive ? '+' : ''}{symbol}{pnlToday.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            {isPositive ? '+' : ''}{symbol}{safePnlToday.toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </Text>
         </View>
       </View>

@@ -57,7 +57,9 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
   };
 
   const formatTime = (timestamp: Date | string) => {
+    if (!timestamp) return '--:--:--';
     const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+    if (isNaN(date.getTime())) return '--:--:--';
     return date.toLocaleTimeString('en-US', { 
       hour12: false, 
       hour: '2-digit', 

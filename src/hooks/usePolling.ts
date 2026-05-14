@@ -139,6 +139,7 @@ export const usePolling = () => {
         price: Number(accountData.price || 0),
         equity: Number(accountData.equity || 0),
         balance: Number(accountData.balance || 0),
+        pnlToday: Number(accountData.pnl_today || accountData.pnlToday || 0),
       });
 
       setAccountPrice(Number(accountData.price || 0));

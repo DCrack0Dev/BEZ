@@ -13,9 +13,12 @@ const apiClient = axios.create({
 
 apiClient.interceptors.request.use((config) => {
   const { jwt, serverUrl, apiKey } = useAuthStore.getState();
-  if (serverUrl) {
+  
+  // Only override baseURL if it's the default one and we have a custom serverUrl
+  if (serverUrl && config.baseURL === 'https://liquibot-back.onrender.com') {
     config.baseURL = serverUrl;
   }
+  
   if (jwt) {
     config.headers.Authorization = `Bearer ${jwt}`;
   }

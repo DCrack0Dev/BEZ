@@ -17,7 +17,7 @@
 //| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
 input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
-input string   ServerURL         = "http://192.168.8.151:5000";
+input string   ServerURL         = "https://liquibot-back.onrender.com";
 input int      MagicNumber       = 20260101;
 input int      HeartbeatInterval = 1; // seconds
 input int      StopLoss_Points   = 300;
