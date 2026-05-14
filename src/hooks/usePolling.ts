@@ -195,6 +195,22 @@ export const usePolling = () => {
         throw new Error('No data received from server');
       }
 
+      // 1. Update Key Levels immediately from refreshed data
+      let primaryLevelLocal: any = null;
+      if (accountData.chart && accountData.price) {
+        const chartData = Array.isArray(accountData.chart) ? accountData.chart : (accountData.chart['M5'] || accountData.chart['M1'] || []);
+        if (chartData.length > 20) {
+          const levels = findKeyLevels(chartData);
+          const price = Number(accountData.price);
+          primaryLevelLocal = levels.sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))[0];
+          if (primaryLevelLocal) {
+            const distance = Math.abs(primaryLevelLocal.price - price);
+            setKeyLevelInfo({ level: primaryLevelLocal.price, distance, type: primaryLevelLocal.type });
+            setKeyLevelDistance(primaryLevelLocal.price, distance, primaryLevelLocal.type);
+          }
+        }
+      }
+
       const openOrders = accountData.positions || [];
       
       // Process chart data safely
@@ -236,30 +252,54 @@ export const usePolling = () => {
       setAccount(accountDataSafe);
       
       // Map open orders to the Position interface
-      const mappedPositions = openOrders.map((pos: any) => ({
-        ticket: String(pos.ticket),
-        symbol: pos.symbol,
-        type: pos.type,
-        lots: pos.volume || pos.lots || 0,
-        openPrice: pos.openPrice || pos.price || 0,
-        currentPrice: accountData.price || pos.price || 0,
-        profit: pos.profit || 0,
-        pnl: pos.profit || 0,
-        openTime: pos.time ? new Date(Number(pos.time) * 1000).toISOString() : new Date().toISOString(),
-        sl: Number(pos.sl || 0) || undefined,
-        tp: Number(pos.tp || 0) || undefined,
-      }));
+      const mappedPositions = openOrders.map((pos: any) => {
+        const ticket = String(pos.ticket);
+        const type = pos.type;
+        const openPrice = Number(pos.openPrice || pos.price || 0);
+        const lots = Number(pos.volume || pos.lots || 0);
+        const currentPrice = Number(accountData.price || pos.price || 0);
+        
+        // Manual PnL calculation if backend doesn't provide it live
+        let profit = Number(pos.profit || 0);
+        if (profit === 0 && openPrice > 0 && currentPrice > 0) {
+          const point = accountDataSafe.eaSymbol.includes('JPY') || accountDataSafe.eaSymbol.includes('XAU') ? 0.01 : 0.0001;
+          const diff = type === 'BUY' ? (currentPrice - openPrice) : (openPrice - currentPrice);
+          // Rough estimate: profit = pips * lots * 10 (standard lot size 100k)
+          // This is a fallback; better if backend sends real profit.
+          profit = (diff / point) * lots * (accountDataSafe.eaSymbol.includes('XAU') ? 1 : 10);
+        }
+
+        return {
+          ticket,
+          symbol: pos.symbol,
+          type,
+          lots,
+          openPrice,
+          currentPrice,
+          profit,
+          pnl: profit,
+          openTime: pos.time ? new Date(Number(pos.time) * 1000).toISOString() : new Date().toISOString(),
+          sl: Number(pos.sl || 0) || undefined,
+          tp: Number(pos.tp || 0) || undefined,
+        };
+      });
 
       setOpenPositions(mappedPositions);
        setStructures(accountData.structures || {});
        setError(null);
 
-       // Update key level distance from backend data if available
+       // Update key level distance from brain calculation or backend data
         if (accountData.keyLevelInfo) {
           setKeyLevelDistance(
             accountData.keyLevelInfo.level,
             accountData.keyLevelInfo.distance,
             accountData.keyLevelInfo.type
+          );
+        } else if (primaryLevelLocal) {
+          setKeyLevelDistance(
+            primaryLevelLocal.price,
+            Math.abs(primaryLevelLocal.price - accountDataSafe.price),
+            primaryLevelLocal.type
           );
         }
 
@@ -565,7 +605,6 @@ export const usePolling = () => {
               const sweep = detectSweep(sortedChart, 10);
               const volumeExpansion = detectVolumeExpansion(sortedChart);
               
-              const allLevels = [...h4Levels, ...h1Levels, ...m15Levels];
               const supportLevels = allLevels.filter(l => l.type === 'SUPPORT');
               const resistanceLevels = allLevels.filter(l => l.type === 'RESISTANCE');
               const nearestSupportDistance = supportLevels.length > 0
@@ -979,7 +1018,12 @@ export const usePolling = () => {
                 lastTradeTimeRef.current = now;
                 addLog({ level: 'info', message: `🚀 Executing CLOSE ALL command`, timestamp: new Date().toISOString() });
                 setLastSignalReason('TIME_EXIT_CLOSE_ALL');
-                placeOrder({ symbol: accountDataSafe.eaSymbol || 'BTCUSD', type: 'CLOSE_ALL', lots: 0, sl: 0, tp: 0 })
+                placeOrder({ 
+                  symbol: accountDataSafe.eaSymbol || 'BTCUSD', 
+                  action: 'CLOSE_ALL',
+                  type: 'CLOSE_ALL', 
+                  lots: 0, sl: 0, tp: 0 
+                })
                   .then(() => addLog({ level: 'success', message: `✅ All trades closed successfully`, timestamp: new Date().toISOString() }))
                   .catch(e => addLog({ level: 'error', message: `❌ Close All failed: ${e.message}`, timestamp: new Date().toISOString() }));
               }

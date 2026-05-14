@@ -80,6 +80,7 @@ const DashboardScreen = () => {
     try {
       await placeOrder({
         symbol: selectedSymbol,
+        action: 'CLOSE_ALL',
         type: 'CLOSE_ALL',
         lots: 0,
         sl: 0,
