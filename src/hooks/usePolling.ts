@@ -79,6 +79,20 @@ export const usePolling = () => {
     }
 
     if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 20) {
+      // --- MULTI-TIMEFRAME ANALYSIS (Swing & Momentum) ---
+      const m15Chart: Candle[] = accountData.chart?.['M15'] || [];
+      const h1Chart: Candle[] = accountData.chart?.['H1'] || [];
+
+      const getTrend = (candles: Candle[]) => {
+        if (candles.length < 5) return 'NEUTRAL';
+        const last = candles[0];
+        const prev = candles[4]; // 5 candles ago
+        return last.close > prev.close ? 'BULL' : 'BEAR';
+      };
+
+      const m15Trend = getTrend(m15Chart);
+      const h1Trend = getTrend(h1Chart);
+
       // Sort chart: index 0 is CURRENT candle, index 1 is LAST CLOSED candle
       const sortedChart = [...m5Chart].sort((a, b) => b.x - a.x);
       const currentCandle = sortedChart[0]; 
@@ -92,7 +106,6 @@ export const usePolling = () => {
       const bodySize = Math.abs(lastClosed.close - lastClosed.open);
       const upperWick = lastClosed.high - Math.max(lastClosed.open, lastClosed.close);
       const lowerWick = Math.min(lastClosed.open, lastClosed.close) - lastClosed.low;
-      const totalRange = lastClosed.high - lastClosed.low;
 
       const isPinBarBullish = lowerWick > bodySize * 2 && upperWick < bodySize;
       const isPinBarBearish = upperWick > bodySize * 2 && lowerWick < bodySize;
@@ -111,8 +124,7 @@ export const usePolling = () => {
       const priceInBullFVG = isFVGBullish && price > sortedChart[3].high && price < sortedChart[1].low;
       const priceInBearFVG = isFVGBearish && price < sortedChart[3].low && price > sortedChart[1].high;
 
-      // --- ASIA RANGE & JUDAS SWING (Playbook v9) ---
-      // Asia Range: 00:00 - 06:00 UTC
+      // --- ASIA RANGE & JUDAS SWING ---
       const asiaHigh = Math.max(...sortedChart.filter(c => {
         const d = new Date(c.timestamp * 1000);
         return d.getUTCHours() >= 0 && d.getUTCHours() < 6;
@@ -122,68 +134,60 @@ export const usePolling = () => {
         return d.getUTCHours() >= 0 && d.getUTCHours() < 6;
       }).map(c => c.low));
       
-      const isJudasSwingBullish = hour >= 7 && hour <= 9 && sweptLow && price > asiaLow;
-      const isJudasSwingBearish = hour >= 7 && hour <= 9 && sweptHigh && price < asiaHigh;
-
-      // Time-of-Day Check (The Killzones)
+      // Time-of-Day Check
       const nowTime = new Date();
       const hour = nowTime.getUTCHours();
       const isKillzone = (hour >= 7 && hour <= 10) || (hour >= 13 && hour <= 16); 
       
+      const isJudasSwingBullish = hour >= 7 && hour <= 9 && sweptLow && price > asiaLow;
+      const isJudasSwingBearish = hour >= 7 && hour <= 9 && sweptHigh && price < asiaHigh;
+
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
       let statusMessage = "";
 
       if (!isKillzone) {
         statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
       } else {
-        // PRIORITY 1: JUDAS SWING (London Open Setup)
-        if (isJudasSwingBearish && isEngulfingBearish) {
+        // --- THE "SUPER SETUP" LOGIC (Diversity of Triggers) ---
+        
+        // SETUP 1: JUDAS SWING (London Open Reversal)
+        if (isJudasSwingBearish && (isEngulfingBearish || isPinBarBearish)) {
           signal = 'SELL';
-          statusMessage = "🎯 PLAYBOOK: Judas Swing (Asia High Sweep) + Bearish Engulfing!";
-        } else if (isJudasSwingBullish && isEngulfingBullish) {
+          statusMessage = "🎯 SUPER SETUP: Judas Swing + Candle Confirmation (Playbook v9)";
+        } else if (isJudasSwingBullish && (isEngulfingBullish || isPinBarBullish)) {
           signal = 'BUY';
-          statusMessage = "🎯 PLAYBOOK: Judas Swing (Asia Low Sweep) + Bullish Engulfing!";
+          statusMessage = "🎯 SUPER SETUP: Judas Swing + Candle Confirmation (Playbook v9)";
         }
-        // PRIORITY 2: LIQUIDITY SWEEP + CANDLE REJECTION (Killer Trader Entry)
-        else if (sweptHigh && (isPinBarBearish || isEngulfingBearish)) {
+        // SETUP 2: MULTI-TIMEFRAME MOMENTUM (Swing & Quantitative)
+        else if (h1Trend === 'BULL' && m15Trend === 'BULL' && isBullishTrend && isEngulfingBullish) {
+          signal = 'BUY';
+          statusMessage = "🎯 SUPER SETUP: Triple Timeframe Momentum Alignment (Swing Trading)";
+        } else if (h1Trend === 'BEAR' && m15Trend === 'BEAR' && isBearishTrend && isEngulfingBearish) {
           signal = 'SELL';
-          statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept High + Bearish Pattern Detected!";
-        } else if (sweptLow && (isPinBarBullish || isEngulfingBullish)) {
+          statusMessage = "🎯 SUPER SETUP: Triple Timeframe Momentum Alignment (Swing Trading)";
+        }
+        // SETUP 3: FVG RETEST (Smart Money Entry)
+        else if (priceInBullFVG && isPinBarBullish) {
           signal = 'BUY';
-          statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept Low + Bullish Pattern Detected!";
-        } 
-        // PRIORITY 3: FVG RETEST + MOMENTUM
-        else if (priceInBullFVG && isEngulfingBullish) {
-          signal = 'BUY';
-          statusMessage = "🎯 KILLER SIGNAL: Bullish FVG Retest + Engulfing Confirmation!";
-        } else if (priceInBearFVG && isEngulfingBearish) {
+          statusMessage = "🎯 SUPER SETUP: FVG Retest + Pin Bar Rejection (SMC)";
+        } else if (priceInBearFVG && isPinBarBearish) {
           signal = 'SELL';
-          statusMessage = "🎯 KILLER SIGNAL: Bearish FVG Retest + Engulfing Confirmation!";
+          statusMessage = "🎯 SUPER SETUP: FVG Retest + Pin Bar Rejection (SMC)";
         }
-        // PRIORITY 4: TREND + PULLBACK + CONFIRMATION
-        else if (isBullishTrend) {
-          const isLastBullish = lastClosed.close > lastClosed.open;
-          const isCurrentMovingUp = price > currentCandle.open;
-          
-          if (!isLastBullish) {
-            statusMessage = "🔍 Bull Trend: Pullback detected. Waiting for Bullish pattern...";
-          } else if (!isCurrentMovingUp) {
-            statusMessage = `🔍 Bull Trend: Last candle Bullish. Waiting for breakout above open (${currentCandle.open.toFixed(2)})...`;
-          } else {
-            signal = 'BUY';
-          }
-        } else if (isBearishTrend) {
-          const isLastBearish = lastClosed.close < lastClosed.open;
-          const isCurrentMovingDown = price < currentCandle.open;
-          
-          if (!isLastBearish) {
-            statusMessage = "🔍 Bear Trend: Pullback detected. Waiting for Bearish pattern...";
-          } else if (!isCurrentMovingDown) {
-            statusMessage = `🔍 Bear Trend: Last candle Bearish. Waiting for breakout below open (${currentCandle.open.toFixed(2)})...`;
-          } else {
-            signal = 'SELL';
-          }
+        // SETUP 4: LIQUIDITY SWEEP REVERSAL
+        else if (sweptHigh && isEngulfingBearish) {
+          signal = 'SELL';
+          statusMessage = "🎯 SUPER SETUP: Liquidity Sweep + Engulfing (Quantitative)";
+        } else if (sweptLow && isEngulfingBullish) {
+          signal = 'BUY';
+          statusMessage = "🎯 SUPER SETUP: Liquidity Sweep + Engulfing (Quantitative)";
         }
+        // DEFAULT: TREND FOLLOW
+         else if (isBullishTrend && lastClosed.close > lastClosed.open && price > currentCandle.open) {
+           statusMessage = "🔍 Trend: Bullish. Waiting for Super Setup confirmation...";
+         } else if (isBearishTrend && lastClosed.close < lastClosed.open && price < currentCandle.open) {
+           statusMessage = "🔍 Trend: Bearish. Waiting for Super Setup confirmation...";
+         }
       }
 
       // Log Status every 30 seconds

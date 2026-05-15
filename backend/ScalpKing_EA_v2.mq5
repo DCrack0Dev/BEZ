@@ -167,6 +167,47 @@ void SendHeartbeat()
    json += "\"atr14\":" + DoubleToString(atr[0], _Digits) + ",";
    json += "\"isPaused\":" + (isPaused ? "true" : "false") + ",";
    
+   // Multi-Timeframe Chart Data
+   json += "\"chart\":{";
+   
+   // M5
+   json += "\"M5\":[";
+   MqlRates ratesM5[];
+   ArraySetAsSeries(ratesM5, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 100, ratesM5) > 0) {
+      for(int i=0; i<100; i++) {
+         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesM5[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM5[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM5[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM5[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesM5[i].time) + "}";
+         if(i < 99) json += ",";
+      }
+   }
+   json += "],";
+
+   // M15
+   json += "\"M15\":[";
+   MqlRates ratesM15[];
+   ArraySetAsSeries(ratesM15, true);
+   if(CopyRates(_Symbol, PERIOD_M15, 0, 100, ratesM15) > 0) {
+      for(int i=0; i<100; i++) {
+         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesM15[i].time) + "}";
+         if(i < 99) json += ",";
+      }
+   }
+   json += "],";
+
+   // H1
+   json += "\"H1\":[";
+   MqlRates ratesH1[];
+   ArraySetAsSeries(ratesH1, true);
+   if(CopyRates(_Symbol, PERIOD_H1, 0, 100, ratesH1) > 0) {
+      for(int i=0; i<100; i++) {
+         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesH1[i].time) + "}";
+         if(i < 99) json += ",";
+      }
+   }
+   json += "]";
+   
+   json += "},";
+   
    // Positions
    json += "\"openPositions\":[";
    bool first = true;
