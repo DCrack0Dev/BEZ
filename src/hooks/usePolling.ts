@@ -35,11 +35,12 @@ export const usePolling = () => {
   
   const socketRef = useRef<Socket | null>(null);
   const lastTradeTimeRef = useRef<number>(0);
+  const lastLogTimeRef = useRef<number>(0);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
 
   // Initialize WebSocket for real-time signals
   useEffect(() => {
-    const url = serverUrl || 'http://192.168.8.151:5000';
+    const url = serverUrl || 'https://liquibot-back.onrender.com';
     socketRef.current = io(url);
 
     socketRef.current.on('EA_HEARTBEAT', (data) => {
@@ -76,41 +77,59 @@ export const usePolling = () => {
       m5Chart = chart;
     }
 
-    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 2 && totalOpen < dynamicMaxTrades) {
-      // Sort chart to ensure index 0 is the most recent closed candle
+    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 2) {
+      // Sort chart: index 0 is CURRENT candle, index 1 is LAST CLOSED candle
       const sortedChart = [...m5Chart].sort((a, b) => b.x - a.x);
-      const c1 = sortedChart[0]; 
+      const currentCandle = sortedChart[0]; 
+      const lastClosed = sortedChart[1];
       
       const isBullishTrend = fastEMA > slowEMA;
       const isBearishTrend = fastEMA < slowEMA;
       
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
+      let statusMessage = "";
 
       // Pullback / Retracement Filter Logic:
       if (isBullishTrend) {
-        const isC1Bullish = c1.close > c1.open;
-        const breakingOut = price > c1.high;
+        const isLastBullish = lastClosed.close > lastClosed.open;
+        const isCurrentMovingUp = price > currentCandle.open;
         
-        // Only buy if trend is bull AND last candle was bullish (pullback ended) AND price is breaking out
-        if (isC1Bullish && breakingOut) {
+        if (!isLastBullish) {
+          statusMessage = "🔍 Bull Trend: Last M5 candle was Bearish (Pullback). Waiting for a Bullish candle close...";
+        } else if (!isCurrentMovingUp) {
+          statusMessage = `🔍 Bull Trend: Last candle Bullish. Waiting for current price to break above open (${currentCandle.open.toFixed(2)})...`;
+        } else {
           signal = 'BUY';
         }
       } else if (isBearishTrend) {
-        const isC1Bearish = c1.close < c1.open;
-        const breakingOut = price < c1.low;
+        const isLastBearish = lastClosed.close < lastClosed.open;
+        const isCurrentMovingDown = price < currentCandle.open;
         
-        // Only sell if trend is bear AND last candle was bearish (pullback ended) AND price is breaking out
-        if (isC1Bearish && breakingOut) {
+        if (!isLastBearish) {
+          statusMessage = "🔍 Bear Trend: Last M5 candle was Bullish (Pullback). Waiting for a Bearish candle close...";
+        } else if (!isCurrentMovingDown) {
+          statusMessage = `🔍 Bear Trend: Last candle Bearish. Waiting for current price to break below open (${currentCandle.open.toFixed(2)})...`;
+        } else {
           signal = 'SELL';
         }
       }
 
-      // Throttle trades to max 1 every 10 seconds
+      // Log Status every 30 seconds
       const now = Date.now();
-      if (signal !== 'NONE' && (now - lastTradeTimeRef.current > 10000)) {
-        lastTradeTimeRef.current = now;
+      if (statusMessage && (now - lastLogTimeRef.current > 30000)) {
+        lastLogTimeRef.current = now;
         addLog({
           level: 'info',
+          message: statusMessage,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Execute Trade
+      if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current > 10000)) {
+        lastTradeTimeRef.current = now;
+        addLog({
+          level: 'success',
           message: `🚀 APP BRAIN SIGNAL: ${signal} | Trend: ${isBullishTrend ? 'BULL' : 'BEAR'} | Open: ${totalOpen}/${dynamicMaxTrades}`,
           timestamp: new Date().toISOString()
         });
@@ -122,6 +141,12 @@ export const usePolling = () => {
           sl: 0,   // EA handles SL
           tp: 0
         }).catch(e => console.error("App brain trade execution failed:", e));
+      } else if (signal !== 'NONE' && totalOpen >= dynamicMaxTrades && (now - lastLogTimeRef.current > 60000)) {
+        addLog({
+          level: 'warning',
+          message: `⚪ Signal ${signal} detected, but Max Trades reached (${totalOpen}/${dynamicMaxTrades})`,
+          timestamp: new Date().toISOString()
+        });
       }
     }
   }, [botSettings, addLog]);
@@ -141,6 +166,10 @@ export const usePolling = () => {
         equity: Number(accountData.equity || 0),
         balance: Number(accountData.balance || 0),
         pnlToday: Number(accountData.pnl_today || accountData.pnlToday || 0),
+        fastEMA: Number(accountData.ema20 || 0),
+        slowEMA: Number(accountData.ema50 || 0),
+        atr: Number(accountData.atr14 || 0),
+        spread: Number(accountData.spread || 0),
       });
 
       setAccountPrice(Number(accountData.price || 0));
