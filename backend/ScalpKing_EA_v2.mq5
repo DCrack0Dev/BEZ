@@ -24,8 +24,8 @@ input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
 input bool     UseTrailingStop   = true;
-input int      TrailingStart     = 100; // Points in profit before trailing starts
-input int      TrailingStep      = 50;  // Points to move SL by
+input int      TrailingStart     = 1000; // 100 pips (1000 points)
+input int      TrailingStop      = 500;  // 50 pips (500 points)
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -103,8 +103,8 @@ void OnTick()
             {
                if(bid - posInfo.PriceOpen() > TrailingStart * _Point)
                {
-                  double newSL = bid - TrailingStep * _Point;
-                  if(newSL > posInfo.StopLoss() + TrailingStep * _Point || posInfo.StopLoss() == 0)
+                  double newSL = posInfo.PriceOpen() + TrailingStop * _Point;
+                  if(posInfo.StopLoss() < newSL)
                   {
                      trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
                   }
@@ -114,8 +114,8 @@ void OnTick()
             {
                if(posInfo.PriceOpen() - ask > TrailingStart * _Point)
                {
-                  double newSL = ask + TrailingStep * _Point;
-                  if(newSL < posInfo.StopLoss() - TrailingStep * _Point || posInfo.StopLoss() == 0)
+                  double newSL = posInfo.PriceOpen() - TrailingStop * _Point;
+                  if(posInfo.StopLoss() > newSL || posInfo.StopLoss() == 0)
                   {
                      trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
                   }
@@ -167,6 +167,32 @@ void SendHeartbeat()
          json += "\"sl\":" + DoubleToString(posInfo.StopLoss(), _Digits) + ",";
          json += "\"tp\":" + DoubleToString(posInfo.TakeProfit(), _Digits) + "}";
          first = false;
+      }
+   }
+   json += "],";
+   
+   // Closed Trades (History)
+   json += "\"closedTrades\":[";
+   if(HistorySelect(TimeCurrent()-86400, TimeCurrent()))
+   {
+      int totalHistory = HistoryDealsTotal();
+      int count = 0;
+      for(int i=totalHistory-1; i>=0 && count < 20; i--)
+      {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber)
+         {
+            long type = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+            if(type == DEAL_ENTRY_OUT)
+            {
+               if(count > 0) json += ",";
+               json += "{\"ticket\":" + IntegerToString(HistoryDealGetInteger(ticket, DEAL_ORDER)) + ",";
+               json += "\"symbol\":\"" + _Symbol + "\",";
+               json += "\"profit\":" + DoubleToString(HistoryDealGetDouble(ticket, DEAL_PROFIT), 2) + ",";
+               json += "\"time\":" + IntegerToString(HistoryDealGetInteger(ticket, DEAL_TIME)) + "}";
+               count++;
+            }
+         }
       }
    }
    json += "],";

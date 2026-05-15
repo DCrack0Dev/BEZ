@@ -125,23 +125,43 @@ export const usePolling = () => {
         });
       }
 
-      // Execute Trade
-      if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current > 30000)) {
-        lastTradeTimeRef.current = now;
-        addLog({
-          level: 'success',
-          message: `🚀 APP BRAIN SIGNAL: ${signal} | Trend: ${isBullishTrend ? 'BULL' : 'BEAR'} | Open: ${totalOpen}/${dynamicMaxTrades}`,
-          timestamp: new Date().toISOString()
+      // Execute Trade Logic (Scale-In Aware)
+      if (signal !== 'NONE' && (now - lastTradeTimeRef.current > 30000)) {
+        const trailingPositions = openOrders.filter((p: any) => {
+          if (p.type === 'BUY') return (price - p.price) > 1000 * (accountData.point || 0.01);
+          if (p.type === 'SELL') return (p.price - price) > 1000 * (accountData.point || 0.01);
+          return false;
         });
 
-        placeOrder({
-          symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
-          type: signal,
-          lots: 0.01, // App explicitly sends 0.01
-          sl: 0,   // EA handles SL
-          tp: 0
-        }).catch(e => console.error("App brain trade execution failed:", e));
-      } else if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current <= 30000)) {
+        const canOpenMore = totalOpen === 0 || trailingPositions.length === totalOpen;
+
+        if (canOpenMore) {
+          lastTradeTimeRef.current = now;
+          addLog({
+            level: 'success',
+            message: `🚀 ${totalOpen > 0 ? 'SCALE-IN' : 'ENTRY'} SIGNAL: ${signal} | Trend: ${isBullishTrend ? 'BULL' : 'BEAR'} | Open: ${totalOpen}/${dynamicMaxTrades}`,
+            timestamp: new Date().toISOString()
+          });
+
+          placeOrder({
+            symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
+            type: signal,
+            lots: 0.01,
+            sl: 0,
+            tp: 0
+          }).catch(e => console.error("App brain trade execution failed:", e));
+        } else {
+          // Log why we aren't opening more
+          if (now - lastLogTimeRef.current > 30000) {
+            lastLogTimeRef.current = now;
+            addLog({
+              level: 'info',
+              message: `🔍 Waiting for existing trades to hit 100 pips profit before scaling in...`,
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
+      } else if (signal !== 'NONE' && (now - lastTradeTimeRef.current <= 30000)) {
         // Just log that we are waiting to stagger
         if (now - lastLogTimeRef.current > 30000) {
           addLog({

@@ -38,6 +38,7 @@ let accountState: any = {
 };
 
 let pendingCommands: any[] = [];
+let closedTrades: any[] = [];
 
 // --- LOGGING HELPER ---
 const log = (msg: string) => {
@@ -82,6 +83,18 @@ app.post('/api/ea/update', (req, res) => {
     return res.status(400).json({ error: 'Missing symbol' });
   }
 
+  // Handle Closed Trades Sync
+  if (data.closedTrades && Array.isArray(data.closedTrades)) {
+    data.closedTrades.forEach((t: any) => {
+      if (!closedTrades.find(existing => existing.ticket === t.ticket)) {
+        closedTrades.unshift(t);
+        log(`💰 Closed Trade Recorded: #${t.ticket} | Profit: ${t.profit}`);
+      }
+    });
+    // Keep only last 100 closed trades in memory
+    if (closedTrades.length > 100) closedTrades = closedTrades.slice(0, 100);
+  }
+
   // Update State
   accountState = {
     ...accountState,
@@ -115,9 +128,7 @@ app.get('/api/account', (req, res) => {
 
 // App Closed Trades (Relay or Local Store)
 app.get('/api/orders/closed', (req, res) => {
-  const { filter } = req.query;
-  // For now, return empty or mock data if not implementing local DB
-  res.json([]);
+  res.json(closedTrades);
 });
 
 // App Order Relay (Execution Brain -> EA)
