@@ -48,6 +48,22 @@ export const usePolling = () => {
       if (data.price) {
         setAccountPrice(Number(data.price));
       }
+      
+      // Update full account state from heartbeat to ensure status is live
+      setAccount({
+        ...data,
+        eaConnected: data.ea_connected,
+        eaSymbol: data.symbol || 'XAUUSD',
+        price: Number(data.price || 0),
+        equity: Number(data.equity || 0),
+        balance: Number(data.balance || 0),
+        pnlToday: Number(data.pnl_today || data.pnlToday || 0),
+        fastEMA: Number(data.ema20 || 0),
+        slowEMA: Number(data.ema50 || 0),
+        atr: Number(data.atr14 || 0),
+        spread: Number(data.spread || 0),
+      });
+
       handleAppBrainAnalysis(data);
     });
 

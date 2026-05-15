@@ -229,7 +229,7 @@ void SendHeartbeat()
    json += "],";
    
    // Closed Trades (History)
-   json += "],\"closedTrades\":[";
+   json += "\"closedTrades\":[";
    if(HistorySelect(TimeCurrent()-86400, TimeCurrent()))
    {
       int totalHistory = HistoryDealsTotal();

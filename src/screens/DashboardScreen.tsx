@@ -124,7 +124,27 @@ const DashboardScreen = () => {
             />
 
             {/* Quick Trade Section */}
-            <QuickTrade symbol={selectedSymbol} />
+            <View style={styles.quickTradeSection}>
+              <Text style={styles.sectionTitle}>Quick Trade</Text>
+              <View style={styles.tradeButtons}>
+                <TradeButton 
+                  title="BUY" 
+                  type="BUY" 
+                  onPress={() => handleTradePress('BUY')}
+                  disabled={!account.eaConnected}
+                />
+                <TradeButton 
+                  title="SELL" 
+                  type="SELL" 
+                  onPress={() => handleTradePress('SELL')}
+                  disabled={!account.eaConnected}
+                />
+              </View>
+              <View style={styles.tradeInfo}>
+                <Text style={TYPOGRAPHY.caption}>Symbol: {selectedSymbol}</Text>
+                <Text style={TYPOGRAPHY.caption}>Lots: {botSettings.defaultLots}</Text>
+              </View>
+            </View>
 
             <View style={styles.debugPanel}>
               <Text style={styles.debugTitle}>Debug Panel</Text>
@@ -206,7 +226,25 @@ const styles = StyleSheet.create({
     ...TYPOGRAPHY.h3,
     marginBottom: SPACING.m,
   },
-  tradePanel: {
+  quickTradeSection: {
+    paddingHorizontal: SPACING.m,
+    marginBottom: SPACING.l,
+  },
+  tradeButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: SPACING.s,
+  },
+  tradeInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.card,
+    padding: SPACING.s,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  debugPanel: {
     marginBottom: SPACING.l,
   },
   tradeButtons: {
