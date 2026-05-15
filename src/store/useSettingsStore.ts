@@ -8,6 +8,7 @@ interface BotSettings {
   maxOpenTrades: number;
   trailingStopEnabled: boolean;
   sessionFilterEnabled: boolean;
+  playbookTimeFilter: boolean;
   autoTradingEnabled: boolean;
   executionMode: 'app' | 'backend';
 }
@@ -40,6 +41,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   maxOpenTrades: 5,
   trailingStopEnabled: false,
   sessionFilterEnabled: true,
+  playbookTimeFilter: false,
   autoTradingEnabled: false,
   executionMode: 'app',
 };

@@ -161,7 +161,9 @@ export const usePolling = () => {
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
       let statusMessage = "";
 
-      if (!isKillzone) {
+      const timeAllowed = !botSettings.playbookTimeFilter || isKillzone;
+
+      if (!timeAllowed) {
         statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
       } else {
         // --- THE "SUPER SETUP" LOGIC (Diversity of Triggers) ---

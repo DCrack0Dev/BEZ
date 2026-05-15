@@ -96,6 +96,15 @@ const SettingsScreen = () => {
               thumbColor={botSettings.sessionFilterEnabled ? COLORS.primary : COLORS.textSecondary}
             />
           </View>
+          <View style={styles.toggleRow}>
+            <Text style={TYPOGRAPHY.body}>Playbook Time Filter (Killzones)</Text>
+            <Switch
+              value={botSettings.playbookTimeFilter}
+              onValueChange={(val) => updateBotSettings({ playbookTimeFilter: val })}
+              trackColor={{ false: COLORS.border, true: COLORS.primary + '50' }}
+              thumbColor={botSettings.playbookTimeFilter ? COLORS.primary : COLORS.textSecondary}
+            />
+          </View>
         </View>
       </View>
 
