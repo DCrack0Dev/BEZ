@@ -28,6 +28,7 @@ export const usePolling = () => {
     setOpenPositions, 
     setError, 
     setLoading, 
+    setLastSignalReason
   } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { addLog } = useLogStore();
@@ -110,6 +111,20 @@ export const usePolling = () => {
       const priceInBullFVG = isFVGBullish && price > sortedChart[3].high && price < sortedChart[1].low;
       const priceInBearFVG = isFVGBearish && price < sortedChart[3].low && price > sortedChart[1].high;
 
+      // --- ASIA RANGE & JUDAS SWING (Playbook v9) ---
+      // Asia Range: 00:00 - 06:00 UTC
+      const asiaHigh = Math.max(...sortedChart.filter(c => {
+        const d = new Date(c.timestamp * 1000);
+        return d.getUTCHours() >= 0 && d.getUTCHours() < 6;
+      }).map(c => c.high));
+      const asiaLow = Math.min(...sortedChart.filter(c => {
+        const d = new Date(c.timestamp * 1000);
+        return d.getUTCHours() >= 0 && d.getUTCHours() < 6;
+      }).map(c => c.low));
+      
+      const isJudasSwingBullish = hour >= 7 && hour <= 9 && sweptLow && price > asiaLow;
+      const isJudasSwingBearish = hour >= 7 && hour <= 9 && sweptHigh && price < asiaHigh;
+
       // Time-of-Day Check (The Killzones)
       const nowTime = new Date();
       const hour = nowTime.getUTCHours();
@@ -121,15 +136,23 @@ export const usePolling = () => {
       if (!isKillzone) {
         statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
       } else {
-        // PRIORITY 1: LIQUIDITY SWEEP + CANDLE REJECTION (Killer Trader Entry)
-        if (sweptHigh && (isPinBarBearish || isEngulfingBearish)) {
+        // PRIORITY 1: JUDAS SWING (London Open Setup)
+        if (isJudasSwingBearish && isEngulfingBearish) {
+          signal = 'SELL';
+          statusMessage = "🎯 PLAYBOOK: Judas Swing (Asia High Sweep) + Bearish Engulfing!";
+        } else if (isJudasSwingBullish && isEngulfingBullish) {
+          signal = 'BUY';
+          statusMessage = "🎯 PLAYBOOK: Judas Swing (Asia Low Sweep) + Bullish Engulfing!";
+        }
+        // PRIORITY 2: LIQUIDITY SWEEP + CANDLE REJECTION (Killer Trader Entry)
+        else if (sweptHigh && (isPinBarBearish || isEngulfingBearish)) {
           signal = 'SELL';
           statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept High + Bearish Pattern Detected!";
         } else if (sweptLow && (isPinBarBullish || isEngulfingBullish)) {
           signal = 'BUY';
           statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept Low + Bullish Pattern Detected!";
         } 
-        // PRIORITY 2: FVG RETEST + MOMENTUM
+        // PRIORITY 3: FVG RETEST + MOMENTUM
         else if (priceInBullFVG && isEngulfingBullish) {
           signal = 'BUY';
           statusMessage = "🎯 KILLER SIGNAL: Bullish FVG Retest + Engulfing Confirmation!";
@@ -137,7 +160,7 @@ export const usePolling = () => {
           signal = 'SELL';
           statusMessage = "🎯 KILLER SIGNAL: Bearish FVG Retest + Engulfing Confirmation!";
         }
-        // PRIORITY 3: TREND + PULLBACK + CONFIRMATION
+        // PRIORITY 4: TREND + PULLBACK + CONFIRMATION
         else if (isBullishTrend) {
           const isLastBullish = lastClosed.close > lastClosed.open;
           const isCurrentMovingUp = price > currentCandle.open;
@@ -165,13 +188,16 @@ export const usePolling = () => {
 
       // Log Status every 30 seconds
       const now = Date.now();
-      if (statusMessage && (now - lastLogTimeRef.current > 30000)) {
-        lastLogTimeRef.current = now;
-        addLog({
-          level: 'info',
-          message: statusMessage,
-          timestamp: new Date().toISOString()
-        });
+      if (statusMessage) {
+        setLastSignalReason(statusMessage);
+        if (now - lastLogTimeRef.current > 30000) {
+          lastLogTimeRef.current = now;
+          addLog({
+            level: 'info',
+            message: statusMessage,
+            timestamp: new Date().toISOString()
+          });
+        }
       }
 
       // Execute Trade Logic (Monetary Scale-In Aware)

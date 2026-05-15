@@ -30,6 +30,9 @@ input double   TrailTrigger2     = 2.00; // Level 2: $2.00 Profit
 input double   TrailLock2        = 0.40; // Lock $0.40
 input double   TrailTrigger3     = 3.00; // Level 3: $3.00 Profit
 input double   TrailLock3        = 0.60; // Lock $0.60
+input bool     DrawFVG           = true;
+input color    BullFVGColor      = clrLightBlue;
+input color    BearFVGColor      = clrLightPink;
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -92,6 +95,9 @@ void OnTimer()
 void OnTick()
 {
    if(!licenseValid) return;
+   
+   // --- Draw FVGs and identify them ---
+   if(DrawFVG) ManageFVGs();
    
    // --- Monetary Trailing Stop ($1 -> $0.20, $2 -> $0.40) ---
    if(UseMonetaryTrail)
@@ -294,6 +300,46 @@ void CloseAllTrades()
       }
    }
    Print("✅ All Trades Closed");
+}
+
+//+------------------------------------------------------------------+
+//| FVG MANAGEMENT & DRAWING                                         |
+//+------------------------------------------------------------------+
+void ManageFVGs()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 50, rates) < 10) return;
+
+   // ObjectsDeleteAll(0, "FVG_"); // We'll manage existing ones instead of deleting all
+   
+   for(int i=1; i < 48; i++)
+   {
+      // Bullish FVG: Low of candle 1 > High of candle 3
+      if(rates[i].low > rates[i+2].high + 2 * _Point)
+      {
+         string name = "FVG_Bull_" + TimeToString(rates[i+1].time);
+         if(ObjectFind(0, name) < 0)
+         {
+            ObjectCreate(0, name, OBJ_RECTANGLE, 0, rates[i+1].time, rates[i+2].high, rates[i].time, rates[i].low);
+            ObjectSetInteger(0, name, OBJPROP_COLOR, BullFVGColor);
+            ObjectSetInteger(0, name, OBJPROP_FILL, true);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+         }
+      }
+      // Bearish FVG: High of candle 1 < Low of candle 3
+      else if(rates[i].high < rates[i+2].low - 2 * _Point)
+      {
+         string name = "FVG_Bear_" + TimeToString(rates[i+1].time);
+         if(ObjectFind(0, name) < 0)
+         {
+            ObjectCreate(0, name, OBJ_RECTANGLE, 0, rates[i+1].time, rates[i+2].low, rates[i].time, rates[i].high);
+            ObjectSetInteger(0, name, OBJPROP_COLOR, BearFVGColor);
+            ObjectSetInteger(0, name, OBJPROP_FILL, true);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+         }
+      }
+   }
 }
 
 double CalculateLotSize()
