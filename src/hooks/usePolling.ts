@@ -77,46 +77,89 @@ export const usePolling = () => {
       m5Chart = chart;
     }
 
-    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 2) {
+    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 20) {
       // Sort chart: index 0 is CURRENT candle, index 1 is LAST CLOSED candle
       const sortedChart = [...m5Chart].sort((a, b) => b.x - a.x);
       const currentCandle = sortedChart[0]; 
       const lastClosed = sortedChart[1];
+      const prevClosed = sortedChart[2];
       
       const isBullishTrend = fastEMA > slowEMA;
       const isBearishTrend = fastEMA < slowEMA;
 
+      // --- CANDLESTICK BIBLE PATTERNS ---
+      const bodySize = Math.abs(lastClosed.close - lastClosed.open);
+      const upperWick = lastClosed.high - Math.max(lastClosed.open, lastClosed.close);
+      const lowerWick = Math.min(lastClosed.open, lastClosed.close) - lastClosed.low;
+      const totalRange = lastClosed.high - lastClosed.low;
+
+      const isPinBarBullish = lowerWick > bodySize * 2 && upperWick < bodySize;
+      const isPinBarBearish = upperWick > bodySize * 2 && lowerWick < bodySize;
+      const isEngulfingBullish = lastClosed.close > lastClosed.open && lastClosed.close > prevClosed.high && lastClosed.open < prevClosed.low;
+      const isEngulfingBearish = lastClosed.close < lastClosed.open && lastClosed.close < prevClosed.low && lastClosed.open > prevClosed.high;
+
+      // --- LIQUIDITY SWEEP DETECTION (Lookback 20) ---
+      const recentHigh = Math.max(...sortedChart.slice(2, 20).map(c => c.high));
+      const recentLow = Math.min(...sortedChart.slice(2, 20).map(c => c.low));
+      const sweptHigh = currentCandle.high > recentHigh && price < recentHigh;
+      const sweptLow = currentCandle.low < recentLow && price > recentLow;
+
+      // --- FVG (FAIR VALUE GAP) DETECTION ---
+      const isFVGBullish = sortedChart[1].low > sortedChart[3].high;
+      const isFVGBearish = sortedChart[1].high < sortedChart[3].low;
+      const priceInBullFVG = isFVGBullish && price > sortedChart[3].high && price < sortedChart[1].low;
+      const priceInBearFVG = isFVGBearish && price < sortedChart[3].low && price > sortedChart[1].high;
+
       // Time-of-Day Check (The Killzones)
       const nowTime = new Date();
       const hour = nowTime.getUTCHours();
-      const isKillzone = (hour >= 7 && hour <= 10) || (hour >= 13 && hour <= 16); // London & NY Killzones in UTC
+      const isKillzone = (hour >= 7 && hour <= 10) || (hour >= 13 && hour <= 16); 
       
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
       let statusMessage = "";
 
       if (!isKillzone) {
         statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
-      } else if (isBullishTrend) {
-        const isLastBullish = lastClosed.close > lastClosed.open;
-        const isCurrentMovingUp = price > currentCandle.open;
-        
-        if (!isLastBullish) {
-          statusMessage = "🔍 Bull Trend: Last M5 candle was Bearish (Pullback). Waiting for a Bullish candle close...";
-        } else if (!isCurrentMovingUp) {
-          statusMessage = `🔍 Bull Trend: Last candle Bullish. Waiting for current price to break above open (${currentCandle.open.toFixed(2)})...`;
-        } else {
-          signal = 'BUY';
-        }
-      } else if (isBearishTrend) {
-        const isLastBearish = lastClosed.close < lastClosed.open;
-        const isCurrentMovingDown = price < currentCandle.open;
-        
-        if (!isLastBearish) {
-          statusMessage = "🔍 Bear Trend: Last M5 candle was Bullish (Pullback). Waiting for a Bearish candle close...";
-        } else if (!isCurrentMovingDown) {
-          statusMessage = `🔍 Bear Trend: Last candle Bearish. Waiting for current price to break below open (${currentCandle.open.toFixed(2)})...`;
-        } else {
+      } else {
+        // PRIORITY 1: LIQUIDITY SWEEP + CANDLE REJECTION (Killer Trader Entry)
+        if (sweptHigh && (isPinBarBearish || isEngulfingBearish)) {
           signal = 'SELL';
+          statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept High + Bearish Pattern Detected!";
+        } else if (sweptLow && (isPinBarBullish || isEngulfingBullish)) {
+          signal = 'BUY';
+          statusMessage = "🎯 KILLER SIGNAL: Liquidity Swept Low + Bullish Pattern Detected!";
+        } 
+        // PRIORITY 2: FVG RETEST + MOMENTUM
+        else if (priceInBullFVG && isEngulfingBullish) {
+          signal = 'BUY';
+          statusMessage = "🎯 KILLER SIGNAL: Bullish FVG Retest + Engulfing Confirmation!";
+        } else if (priceInBearFVG && isEngulfingBearish) {
+          signal = 'SELL';
+          statusMessage = "🎯 KILLER SIGNAL: Bearish FVG Retest + Engulfing Confirmation!";
+        }
+        // PRIORITY 3: TREND + PULLBACK + CONFIRMATION
+        else if (isBullishTrend) {
+          const isLastBullish = lastClosed.close > lastClosed.open;
+          const isCurrentMovingUp = price > currentCandle.open;
+          
+          if (!isLastBullish) {
+            statusMessage = "🔍 Bull Trend: Pullback detected. Waiting for Bullish pattern...";
+          } else if (!isCurrentMovingUp) {
+            statusMessage = `🔍 Bull Trend: Last candle Bullish. Waiting for breakout above open (${currentCandle.open.toFixed(2)})...`;
+          } else {
+            signal = 'BUY';
+          }
+        } else if (isBearishTrend) {
+          const isLastBearish = lastClosed.close < lastClosed.open;
+          const isCurrentMovingDown = price < currentCandle.open;
+          
+          if (!isLastBearish) {
+            statusMessage = "🔍 Bear Trend: Pullback detected. Waiting for Bearish pattern...";
+          } else if (!isCurrentMovingDown) {
+            statusMessage = `🔍 Bear Trend: Last candle Bearish. Waiting for breakout below open (${currentCandle.open.toFixed(2)})...`;
+          } else {
+            signal = 'SELL';
+          }
         }
       }
 
