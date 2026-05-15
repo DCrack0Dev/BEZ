@@ -23,9 +23,11 @@ input int      HeartbeatInterval = 1; // seconds
 input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
-input bool     UseTrailingStop   = true;
-input int      TrailingStart     = 1000; // 100 pips (1000 points)
-input int      TrailingStop      = 500;  // 50 pips (500 points)
+input bool     UseMonetaryTrail  = true;
+input double   TrailTrigger1     = 1.00; // $1.00 Profit
+input double   TrailLock1        = 0.20; // Lock $0.20
+input double   TrailTrigger2     = 2.00; // $2.00 Profit
+input double   TrailLock2        = 0.40; // Lock $0.40
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -89,33 +91,38 @@ void OnTick()
 {
    if(!licenseValid) return;
    
-   // --- Profit Protection: Trailing Stop ---
-   if(UseTrailingStop)
+   // --- Monetary Trailing Stop ($1 -> $0.20, $2 -> $0.40) ---
+   if(UseMonetaryTrail)
    {
       for(int i=PositionsTotal()-1; i>=0; i--)
       {
          if(posInfo.SelectByIndex(i) && posInfo.Symbol() == _Symbol && posInfo.Magic() == MagicNumber)
          {
+            double profit = posInfo.Profit();
             double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
             
-            if(posInfo.PositionType() == POSITION_TYPE_BUY)
+            double targetLock = 0;
+            if(profit >= TrailTrigger2) targetLock = TrailLock2;
+            else if(profit >= TrailTrigger1) targetLock = TrailLock1;
+            
+            if(targetLock > 0)
             {
-               if(bid - posInfo.PriceOpen() > TrailingStart * _Point)
+               double lockPoints = targetLock / (FixedLotSize * (SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE) / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE)));
+               
+               if(posInfo.PositionType() == POSITION_TYPE_BUY)
                {
-                  double newSL = posInfo.PriceOpen() + TrailingStop * _Point;
-                  if(posInfo.StopLoss() < newSL)
+                  double newSL = posInfo.PriceOpen() + lockPoints * point;
+                  if(posInfo.StopLoss() < newSL - 5 * point) // Small buffer
                   {
                      trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
                   }
                }
-            }
-            else if(posInfo.PositionType() == POSITION_TYPE_SELL)
-            {
-               if(posInfo.PriceOpen() - ask > TrailingStart * _Point)
+               else if(posInfo.PositionType() == POSITION_TYPE_SELL)
                {
-                  double newSL = posInfo.PriceOpen() - TrailingStop * _Point;
-                  if(posInfo.StopLoss() > newSL || posInfo.StopLoss() == 0)
+                  double newSL = posInfo.PriceOpen() - lockPoints * point;
+                  if(posInfo.StopLoss() > newSL + 5 * point || posInfo.StopLoss() == 0)
                   {
                      trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
                   }

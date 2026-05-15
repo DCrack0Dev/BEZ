@@ -125,38 +125,50 @@ export const usePolling = () => {
         });
       }
 
-      // Execute Trade Logic (Scale-In Aware)
+      // Execute Trade Logic (Monetary Scale-In Aware)
       if (signal !== 'NONE' && (now - lastTradeTimeRef.current > 30000)) {
-        const trailingPositions = openOrders.filter((p: any) => {
-          if (p.type === 'BUY') return (price - p.price) > 1000 * (accountData.point || 0.01);
-          if (p.type === 'SELL') return (p.price - price) > 1000 * (accountData.point || 0.01);
-          return false;
-        });
+        const level1Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 1.00);
+        const level2Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 2.00);
 
-        const canOpenMore = totalOpen === 0 || trailingPositions.length === totalOpen;
+        // Logic:
+        // 1. If 0 trades, open first.
+        // 2. If trades exist, only open more if ALL are trailing at least $1.00.
+        // 3. If any trade hits $2.00 trailing, open 2 more (aggressive scale).
+        
+        let canOpen = totalOpen === 0 || level1Trailing.length === totalOpen;
+        let numToOpen = 1;
 
-        if (canOpenMore) {
+        if (level2Trailing.length > 0) {
+          canOpen = true;
+          numToOpen = 2; // Aggressive scale-in loop
+        }
+
+        if (canOpen && totalOpen < dynamicMaxTrades) {
           lastTradeTimeRef.current = now;
           addLog({
             level: 'success',
-            message: `🚀 ${totalOpen > 0 ? 'SCALE-IN' : 'ENTRY'} SIGNAL: ${signal} | Trend: ${isBullishTrend ? 'BULL' : 'BEAR'} | Open: ${totalOpen}/${dynamicMaxTrades}`,
+            message: `🚀 ${numToOpen > 1 ? 'AGGRESSIVE ' : ''}SIGNAL: ${signal} | Adding ${numToOpen} trade(s) | Open: ${totalOpen}/${dynamicMaxTrades}`,
             timestamp: new Date().toISOString()
           });
 
-          placeOrder({
-            symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
-            type: signal,
-            lots: 0.01,
-            sl: 0,
-            tp: 0
-          }).catch(e => console.error("App brain trade execution failed:", e));
-        } else {
+          for (let i = 0; i < numToOpen; i++) {
+            if (totalOpen + i < dynamicMaxTrades) {
+              placeOrder({
+                symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
+                type: signal,
+                lots: 0.01,
+                sl: 0,
+                tp: 0
+              }).catch(e => console.error("App brain trade execution failed:", e));
+            }
+          }
+        } else if (!canOpen) {
           // Log why we aren't opening more
           if (now - lastLogTimeRef.current > 30000) {
             lastLogTimeRef.current = now;
             addLog({
               level: 'info',
-              message: `🔍 Waiting for existing trades to hit 100 pips profit before scaling in...`,
+              message: `🔍 Waiting for trades to hit $1.00 profit before scaling in...`,
               timestamp: new Date().toISOString()
             });
           }
