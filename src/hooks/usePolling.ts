@@ -198,12 +198,30 @@ export const usePolling = () => {
           signal = 'BUY';
           statusMessage = "🎯 SUPER SETUP: Liquidity Sweep + Engulfing (Quantitative)";
         }
+        // SETUP 5: AGGRESSIVE TREND CONTINUATION (No setup waiting)
+        else if (isBullishTrend && isEngulfingBullish && price > currentCandle.open) {
+          signal = 'BUY';
+          statusMessage = "🚀 AGGRESSIVE: Bullish Trend Continuation (Engulfing Momentum)";
+        } else if (isBearishTrend && isEngulfingBearish && price < currentCandle.open) {
+          signal = 'SELL';
+          statusMessage = "🚀 AGGRESSIVE: Bearish Trend Continuation (Engulfing Momentum)";
+        }
+        // SETUP 6: FVG/OB RE-ENTRY
+        else if (isBullishTrend && priceInBullFVG) {
+          signal = 'BUY';
+          statusMessage = "🚀 AGGRESSIVE: Bullish FVG Retest Re-entry";
+        } else if (isBearishTrend && priceInBearFVG) {
+          signal = 'SELL';
+          statusMessage = "🚀 AGGRESSIVE: Bearish FVG Retest Re-entry";
+        }
         // DEFAULT: TREND FOLLOW
-         else if (isBullishTrend && lastClosed.close > lastClosed.open && price > currentCandle.open) {
-           statusMessage = "🔍 Trend: Bullish. Waiting for Super Setup confirmation...";
-         } else if (isBearishTrend && lastClosed.close < lastClosed.open && price < currentCandle.open) {
-           statusMessage = "🔍 Trend: Bearish. Waiting for Super Setup confirmation...";
-         }
+        else if (isBullishTrend && lastClosed.close > lastClosed.open && price > currentCandle.open) {
+          signal = 'BUY';
+          statusMessage = "🔍 Trend: Bullish. Entering on momentum...";
+        } else if (isBearishTrend && lastClosed.close < lastClosed.open && price < currentCandle.open) {
+          signal = 'SELL';
+          statusMessage = "🔍 Trend: Bearish. Entering on momentum...";
+        }
       }
 
       // Log Status every 30 seconds
