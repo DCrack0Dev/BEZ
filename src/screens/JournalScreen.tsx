@@ -103,11 +103,11 @@ const JournalScreen = () => {
         const durationStr = formatDuration(oTime, cTime);
 
         const tradeType: 'BUY' | 'SELL' = String(t.type || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
-        const openPrice = toNumber(t.openPrice, t.priceOpen, t.entryPrice, t.open_price, t.price_open);
-        const closePrice = toNumber(t.closePrice, t.priceClose, t.exitPrice, t.close_price, t.price_close, t.price);
+        const openPrice = toNumber(t.openPrice, t.priceOpen, t.entryPrice, t.open_price, t.price_open, t.price);
+        const closePrice = toNumber(t.closePrice, t.priceClose, t.exitPrice, t.close_price, t.price_close, t.close_price);
         const sl = toNumber(t.sl, t.stopLoss, t.stop_loss);
         const tp = toNumber(t.tp, t.takeProfit, t.take_profit);
-        const lots = toNumber(t.lots, t.volume, t.lotSize, t.size);
+        const lots = toNumber(t.lots, t.volume, t.lotSize, t.size, t.volume);
         const pnl = toNumber(t.profit, t.pnl);
 
         return {

@@ -115,35 +115,16 @@ const DashboardScreen = () => {
           </View>
         ) : (
           <>
+            {/* Summary Card */}
             <AccountCard 
-              balance={account.balance}
-              equity={account.equity}
-              pnlToday={account.pnlToday}
-              eaConnected={account.eaConnected}
-              currency={account.currency}
+              balance={account?.balance}
+              equity={account?.equity}
+              pnlToday={account?.pnlToday}
+              eaConnected={account?.eaConnected}
             />
 
-            <View style={styles.tradePanel}>
-              <Text style={styles.sectionTitle}>Quick Trade</Text>
-              <View style={styles.tradeButtons}>
-            <TradeButton 
-              title="BUY" 
-              type="BUY" 
-              onPress={() => handleTradePress('BUY')} 
-              disabled={!account.eaConnected}
-            />
-            <TradeButton 
-              title="SELL" 
-              type="SELL" 
-              onPress={() => handleTradePress('SELL')} 
-              disabled={!account.eaConnected}
-            />
-          </View>
-              <View style={styles.symbolSelector}>
-                <Text style={TYPOGRAPHY.bodySecondary}>Symbol: {selectedSymbol}</Text>
-                <Text style={TYPOGRAPHY.bodySecondary}>Lots: {botSettings.defaultLots}</Text>
-              </View>
-            </View>
+            {/* Quick Trade Section */}
+            <QuickTrade symbol={selectedSymbol} />
 
             <View style={styles.debugPanel}>
               <Text style={styles.debugTitle}>Debug Panel</Text>

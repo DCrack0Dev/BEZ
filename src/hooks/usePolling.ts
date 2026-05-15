@@ -85,12 +85,18 @@ export const usePolling = () => {
       
       const isBullishTrend = fastEMA > slowEMA;
       const isBearishTrend = fastEMA < slowEMA;
+
+      // Time-of-Day Check (The Killzones)
+      const nowTime = new Date();
+      const hour = nowTime.getUTCHours();
+      const isKillzone = (hour >= 7 && hour <= 10) || (hour >= 13 && hour <= 16); // London & NY Killzones in UTC
       
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
       let statusMessage = "";
 
-      // Pullback / Retracement Filter Logic:
-      if (isBullishTrend) {
+      if (!isKillzone) {
+        statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
+      } else if (isBullishTrend) {
         const isLastBullish = lastClosed.close > lastClosed.open;
         const isCurrentMovingUp = price > currentCandle.open;
         

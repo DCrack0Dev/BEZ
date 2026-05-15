@@ -182,7 +182,7 @@ void SendHeartbeat()
    json += "],";
    
    // Closed Trades (History)
-   json += "\"closedTrades\":[";
+   json += "],\"closedTrades\":[";
    if(HistorySelect(TimeCurrent()-86400, TimeCurrent()))
    {
       int totalHistory = HistoryDealsTotal();
@@ -192,15 +192,26 @@ void SendHeartbeat()
          ulong ticket = HistoryDealGetTicket(i);
          if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber)
          {
-            long type = HistoryDealGetInteger(ticket, DEAL_ENTRY);
-            if(type == DEAL_ENTRY_OUT)
+            long entryType = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+            if(entryType == DEAL_ENTRY_OUT)
             {
-               if(count > 0) json += ",";
-               json += "{\"ticket\":" + IntegerToString(HistoryDealGetInteger(ticket, DEAL_ORDER)) + ",";
-               json += "\"symbol\":\"" + _Symbol + "\",";
-               json += "\"profit\":" + DoubleToString(HistoryDealGetDouble(ticket, DEAL_PROFIT), 2) + ",";
-               json += "\"time\":" + IntegerToString(HistoryDealGetInteger(ticket, DEAL_TIME)) + "}";
-               count++;
+               ulong orderTicket = HistoryDealGetInteger(ticket, DEAL_ORDER);
+               if(HistoryOrderSelect(orderTicket))
+               {
+                  if(count > 0) json += ",";
+                  json += "{\"ticket\":" + IntegerToString(orderTicket) + ",";
+                  json += "\"symbol\":\"" + _Symbol + "\",";
+                  json += "\"type\":\"" + (HistoryOrderGetInteger(orderTicket, ORDER_TYPE) == ORDER_TYPE_BUY ? "BUY" : "SELL") + "\",";
+                  json += "\"lots\":" + DoubleToString(HistoryOrderGetDouble(orderTicket, ORDER_VOLUME_INITIAL), 2) + ",";
+                  json += "\"openPrice\":" + DoubleToString(HistoryOrderGetDouble(orderTicket, ORDER_PRICE_OPEN), _Digits) + ",";
+                  json += "\"closePrice\":" + DoubleToString(HistoryDealGetDouble(ticket, DEAL_PRICE), _Digits) + ",";
+                  json += "\"profit\":" + DoubleToString(HistoryDealGetDouble(ticket, DEAL_PROFIT), 2) + ",";
+                  json += "\"sl\":" + DoubleToString(HistoryOrderGetDouble(orderTicket, ORDER_SL), _Digits) + ",";
+                  json += "\"tp\":" + DoubleToString(HistoryOrderGetDouble(orderTicket, ORDER_TP), _Digits) + ",";
+                  json += "\"openTime\":" + IntegerToString(HistoryOrderGetInteger(orderTicket, ORDER_TIME_SETUP)) + ",";
+                  json += "\"closeTime\":" + IntegerToString(HistoryDealGetInteger(ticket, DEAL_TIME)) + "}";
+                  count++;
+               }
             }
          }
       }
