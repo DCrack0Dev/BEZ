@@ -24,10 +24,12 @@ input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
 input bool     UseMonetaryTrail  = true;
-input double   TrailTrigger1     = 1.00; // $1.00 Profit
+input double   TrailTrigger1     = 1.00; // Level 1: $1.00 Profit
 input double   TrailLock1        = 0.20; // Lock $0.20
-input double   TrailTrigger2     = 2.00; // $2.00 Profit
+input double   TrailTrigger2     = 2.00; // Level 2: $2.00 Profit
 input double   TrailLock2        = 0.40; // Lock $0.40
+input double   TrailTrigger3     = 3.00; // Level 3: $3.00 Profit
+input double   TrailLock3        = 0.60; // Lock $0.60
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -104,7 +106,8 @@ void OnTick()
             double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
             
             double targetLock = 0;
-            if(profit >= TrailTrigger2) targetLock = TrailLock2;
+            if(profit >= TrailTrigger3) targetLock = TrailLock3;
+            else if(profit >= TrailTrigger2) targetLock = TrailLock2;
             else if(profit >= TrailTrigger1) targetLock = TrailLock1;
             
             if(targetLock > 0)

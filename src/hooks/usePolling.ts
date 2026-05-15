@@ -129,18 +129,23 @@ export const usePolling = () => {
       if (signal !== 'NONE' && (now - lastTradeTimeRef.current > 30000)) {
         const level1Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 1.00);
         const level2Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 2.00);
+        const level3Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 3.00);
 
-        // Logic:
-        // 1. If 0 trades, open first.
-        // 2. If trades exist, only open more if ALL are trailing at least $1.00.
-        // 3. If any trade hits $2.00 trailing, open 2 more (aggressive scale).
+        // Logic (Looping Aggressive Scale):
+        // 1. First trade: Always open.
+        // 2. Scale 1: Only if ALL current trades are trailing >= $1.00.
+        // 3. Scale 2 (Aggressive): If any trade hits $2.00, add 2 more.
+        // 4. Scale 3 (Loop): If any trade hits $3.00, add another 2.
         
         let canOpen = totalOpen === 0 || level1Trailing.length === totalOpen;
         let numToOpen = 1;
 
-        if (level2Trailing.length > 0) {
+        if (level3Trailing.length > 0) {
           canOpen = true;
-          numToOpen = 2; // Aggressive scale-in loop
+          numToOpen = 2; // Loop Scale
+        } else if (level2Trailing.length > 0) {
+          canOpen = true;
+          numToOpen = 2; // Aggressive scale-in
         }
 
         if (canOpen && totalOpen < dynamicMaxTrades) {
