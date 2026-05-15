@@ -20,8 +20,12 @@ input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
 input string   ServerURL         = "https://liquibot-back.onrender.com";
 input int      MagicNumber       = 20260101;
 input int      HeartbeatInterval = 1; // seconds
+input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
+input bool     UseTrailingStop   = true;
+input int      TrailingStart     = 100; // Points in profit before trailing starts
+input int      TrailingStep      = 50;  // Points to move SL by
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -83,7 +87,43 @@ void OnTimer()
 
 void OnTick()
 {
-   // App Brain handles execution. MT5 just waits for BUY/SELL commands via Heartbeat
+   if(!licenseValid) return;
+   
+   // --- Profit Protection: Trailing Stop ---
+   if(UseTrailingStop)
+   {
+      for(int i=PositionsTotal()-1; i>=0; i--)
+      {
+         if(posInfo.SelectByIndex(i) && posInfo.Symbol() == _Symbol && posInfo.Magic() == MagicNumber)
+         {
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            
+            if(posInfo.PositionType() == POSITION_TYPE_BUY)
+            {
+               if(bid - posInfo.PriceOpen() > TrailingStart * _Point)
+               {
+                  double newSL = bid - TrailingStep * _Point;
+                  if(newSL > posInfo.StopLoss() + TrailingStep * _Point || posInfo.StopLoss() == 0)
+                  {
+                     trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+                  }
+               }
+            }
+            else if(posInfo.PositionType() == POSITION_TYPE_SELL)
+            {
+               if(posInfo.PriceOpen() - ask > TrailingStart * _Point)
+               {
+                  double newSL = ask + TrailingStep * _Point;
+                  if(newSL < posInfo.StopLoss() - TrailingStep * _Point || posInfo.StopLoss() == 0)
+                  {
+                     trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit());
+                  }
+               }
+            }
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -175,10 +215,10 @@ void OpenBuy()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double sl = ask - StopLoss_Points * _Point;
    double tp = ask + TakeProfit_Points * _Point;
-   double lot = CalculateLotSize();
+   double lot = FixedLotSize;
    
    if(trade.Buy(lot, _Symbol, ask, sl, tp, "App Brain Buy"))
-      Print("✅ Buy Order Placed");
+      Print("✅ Buy Order Placed: ", lot);
    else
       Print("❌ Buy Order Failed: ", GetLastError());
 }
@@ -189,10 +229,10 @@ void OpenSell()
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double sl = bid + StopLoss_Points * _Point;
    double tp = bid - TakeProfit_Points * _Point;
-   double lot = CalculateLotSize();
+   double lot = FixedLotSize;
    
    if(trade.Sell(lot, _Symbol, bid, sl, tp, "App Brain Sell"))
-      Print("✅ Sell Order Placed");
+      Print("✅ Sell Order Placed: ", lot);
    else
       Print("❌ Sell Order Failed: ", GetLastError());
 }

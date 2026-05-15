@@ -126,7 +126,7 @@ export const usePolling = () => {
       }
 
       // Execute Trade
-      if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current > 10000)) {
+      if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current > 30000)) {
         lastTradeTimeRef.current = now;
         addLog({
           level: 'success',
@@ -137,10 +137,19 @@ export const usePolling = () => {
         placeOrder({
           symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
           type: signal,
-          lots: 0, // EA handles lots
+          lots: 0.01, // App explicitly sends 0.01
           sl: 0,   // EA handles SL
           tp: 0
         }).catch(e => console.error("App brain trade execution failed:", e));
+      } else if (signal !== 'NONE' && totalOpen < dynamicMaxTrades && (now - lastTradeTimeRef.current <= 30000)) {
+        // Just log that we are waiting to stagger
+        if (now - lastLogTimeRef.current > 30000) {
+          addLog({
+            level: 'info',
+            message: `⏳ Signal ${signal} detected, but waiting 30s to stagger trades...`,
+            timestamp: new Date().toISOString()
+          });
+        }
       } else if (signal !== 'NONE' && totalOpen >= dynamicMaxTrades && (now - lastLogTimeRef.current > 60000)) {
         addLog({
           level: 'warning',
