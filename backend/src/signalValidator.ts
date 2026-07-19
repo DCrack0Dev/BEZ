@@ -14,6 +14,7 @@ export interface Candle {
   close: number;
   volume: number;
   timestamp: number;
+  x?: number;
 }
 
 export interface MT5Payload {
@@ -29,14 +30,72 @@ export interface MT5Payload {
   minLot: number;
   maxLot: number;
   minLotStep: number;
-  swingHighs: number[]; // pre-calculated swing highs
-  swingLows: number[]; // pre-calculated swing lows
+  swingHighs?: number[]; // pre-calculated swing highs
+  swingLows?: number[]; // pre-calculated swing lows
   openPositionsCount: number;
   ema20: number;
   ema20Prev: number;
-  atr14: number;
-  newsFilterActive: boolean;
+  atr14?: number;
+  newsFilterActive?: boolean;
+  positions?: any[];
+  openPositions?: any[];
 }
+
+// --- UTILITY CALCULATION FUNCTIONS ---
+
+/** Calculate ATR (Average True Range) for given candles and period */
+export const calculateATR = (candles: Candle[], period: number = 14): number => {
+  if (candles.length <= period) return 0;
+  const trs: number[] = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i === candles.length - 1) {
+      trs.push(candles[i].high - candles[i].low);
+    } else {
+      const prev = candles[i + 1];
+      const trueRange = Math.max(
+        candles[i].high - candles[i].low,
+        Math.abs(candles[i].high - prev.close),
+        Math.abs(candles[i].low - prev.close)
+      );
+      trs.push(trueRange);
+    }
+  }
+  const atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  return atr;
+};
+
+/** Calculate swing highs (lookback N candles) */
+export const calculateSwingHighs = (candles: Candle[], lookback: number = 2): number[] => {
+  const swingHighs: number[] = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const isSwingHigh = candles[i].high > candles.slice(i - lookback, i).every(c => c.high < candles[i].high) &&
+                        candles[i].high > candles.slice(i + 1, i + lookback + 1).every(c => c.high < candles[i].high);
+    if (isSwingHigh) swingHighs.push(candles[i].high);
+  }
+  return swingHighs;
+};
+
+/** Calculate swing lows (lookback N candles) */
+export const calculateSwingLows = (candles: Candle[], lookback: number = 2): number[] => {
+  const swingLows: number[] = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const isSwingLow = candles[i].low < candles.slice(i - lookback, i).every(c => c.low > candles[i].low) &&
+                       candles[i].low < candles.slice(i + 1, i + lookback + 1).every(c => c.low > candles[i].low);
+    if (isSwingLow) swingLows.push(candles[i].low);
+  }
+  return swingLows;
+};
+
+/** Calculate Exponential Moving Average (EMA) */
+export const calculateEMA = (candles: Candle[], period: number): number => {
+  if (candles.length < period) return 0;
+  const k = 2 / (period + 1);
+  let ema = candles.slice(candles.length - period, candles.length).reduce((a, c) => a + c.close, 0) / period;
+  for (let i = candles.length - period - 1; i >= 0; i--) {
+    ema = candles[i].close * k + ema * (1 - k);
+  }
+  return ema;
+};
 
 /**
  * JSDoc: Validates trade signals based on complex SMC and momentum rules.
