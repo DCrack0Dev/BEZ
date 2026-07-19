@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { getAccountData, placeOrder, setBotConfig } from '../api/orders';
+import { getAccountData, placeOrder, setBotConfig, closeOrder } from '../api/orders';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
@@ -38,6 +38,11 @@ export const usePolling = () => {
   const lastTradeTimeRef = useRef<number>(0);
   const lastLogTimeRef = useRef<number>(0);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
+  
+  // Risk Management State
+  const trailingStopActive = useRef<Record<string, { activated: boolean, highestProfit: number }>>({});
+  const cooldowns = useRef<{ BUY: number, SELL: number }>({ BUY: 0, SELL: 0 });
+  const prevPositionsRef = useRef<any[]>([]);
 
   // Initialize WebSocket for real-time signals
   useEffect(() => {
@@ -54,9 +59,10 @@ export const usePolling = () => {
         ...data,
         eaConnected: data.ea_connected,
         eaSymbol: data.symbol || 'XAUUSD',
+        currency: data.currency || 'USD',
         price: Number(data.price || 0),
-        equity: Number(data.equity || 0),
-        balance: Number(data.balance || 0),
+        equity: Number(data.equity || data.account_equity || 0),
+        balance: Number(data.balance || data.account_balance || 0),
         pnlToday: Number(data.pnl_today || data.pnlToday || 0),
         fastEMA: Number(data.ema20 || 0),
         slowEMA: Number(data.ema50 || 0),
@@ -70,7 +76,7 @@ export const usePolling = () => {
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [serverUrl, setAccountPrice]);
+  }, [serverUrl, setAccountPrice, setAccount]);
 
   const handleAppBrainAnalysis = useCallback(async (accountData: any) => {
     if (!botSettings.autoTradingEnabled || (botSettings.executionMode || 'app') !== 'app') return;
@@ -82,8 +88,65 @@ export const usePolling = () => {
     const slowEMA = Number(accountData.ema50 || accountData.slowEMA || 0);
     const equity = Number(accountData.equity || 1000);
     const openOrders = accountData.positions || [];
+    const symbol = accountData.symbol || accountData.ea_symbol || 'XAUUSD';
+
+    // --- 1. TRACK CLOSED TRADES FOR COOLDOWNS ---
+    const currentTickets = openOrders.map((p: any) => String(p.ticket));
+    const closedPositions = prevPositionsRef.current.filter(p => !currentTickets.includes(String(p.ticket)));
     
-    // 5 to 15 trades max based on account size
+    closedPositions.forEach(p => {
+      const profit = Number(p.profit || p.pnl || 0);
+      if (profit < 0) {
+        const direction = (p.type === 'BUY' || p.type === 0) ? 'BUY' : 'SELL';
+        const now = Date.now();
+        // If already in cooldown, extend it. Otherwise set to 5 mins.
+        const currentCooldown = cooldowns.current[direction];
+        const baseCooldown = 5 * 60 * 1000;
+        cooldowns.current[direction] = Math.max(now, currentCooldown) + baseCooldown;
+        
+        addLog({
+          level: 'warning',
+          message: `📉 Loss detected on ${direction} (${profit}). Cooldown active until ${new Date(cooldowns.current[direction]).toLocaleTimeString()}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+      // Cleanup trailing stop state
+      delete trailingStopActive.current[String(p.ticket)];
+    });
+    prevPositionsRef.current = openOrders;
+
+    // --- 2. SWING TRADING: TP & DYNAMIC 50% TRAILING STOP ---
+    const TP_LEVELS = [5.00, 10.00, 20.00];
+
+    for (const pos of openOrders) {
+      const ticket = String(pos.ticket);
+      const profit = Number(pos.profit || pos.pnl || 0);
+      
+      // 3-Step TP (Closing partial or full at milestones)
+      // Since we are adding trades, we treat the $20 as the ultimate target
+      if (profit >= TP_LEVELS[2]) {
+        addLog({ level: 'success', message: `🏆 SWING TARGET HIT: $${profit} on ticket ${ticket}. Closing...`, timestamp: new Date().toISOString() });
+        closeOrder(ticket).catch(console.error);
+        continue;
+      }
+
+      // Dynamic 50% Profit Trailing Stop (Every $2 gained)
+      let exitThreshold = -Infinity;
+      
+      if (profit >= 2.00) {
+        // Calculation: Lock 50% of the current profit
+        // Every $2 step effectively moves this up
+        exitThreshold = profit * 0.50;
+      }
+
+      if (exitThreshold !== -Infinity && profit < exitThreshold) {
+        addLog({ level: 'warning', message: `🛡️ SWING TS (50%): $${profit} (Locked: $${exitThreshold.toFixed(2)}) on ticket ${ticket}. Closing...`, timestamp: new Date().toISOString() });
+        closeOrder(ticket).catch(console.error);
+      }
+    }
+
+    // --- 3. SWING SCALE-IN LOGIC ---
+    // Add one more trade with each $2 profit gained on the aggregate or individual trades
     const dynamicMaxTrades = Math.max(5, Math.min(15, Math.floor(equity / 1000)));
     const totalOpen = openOrders.length;
 
@@ -94,11 +157,84 @@ export const usePolling = () => {
       m5Chart = chart;
     }
 
-    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 20) {
-      // --- MULTI-TIMEFRAME ANALYSIS (Swing & Momentum) ---
+    if (fastEMA > 0 && slowEMA > 0 && m5Chart.length >= 40) {
+      // --- 3. REGIME FILTERS ---
       const m15Chart: Candle[] = accountData.chart?.['M15'] || [];
       const h1Chart: Candle[] = accountData.chart?.['H1'] || [];
+      
+      const sortedM5 = [...m5Chart].sort((a, b) => b.x - a.x);
+      const sortedM15 = [...m15Chart].sort((a, b) => b.x - a.x);
+      const sortedH1 = [...h1Chart].sort((a, b) => b.x - a.x);
 
+      // Filter: Consecutively bullish candles (3 higher closes)
+      const isConsecBullishM5 = sortedM5.length >= 3 && 
+        sortedM5[1].close > sortedM5[2].close && 
+        sortedM5[2].close > sortedM5[3].close;
+      
+      const isConsecBullishM15 = sortedM15.length >= 3 && 
+        sortedM15[1].close > sortedM15[2].close && 
+        sortedM15[2].close > sortedM15[3].close;
+
+      const isConsecBearishM5 = sortedM5.length >= 3 && 
+        sortedM5[1].close < sortedM5[2].close && 
+        sortedM5[2].close < sortedM5[3].close;
+      
+      const isConsecBearishM15 = sortedM15.length >= 3 && 
+        sortedM15[1].close < sortedM15[2].close && 
+        sortedM15[2].close < sortedM15[3].close;
+
+      const blockSellEntries = isConsecBullishM5 || isConsecBullishM15;
+      const blockBuyEntries = isConsecBearishM5 || isConsecBearishM15;
+
+      // NEW: Smart Momentum Filter (Net change over last 5 candles)
+      const getNetMomentum = (candles: Candle[]) => {
+        if (candles.length < 6) return 0;
+        const last5 = candles.slice(1, 6);
+        const bullSize = last5.reduce((sum, c) => sum + (c.close > c.open ? c.close - c.open : 0), 0);
+        const bearSize = last5.reduce((sum, c) => sum + (c.open > c.close ? c.open - c.close : 0), 0);
+        return bullSize - bearSize;
+      };
+
+      const m5NetMomentum = getNetMomentum(sortedM5);
+      const isStrongBullishMomentum = m5NetMomentum > (currentATR * 2); 
+      const isStrongBearishMomentum = m5NetMomentum < -(currentATR * 2);
+
+      // Filter: ATR Volatility (ATR14 > 1.5x its 20-period average)
+      const calculateATR = (candles: Candle[], period: number) => {
+        if (candles.length <= period) return 0;
+        const trs = candles.map((c, i) => {
+          if (i === candles.length - 1) return c.high - c.low;
+          const prev = candles[i + 1];
+          return Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close));
+        });
+        return trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      };
+
+      const currentATR = calculateATR(sortedM5, 14);
+      const atrHistory: number[] = [];
+      for (let i = 0; i < 20; i++) {
+        const slice = sortedM5.slice(i);
+        if (slice.length >= 14) atrHistory.push(calculateATR(slice, 14));
+      }
+      const atrAvg20 = atrHistory.length > 0 ? atrHistory.reduce((a, b) => a + b, 0) / atrHistory.length : currentATR;
+      const blockAllEntries = currentATR > (atrAvg20 * 1.5);
+
+      // Filter: 4h Structure
+      const high4h = (sortedH1.length >= 5) ? Math.max(...sortedH1.slice(1, 5).map(c => c.high)) : Infinity;
+      const low4h = (sortedH1.length >= 5) ? Math.min(...sortedH1.slice(1, 5).map(c => c.low)) : -Infinity;
+      
+      const isMakingHH4h = price > high4h && high4h !== Infinity;
+      const isMakingLL4h = price < low4h && low4h !== -Infinity;
+
+      const suppressSellSignals = isMakingHH4h;
+      const suppressBuySignals = isMakingLL4h;
+
+      // --- 4. EXPOSURE CAP ---
+      const totalLots = openOrders.reduce((sum: number, p: any) => sum + (Number(p.volume || p.lots || 0)), 0);
+      const EXPOSURE_CAP = 1.5;
+      const isExposureCapReached = totalLots >= EXPOSURE_CAP;
+
+      // --- MULTI-TIMEFRAME ANALYSIS (Swing & Momentum) ---
       const getTrend = (candles: Candle[]) => {
         if (candles.length < 5) return 'NEUTRAL';
         const last = candles[0];
@@ -128,19 +264,24 @@ export const usePolling = () => {
       const isEngulfingBullish = lastClosed.close > lastClosed.open && lastClosed.close > prevClosed.high && lastClosed.open < prevClosed.low;
       const isEngulfingBearish = lastClosed.close < lastClosed.open && lastClosed.close < prevClosed.low && lastClosed.open > prevClosed.high;
 
-      // --- LIQUIDITY SWEEP DETECTION (Lookback 20) ---
-      const recentHigh = Math.max(...sortedChart.slice(2, 20).map(c => c.high));
-      const recentLow = Math.min(...sortedChart.slice(2, 20).map(c => c.low));
-      const sweptHigh = currentCandle.high > recentHigh && price < recentHigh;
-      const sweptLow = currentCandle.low < recentLow && price > recentLow;
+      // --- LIQUIDITY SWEEP DETECTION (Live Current Candle Wicks) ---
+      // Triggered immediately when current candle sweeps previous high/low
+      const sweptHigh = currentCandle.high > lastClosed.high && price < lastClosed.high;
+      const sweptLow = currentCandle.low < lastClosed.low && price > lastClosed.low;
 
       // --- FVG (FAIR VALUE GAP) DETECTION ---
-      const isFVGBullish = sortedChart[1].low > sortedChart[3].high;
-      const isFVGBearish = sortedChart[1].high < sortedChart[3].low;
-      const priceInBullFVG = isFVGBullish && price > sortedChart[3].high && price < sortedChart[1].low;
-      const priceInBearFVG = isFVGBearish && price < sortedChart[3].low && price > sortedChart[1].high;
+      // Bullish FVG: Candle 3 High < Candle 1 Low (Gap between C1 High and C3 Low)
+      const isFVGBullish = sortedChart[3].high < sortedChart[1].low;
+      // Bearish FVG: Candle 3 Low > Candle 1 High (Gap between C3 High and C1 Low)
+      const isFVGBearish = sortedChart[3].low > sortedChart[1].high;
+      
+      const priceInBullFVG = isFVGBullish && price > sortedChart[1].high && price < sortedChart[3].low;
+      const priceInBearFVG = isFVGBearish && price < sortedChart[1].low && price > sortedChart[3].high;
 
-      // --- ASIA RANGE & JUDAS SWING ---
+      let signalSL = 0;
+      const SL_OFFSET = 0.10; // 10 points on Gold
+
+      // --- ASIA RANGE & JUDAS SWING (Live Detection) ---
       const asiaHigh = Math.max(...sortedChart.filter(c => {
         const d = new Date(c.timestamp * 1000);
         return d.getUTCHours() >= 0 && d.getUTCHours() < 6;
@@ -155,28 +296,33 @@ export const usePolling = () => {
       const hour = nowTime.getUTCHours();
       const isKillzone = (hour >= 7 && hour <= 10) || (hour >= 13 && hour <= 16); 
       
-      const isJudasSwingBullish = hour >= 7 && hour <= 9 && sweptLow && price > asiaLow;
-      const isJudasSwingBearish = hour >= 7 && hour <= 9 && sweptHigh && price < asiaHigh;
+      const isJudasSwingBullish = hour >= 7 && hour <= 9 && currentCandle.low < asiaLow && price > asiaLow;
+      const isJudasSwingBearish = hour >= 7 && hour <= 9 && currentCandle.high > asiaHigh && price < asiaHigh;
 
       let signal: 'BUY' | 'SELL' | 'NONE' = 'NONE';
       let statusMessage = "";
 
       const timeAllowed = !botSettings.playbookTimeFilter || isKillzone;
 
+      // --- CHASE PROTECTION: Max 30 points from current candle open ---
+      const CHASE_LIMIT = 0.30; // 30 points (3 pips) on Gold
+      const pointsFromOpen = Math.abs(price - currentCandle.open);
+      const isChasing = pointsFromOpen > CHASE_LIMIT;
+
       if (!timeAllowed) {
         statusMessage = "🔍 Outside Gold Killzone. Waiting for London (07:00) or NY (13:00) UTC...";
+      } else if (blockAllEntries) {
+        statusMessage = "⚠️ VOLATILITY SPIKE: ATR (14) exceeds 1.5x average. Blocking all entries.";
       } else {
-        // --- THE "SUPER SETUP" LOGIC (Diversity of Triggers) ---
-        
-        // SETUP 1: JUDAS SWING (London Open Reversal)
-        if (isJudasSwingBearish && (isEngulfingBearish || isPinBarBearish)) {
+        // --- THE "SUPER SETUP" LOGIC ---
+        // SETUP 1: JUDAS SWING (Live Reversal at Asia Range Boundary)
+        if (isJudasSwingBearish && !isChasing) {
           signal = 'SELL';
-          statusMessage = "🎯 SUPER SETUP: Judas Swing + Candle Confirmation (Playbook v9)";
-        } else if (isJudasSwingBullish && (isEngulfingBullish || isPinBarBullish)) {
+          statusMessage = "🎯 SUPER SETUP: Judas Swing Live Reversal (Asia High Sweep)";
+        } else if (isJudasSwingBullish && !isChasing) {
           signal = 'BUY';
-          statusMessage = "🎯 SUPER SETUP: Judas Swing + Candle Confirmation (Playbook v9)";
+          statusMessage = "🎯 SUPER SETUP: Judas Swing Live Reversal (Asia Low Sweep)";
         }
-        // SETUP 2: MULTI-TIMEFRAME MOMENTUM (Swing & Quantitative)
         else if (h1Trend === 'BULL' && m15Trend === 'BULL' && isBullishTrend && isEngulfingBullish) {
           signal = 'BUY';
           statusMessage = "🎯 SUPER SETUP: Triple Timeframe Momentum Alignment (Swing Trading)";
@@ -187,28 +333,28 @@ export const usePolling = () => {
         // SETUP 3: FVG RETEST (Smart Money Entry)
         else if (priceInBullFVG && isPinBarBullish) {
           signal = 'BUY';
-          statusMessage = "🎯 SUPER SETUP: FVG Retest + Pin Bar Rejection (SMC)";
+          signalSL = sortedChart[1].high - SL_OFFSET; // 10 points below FVG bottom
+          statusMessage = `🎯 SUPER SETUP: FVG Retest + Pin Bar (SL: ${signalSL.toFixed(2)})`;
         } else if (priceInBearFVG && isPinBarBearish) {
           signal = 'SELL';
-          statusMessage = "🎯 SUPER SETUP: FVG Retest + Pin Bar Rejection (SMC)";
+          signalSL = sortedChart[1].low + SL_OFFSET; // 10 points above FVG top
+          statusMessage = `🎯 SUPER SETUP: FVG Retest + Pin Bar (SL: ${signalSL.toFixed(2)})`;
         }
-        // SETUP 4: LIQUIDITY SWEEP REVERSAL
-        else if (sweptHigh && isEngulfingBearish) {
+        // SETUP 4: LIQUIDITY SWEEP REVERSAL (Live Current Candle)
+        else if (sweptHigh && !isChasing) {
           signal = 'SELL';
-          statusMessage = "🎯 SUPER SETUP: Liquidity Sweep + Engulfing (Quantitative)";
-        } else if (sweptLow && isEngulfingBullish) {
+          statusMessage = "🎯 SUPER SETUP: Live Liquidity Sweep (Prev High)";
+        } else if (sweptLow && !isChasing) {
           signal = 'BUY';
-          statusMessage = "🎯 SUPER SETUP: Liquidity Sweep + Engulfing (Quantitative)";
+          statusMessage = "🎯 SUPER SETUP: Live Liquidity Sweep (Prev Low)";
         }
-        // SETUP 5: AGGRESSIVE TREND CONTINUATION (No setup waiting)
         else if (isBullishTrend && isEngulfingBullish && price > currentCandle.open) {
           signal = 'BUY';
-          statusMessage = "🚀 AGGRESSIVE: Bullish Trend Continuation (Engulfing Momentum)";
+          statusMessage = "🚀 AGGRESSIVE: Bullish Trend Continuation (Momentum)";
         } else if (isBearishTrend && isEngulfingBearish && price < currentCandle.open) {
           signal = 'SELL';
-          statusMessage = "🚀 AGGRESSIVE: Bearish Trend Continuation (Engulfing Momentum)";
+          statusMessage = "🚀 AGGRESSIVE: Bearish Trend Continuation (Momentum)";
         }
-        // SETUP 6: FVG/OB RE-ENTRY
         else if (isBullishTrend && priceInBullFVG) {
           signal = 'BUY';
           statusMessage = "🚀 AGGRESSIVE: Bullish FVG Retest Re-entry";
@@ -216,7 +362,6 @@ export const usePolling = () => {
           signal = 'SELL';
           statusMessage = "🚀 AGGRESSIVE: Bearish FVG Retest Re-entry";
         }
-        // DEFAULT: TREND FOLLOW
         else if (isBullishTrend && lastClosed.close > lastClosed.open && price > currentCandle.open) {
           signal = 'BUY';
           statusMessage = "🔍 Trend: Bullish. Entering on momentum...";
@@ -224,50 +369,97 @@ export const usePolling = () => {
           signal = 'SELL';
           statusMessage = "🔍 Trend: Bearish. Entering on momentum...";
         }
+
+        // --- NEW: DIAGNOSTIC SEARCHING STATUS ---
+        if (signal === 'NONE' && !statusMessage) {
+          const trendStr = isBullishTrend ? "BULL" : (isBearishTrend ? "BEAR" : "NEUTRAL");
+          const fvgStr = isFVGBullish ? "FVG Bullish" : (isFVGBearish ? "FVG Bearish" : "No FVG");
+          const killzoneStr = isKillzone ? "In Killzone" : "Outside Killzone";
+          const atrRatio = atrAvg20 > 0 ? (currentATR / atrAvg20).toFixed(2) : "0.00";
+          const hhInfo = high4h !== Infinity ? ` | 4hH: ${high4h.toFixed(2)}` : "";
+          const swingInfo = ` | SWING: [Next: $${(totalOpen + 1) * 2}]`;
+          statusMessage = `Searching... [${trendStr} | ${fvgStr} | ${killzoneStr} | ATR: ${atrRatio}x${hhInfo}${swingInfo}]`;
+        }
+
+        if (signal === 'SELL') {
+          if (blockSellEntries) {
+            signal = 'NONE';
+            statusMessage = "🛡️ REGIME FILTER: 3 Bullish Candles on M5/M15. SELL blocked.";
+          } else if (suppressSellSignals) {
+            signal = 'NONE';
+            statusMessage = "🛡️ REGIME FILTER: Price making 4h HH. SELL suppressed.";
+          } else if (isStrongBullishMomentum) {
+            signal = 'NONE';
+            statusMessage = "🛡️ MOMENTUM FILTER: Strong Bullish flow detected. SELL blocked.";
+          } else if (price > fastEMA) {
+            signal = 'NONE';
+            statusMessage = "🛡️ PRICE ACTION: Price above EMA20. SELL suppressed.";
+          }
+        }
+
+        if (signal === 'BUY') {
+          if (blockBuyEntries) {
+            signal = 'NONE';
+            statusMessage = "🛡️ REGIME FILTER: 3 Bearish Candles on M5/M15. BUY blocked.";
+          } else if (suppressBuySignals) {
+            signal = 'NONE';
+            statusMessage = "🛡️ REGIME FILTER: Price making 4h LL. BUY suppressed.";
+          } else if (isStrongBearishMomentum) {
+            signal = 'NONE';
+            statusMessage = "🛡️ MOMENTUM FILTER: Strong Bearish flow detected. BUY blocked.";
+          } else if (price < fastEMA) {
+            signal = 'NONE';
+            statusMessage = "🛡️ PRICE ACTION: Price below EMA20. BUY suppressed.";
+          }
+        }
       }
 
-      // Log Status every 30 seconds
       const now = Date.now();
       if (statusMessage) {
         setLastSignalReason(statusMessage);
-        if (now - lastLogTimeRef.current > 30000) {
+        // Only log to persistent logs if it's an actual signal or every 60s for "Searching"
+        const isActualSignal = signal !== 'NONE' && !statusMessage.startsWith('Searching');
+        const logInterval = isActualSignal ? 30000 : 60000;
+        
+        if (now - lastLogTimeRef.current > logInterval) {
           lastLogTimeRef.current = now;
-          addLog({
-            level: 'info',
-            message: statusMessage,
-            timestamp: new Date().toISOString()
-          });
+          addLog({ level: 'info', message: statusMessage, timestamp: new Date().toISOString() });
         }
       }
 
-      // Execute Trade Logic (Monetary Scale-In Aware)
       if (signal !== 'NONE' && (now - lastTradeTimeRef.current > 30000)) {
-        const level1Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 1.00);
-        const level2Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 2.00);
-        const level3Trailing = openOrders.filter((p: any) => (p.pnl || p.profit) >= 3.00);
-
-        // Logic (Looping Aggressive Scale):
-        // 1. First trade: Always open.
-        // 2. Scale 1: Only if ALL current trades are trailing >= $1.00.
-        // 3. Scale 2 (Aggressive): If any trade hits $2.00, add 2 more.
-        // 4. Scale 3 (Loop): If any trade hits $3.00, add another 2.
-        
-        let canOpen = totalOpen === 0 || level1Trailing.length === totalOpen;
-        let numToOpen = 1;
-
-        if (level3Trailing.length > 0) {
-          canOpen = true;
-          numToOpen = 2; // Loop Scale
-        } else if (level2Trailing.length > 0) {
-          canOpen = true;
-          numToOpen = 2; // Aggressive scale-in
+        const nowAtExecution = Date.now();
+        if (nowAtExecution < cooldowns.current[signal as 'BUY' | 'SELL']) {
+          const remaining = Math.ceil((cooldowns.current[signal as 'BUY' | 'SELL'] - nowAtExecution) / 1000);
+          if (nowAtExecution - lastLogTimeRef.current > 30000) {
+            addLog({ level: 'info', message: `⏳ Cooldown active for ${signal}. ${remaining}s remaining...`, timestamp: new Date().toISOString() });
+          }
+          return;
         }
 
-        if (canOpen && totalOpen < dynamicMaxTrades) {
+        if (isExposureCapReached) {
+          if (nowAtExecution - lastLogTimeRef.current > 30000) {
+            addLog({ level: 'warning', message: `🚫 EXPOSURE CAP REACHED: ${totalLots.toFixed(2)} lots open. Max 1.5 lots.`, timestamp: new Date().toISOString() });
+          }
+          return;
+        }
+
+        // Scale-in rule: Only if ALL trades have at least $2 profit (securing 50% lock)
+        const tradesReadyToScale = openOrders.filter((p: any) => (p.pnl || p.profit) >= 2.00);
+        
+        // We also track how many $2 "milestones" we've hit to decide if we add more
+        const maxProfit = openOrders.length > 0 ? Math.max(...openOrders.map((p: any) => Number(p.pnl || p.profit || 0))) : 0;
+        const milestoneCount = Math.floor(maxProfit / 2); // 1 at $2, 2 at $4, etc.
+        
+        let canOpen = totalOpen === 0 || (totalOpen < dynamicMaxTrades && tradesReadyToScale.length === totalOpen && totalOpen <= milestoneCount);
+        let numToOpen = 1;
+
+        if (canOpen) {
           lastTradeTimeRef.current = now;
+          const scaleType = numToOpen > 1 ? 'AGGRESSIVE SCALE' : (totalOpen === 0 ? 'INITIAL' : 'SCALE');
           addLog({
             level: 'success',
-            message: `🚀 ${numToOpen > 1 ? 'AGGRESSIVE ' : ''}SIGNAL: ${signal} | Adding ${numToOpen} trade(s) | Open: ${totalOpen}/${dynamicMaxTrades}`,
+            message: `🚀 ${scaleType} SIGNAL: ${signal} | Adding ${numToOpen} trade(s) | Open: ${totalOpen}/${dynamicMaxTrades}`,
             timestamp: new Date().toISOString()
           });
 
@@ -277,40 +469,26 @@ export const usePolling = () => {
                 symbol: accountData.symbol || accountData.ea_symbol || 'XAUUSD',
                 type: signal,
                 lots: 0.01,
-                sl: 0,
+                sl: signalSL,
                 tp: 0
               }).catch(e => console.error("App brain trade execution failed:", e));
             }
           }
         } else if (!canOpen) {
-          // Log why we aren't opening more
           if (now - lastLogTimeRef.current > 30000) {
             lastLogTimeRef.current = now;
-            addLog({
-              level: 'info',
-              message: `🔍 Waiting for trades to hit $1.00 profit before scaling in...`,
-              timestamp: new Date().toISOString()
-            });
+            addLog({ level: 'info', message: `🔍 Waiting for trades to hit $1.00 profit before scaling in...`, timestamp: new Date().toISOString() });
           }
         }
       } else if (signal !== 'NONE' && (now - lastTradeTimeRef.current <= 30000)) {
-        // Just log that we are waiting to stagger
         if (now - lastLogTimeRef.current > 30000) {
-          addLog({
-            level: 'info',
-            message: `⏳ Signal ${signal} detected, but waiting 30s to stagger trades...`,
-            timestamp: new Date().toISOString()
-          });
+          addLog({ level: 'info', message: `⏳ Signal ${signal} detected, but waiting 30s to stagger trades...`, timestamp: new Date().toISOString() });
         }
       } else if (signal !== 'NONE' && totalOpen >= dynamicMaxTrades && (now - lastLogTimeRef.current > 60000)) {
-        addLog({
-          level: 'warning',
-          message: `⚪ Signal ${signal} detected, but Max Trades reached (${totalOpen}/${dynamicMaxTrades})`,
-          timestamp: new Date().toISOString()
-        });
+        addLog({ level: 'warning', message: `⚪ Signal ${signal} detected, but Max Trades reached (${totalOpen}/${dynamicMaxTrades})`, timestamp: new Date().toISOString() });
       }
     }
-  }, [botSettings, addLog]);
+  }, [botSettings, addLog, setLastSignalReason, setAccount, setAccountPrice, setOpenPositions, setError, setLoading]);
 
   const refresh = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -318,14 +496,14 @@ export const usePolling = () => {
       const accountData = await getAccountData();
       if (!accountData) return;
 
-      // Update state for UI
       setAccount({
         ...accountData,
         eaConnected: accountData.ea_connected,
         eaSymbol: accountData.symbol || 'XAUUSD',
+        currency: accountData.currency || 'USD',
         price: Number(accountData.price || 0),
-        equity: Number(accountData.equity || 0),
-        balance: Number(accountData.balance || 0),
+        equity: Number(accountData.equity || accountData.account_equity || 0),
+        balance: Number(accountData.balance || accountData.account_balance || 0),
         pnlToday: Number(accountData.pnl_today || accountData.pnlToday || 0),
         fastEMA: Number(accountData.ema20 || 0),
         slowEMA: Number(accountData.ema50 || 0),
@@ -342,13 +520,12 @@ export const usePolling = () => {
         lots: p.volume || p.lots || 0,
         openPrice: p.openPrice || p.price || 0,
         currentPrice: accountData.price || p.price || 0,
-        profit: p.profit || 0,
-        pnl: p.profit || 0,
+        profit: Number(p.profit || p.pnl || 0),
+        pnl: Number(p.profit || p.pnl || 0),
         openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
       }));
       setOpenPositions(openPositions);
 
-      // Sync bot settings with EA (PAUSE/RESUME)
       if (accountData.ea_connected && prevAutoTrading.current !== botSettings.autoTradingEnabled) {
         prevAutoTrading.current = botSettings.autoTradingEnabled;
         placeOrder({
@@ -358,9 +535,7 @@ export const usePolling = () => {
         }).catch(e => console.error("Auto-trade sync failed:", e));
       }
 
-      // Run Brain Analysis if not in real-time mode or as a backup
       handleAppBrainAnalysis(accountData);
-
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Refresh failed');

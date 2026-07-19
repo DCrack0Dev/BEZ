@@ -25,6 +25,7 @@ const DashboardScreen = () => {
   const [pendingOrder, setPendingOrder] = useState<{ type: 'BUY' | 'SELL', symbol: string } | null>(null);
 
   const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'XAUUSD';
+  const currency = account?.currency || 'USD';
   
   // Calculate key level for display from account data if store is empty
   const displayKeyLevel = keyLevelDistance || (account.keyLevelInfo ? { 
@@ -121,6 +122,7 @@ const DashboardScreen = () => {
               equity={account?.equity}
               pnlToday={account?.pnlToday}
               eaConnected={account?.eaConnected}
+              currency={currency}
             />
 
             {/* Quick Trade Section */}
@@ -180,7 +182,7 @@ const DashboardScreen = () => {
               />
               <View style={styles.closeAllSpacer} />
               {openPositions.map((pos) => (
-                <PositionCard key={pos.ticket} position={pos} currency={account.currency} />
+                <PositionCard key={pos.ticket} position={pos} currency={currency} />
               ))}
             </>
           ) : (

@@ -18,7 +18,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ balance = 0, equity = 0, pnlT
   const safePnlToday = pnlToday || 0;
   
   const isPositive = safePnlToday >= 0;
-  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
 
   return (
     <View style={styles.card}>

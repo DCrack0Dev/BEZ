@@ -13,7 +13,7 @@ interface PositionCardProps {
 const PositionCard: React.FC<PositionCardProps> = ({ position, currency = 'USD' }) => {
   const isBuy = position.type === 'BUY';
   const isPositive = position.pnl >= 0;
-  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
 
   return (
     <View style={styles.card}>

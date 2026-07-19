@@ -19,6 +19,7 @@ export interface AccountData {
   pnlToday: number;
   eaConnected: boolean;
   eaSymbol: string;
+  currency: string;
   price: number;
   fastEMA: number;
   slowEMA: number;
@@ -62,6 +63,7 @@ export const useTradeStore = create<TradeState>((set) => ({
     pnlToday: 0,
     eaConnected: false,
     eaSymbol: '---',
+    currency: 'USD',
     price: 0,
     fastEMA: 0,
     slowEMA: 0,
@@ -79,14 +81,7 @@ export const useTradeStore = create<TradeState>((set) => ({
   error: null,
   setAccount: (account) => set({ account }),
   setAccountPrice: (price) => set((state) => ({ 
-    account: { ...state.account, price },
-    openPositions: state.openPositions.map(pos => {
-      // Auto-update PnL when price changes
-      const point = state.account.eaSymbol.includes('JPY') || state.account.eaSymbol.includes('XAU') ? 0.01 : 0.0001;
-      const diff = pos.type === 'BUY' ? (price - pos.openPrice) : (pos.openPrice - price);
-      const profit = (diff / point) * pos.lots * (state.account.eaSymbol.includes('XAU') ? 1 : 10);
-      return { ...pos, currentPrice: price, pnl: profit, profit };
-    })
+    account: { ...state.account, price }
   })),
   setOpenPositions: (openPositions) => set({ openPositions }),
   setClosedPositions: (closedPositions) => set({ closedPositions }),

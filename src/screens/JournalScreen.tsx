@@ -36,7 +36,7 @@ const JournalScreen = () => {
   const [flippedTradeId, setFlippedTradeId] = useState<string | null>(null);
 
   const currency = account?.currency || 'USD';
-  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : currency);
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
 
   const toNumber = (...vals: any[]) => {
     for (const v of vals) {
