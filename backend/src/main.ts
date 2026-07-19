@@ -10,6 +10,10 @@ import { initEmitter, emitSignal, emitStopUpdate, emitScaleInTrigger } from './s
 import { validateSignal, Candle, MT5Payload, calculateATR, calculateSwingHighs, calculateSwingLows, calculateEMA } from './signalValidator';
 import { processTrailingStop, PositionState } from './trailingStopManager';
 import { Decimal } from 'decimal.js';
+import { v4 as uuidv4 } from 'uuid';
+import { FeatureEngineeringEngine, FeatureSet } from './features/featureEngine';
+import { TradeDnaEngine, TradeDNA } from './dna/tradeDna';
+import { ExperienceEngine } from './experience/experienceEngine';
 
 dotenv.config();
 
@@ -22,8 +26,11 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- INIT SOCKET ---
+// --- INIT NEW ENGINES ---
 const io = initEmitter(server);
+const featureEngine = new FeatureEngineeringEngine();
+const dnaEngine = new TradeDnaEngine();
+const experienceEngine = new ExperienceEngine();
 
 // --- STATE ---
 interface AccountState {
@@ -48,6 +55,7 @@ interface AccountState {
   atr14: number;
   candles: Candle[];
   autoTradingEnabled: boolean;
+  lastFeatures?: FeatureSet;
 }
 
 let accountState: AccountState = {
@@ -79,6 +87,7 @@ let closedTrades: any[] = [];
 let positionStates: Record<string, PositionState> = {}; // ticket -> position state for trailing stops
 let lastTradeTime = 0;
 let cooldowns: Record<'BUY' | 'SELL', number> = { BUY: 0, SELL: 0 };
+let openPositionTickets = new Set<string>();
 
 // --- LOGGING HELPER ---
 const log = (msg: string) => {
@@ -122,6 +131,56 @@ app.post('/api/ea/update', (req, res) => {
     return res.status(400).json({ error: 'Missing symbol' });
   }
 
+  // Extract and normalize candles
+  let candles: Candle[] = data.candles || [];
+  if (data.chart && typeof data.chart === 'object' && !Array.isArray(data.chart)) {
+    candles = data.chart['M5'] || candles;
+  }
+  const sortedCandles = [...candles].sort((a, b) => (b.x || b.timestamp) - (a.x || a.timestamp));
+  const candlesReversed = [...sortedCandles].reverse();
+
+  // Calculate indicators
+  const ema20 = data.ema20 || calculateEMA(candlesReversed, 20);
+  const ema50 = data.ema50 || calculateEMA(candlesReversed, 50);
+  const atr14 = data.atr14 || calculateATR(candlesReversed, 14);
+
+  // 🧬 Generate Features
+  const features = featureEngine.generateFeatures(
+    data.symbol,
+    candlesReversed,
+    ema20,
+    ema50,
+    atr14,
+    data.spread || 0,
+    data.pipSize || 0.01
+  );
+  log(`🧬 Generated features: ${features.trendDirection} | ${features.marketSession}`);
+
+  // Handle Closed Trades → Finalize DNA
+  const currentTickets = new Set((data.positions || data.openPositions || []).map(p => String(p.ticket)));
+  for (const ticket of openPositionTickets) {
+    if (!currentTickets.has(ticket)) {
+      openPositionTickets.delete(ticket);
+      const closedTrade = (data.closedTrades || []).find((t: any) => String(t.ticket) === ticket);
+      
+      const dna = dnaEngine.getDnaByTicket(ticket);
+      if (dna) {
+        const lessons = experienceEngine.analyzeTrade(dna);
+        const profitPips = closedTrade?.profit || 0;
+        dnaEngine.finalizeTradeDNA(
+          ticket,
+          closedTrade?.closePrice || accountState.price,
+          features,
+          profitPips,
+          0,
+          0,
+          lessons.map(l => l.title),
+          lessons.map(l => l.description)
+        );
+      }
+    }
+  }
+
   // Handle Closed Trades Sync
   if (data.closedTrades && Array.isArray(data.closedTrades)) {
     data.closedTrades.forEach((t: any) => {
@@ -129,7 +188,6 @@ app.post('/api/ea/update', (req, res) => {
         closedTrades.unshift(t);
         log(`💰 Closed Trade Recorded: #${t.ticket} | Profit: ${t.profit}`);
         delete positionStates[t.ticket];
-        // Update cooldowns if trade was a loss
         if (t.profit < 0) {
           const dir = (t.type === 'BUY' || t.type === 0) ? 'BUY' : 'SELL';
           cooldowns[dir] = Math.max(Date.now(), cooldowns[dir]) + 300000; // 5 min cooldown
@@ -139,21 +197,6 @@ app.post('/api/ea/update', (req, res) => {
     });
     if (closedTrades.length > 100) closedTrades = closedTrades.slice(0, 100);
   }
-
-  // Extract and normalize candles
-  let candles: Candle[] = data.candles || [];
-  if (data.chart && typeof data.chart === 'object' && !Array.isArray(data.chart)) {
-    candles = data.chart['M5'] || candles;
-  }
-  // Sort candles: newest first
-  const sortedCandles = [...candles].sort((a, b) => (b.x || b.timestamp) - (a.x || a.timestamp));
-
-  // Calculate missing indicators
-  const ema20 = data.ema20 || calculateEMA(sortedCandles.slice().reverse(), 20);
-  const ema50 = data.ema50 || calculateEMA(sortedCandles.slice().reverse(), 50);
-  const atr14 = data.atr14 || calculateATR(sortedCandles.slice().reverse(), 14);
-  const swingHighs = data.swingHighs || calculateSwingHighs(sortedCandles.slice().reverse(), 2);
-  const swingLows = data.swingLows || calculateSwingLows(sortedCandles.slice().reverse(), 2);
 
   // Update Account State
   accountState = {
@@ -177,11 +220,31 @@ app.post('/api/ea/update', (req, res) => {
     ema50,
     atr14,
     candles: sortedCandles,
+    lastFeatures: features,
   };
 
   log(`💓 Heartbeat: ${accountState.symbol} | Price: ${accountState.price} | Positions: ${accountState.positions.length}`);
 
-  // --- BACKEND BRAIN: 1. TRAILING STOP MANAGEMENT ---
+  // 🧬 Initialize DNA for new open positions
+  for (const pos of accountState.positions) {
+    const ticket = String(pos.ticket);
+    if (!openPositionTickets.has(ticket)) {
+      openPositionTickets.add(ticket);
+      dnaEngine.initializeTradeDNA(
+        ticket,
+        accountState.symbol,
+        (pos.type === 'BUY' || pos.type === 0) ? 'BUY' : 'SELL',
+        pos.openPrice || pos.price || accountState.price,
+        pos.sl || 0,
+        pos.tp || 0,
+        pos.volume || pos.lots || 0.01,
+        1.0,
+        features
+      );
+    }
+  }
+
+  // --- BACKEND BRAIN: 1. Trailing Stop Management ---
   for (const pos of accountState.positions) {
     const ticket = String(pos.ticket);
     if (!positionStates[ticket]) {
@@ -224,13 +287,15 @@ app.post('/api/ea/update', (req, res) => {
     }
   }
 
-  // --- BACKEND BRAIN: 2. SIGNAL VALIDATION & AUTO TRADING ---
+  // --- BACKEND BRAIN: 2. Signal Validation & Auto Trading ---
   if (accountState.autoTradingEnabled) {
+    const swingHighs = data.swingHighs || calculateSwingHighs(candlesReversed, 2);
+    const swingLows = data.swingLows || calculateSwingLows(candlesReversed, 2);
     const signalPayload: MT5Payload = {
       ...data,
       symbol: accountState.symbol,
       timeframe: 'M5',
-      candles: sortedCandles.slice().reverse(), // send oldest first to validateSignal
+      candles: candlesReversed,
       spread: accountState.spread,
       balance: accountState.balance,
       equity: accountState.equity,
@@ -267,7 +332,10 @@ app.post('/api/ea/update', (req, res) => {
   }
 
   // Push state to mobile app
-  io.emit('EA_HEARTBEAT', accountState);
+  io.emit('EA_HEARTBEAT', {
+    ...accountState,
+    lastSignalReason: `Trend: ${features.trendDirection} | Session: ${features.marketSession} | Volatility: ${features.volatility}`
+  });
 
   res.json({ success: true, commands: [] });
 });
@@ -323,6 +391,26 @@ app.post('/api/bot/config', (req, res) => {
   res.json({ success: true });
 });
 
+// New API: Get Trade DNA
+app.get('/api/dna', (req, res) => {
+  res.json(dnaEngine.getAllDna());
+});
+
+// New API: Get Lessons
+app.get('/api/lessons', (req, res) => {
+  res.json(experienceEngine.getLessons());
+});
+
+// New API: Get Model Candidates
+app.get('/api/models', (req, res) => {
+  res.json(experienceEngine.getModelCandidates());
+});
+
+// New API: Get Current Features
+app.get('/api/features', (req, res) => {
+  res.json(accountState.lastFeatures || {});
+});
+
 // App Subscription (dummy endpoint for compatibility)
 app.get('/api/subscription', (req, res) => {
   res.json({
@@ -333,5 +421,5 @@ app.get('/api/subscription', (req, res) => {
 });
 
 server.listen(PORT, () => {
-  log(`🚀 Backend v3.0 LIVE on port ${PORT} (Full Brain Mode)`);
+  log(`🚀 Backend v4.0 LIVE on port ${PORT} (Full Brain Mode + DNA + Features + Experience)`);
 });

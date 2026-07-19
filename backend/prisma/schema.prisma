@@ -1,0 +1,129 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TrendDirection {
+  BULLISH
+  BEARISH
+  NEUTRAL
+}
+
+enum MarketSession {
+  LONDON
+  NEWYORK
+  ASIA
+  OVERLAP
+}
+
+enum Volatility {
+  LOW
+  MEDIUM
+  HIGH
+  EXTREME
+}
+
+enum SpreadStatus {
+  NORMAL
+  WIDE
+  EXTREME
+}
+
+enum LiquiditySweep {
+  BULLISH
+  BEARISH
+  NONE
+}
+
+enum FVG {
+  BULLISH
+  BEARISH
+  NONE
+}
+
+enum OrderBlock {
+  BULLISH
+  BEARISH
+  NONE
+}
+
+enum TradeOutcome {
+  WIN
+  LOSS
+  BREAKEVEN
+  OPEN
+}
+
+model TradeDNA {
+  id                String   @id @default(cuid())
+  ticket            String
+  symbol            String
+  direction         String
+  entryTime         DateTime @default(now())
+  closeTime         DateTime?
+  durationMinutes   Int?
+  entryPrice        Float
+  stopLoss          Float
+  takeProfit        Float
+  lotSize           Float
+  riskPercent       Float
+  outcome           TradeOutcome @default(OPEN)
+  profitPips        Float   @default(0)
+  profitPercent     Float   @default(0)
+  profitDollars     Float   @default(0)
+  aiConfidence      Float   @default(0.75)
+  modelVersion      String  @default("v1.0")
+  mistakes          String[]
+  lessons           String[]
+  notes             String?
+  entryFeatures     Json
+  closeFeatures     Json?
+  screenshots       Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([ticket])
+  @@index([symbol])
+  @@index([outcome])
+  @@index([entryTime])
+}
+
+model Lesson {
+  id          String   @id @default(cuid())
+  category    String
+  title       String
+  description String
+  impact      String
+  dnaIds      String[]
+  timestamp   DateTime @default(now())
+
+  @@index([category])
+  @@index([timestamp])
+}
+
+model ModelCandidate {
+  id               String   @id @default(cuid())
+  version          String
+  trainingDate     DateTime @default(now())
+  winRate          Float
+  profitFactor     Float
+  avgProfit        Float
+  sharpeRatio      Float
+  status           String
+  deploymentRec    String
+  recReason        String
+  createdAt        DateTime @default(now())
+
+  @@index([version])
+  @@index([status])
+}
