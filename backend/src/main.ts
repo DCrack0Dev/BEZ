@@ -1,4 +1,3 @@
-// Main entrypoint for LiquiBot backend
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -7,6 +6,7 @@ import dotenv from 'dotenv';
 import { logger } from './logging';
 import { TradingEngine } from './trading-engine';
 import { attachAPI } from './api';
+import { prisma, getCandles } from './database';
 
 dotenv.config();
 
@@ -21,7 +21,7 @@ const tradingEngine = new TradingEngine(io);
 // Attach API
 attachAPI(app);
 
-// API endpoints
+// API Endpoints
 app.post('/api/ea/validate', (req, res) => {
   const { apiKey } = req.body;
   logger.info('Auth request', apiKey);
@@ -31,15 +31,20 @@ app.post('/api/ea/validate', (req, res) => {
   res.status(401).json({ valid: false });
 });
 
-app.post('/api/ea/update', (req, res) => {
-  const data = req.body;
-  tradingEngine.processMT5Update(data);
-  res.json({ success: true, commands: [] });
+app.post('/api/ea/update', async (req, res) => {
+  try {
+    const data = req.body;
+    await tradingEngine.processMT5Update(data);
+    res.json({ success: true, commands: [] });
+  } catch (error) {
+    logger.error('Error in /api/ea/update', error);
+    res.status(500).json({ success: false, error: 'Failed to process update' });
+  }
 });
 
 app.get('/api/ea/commands', (req, res) => {
   const cmds = tradingEngine.clearPendingCommands();
-  if (cmds.length > 0) logger.info('Sent commands to EA');
+  if (cmds.length > 0) logger.info('Sent commands to EA', cmds.length);
   res.json(cmds);
 });
 
@@ -68,13 +73,35 @@ app.get('/api/lessons', (req, res) => res.json(tradingEngine.getLessons()));
 app.get('/api/models', (req, res) => res.json([]));
 app.get('/api/features', (req, res) => res.json(tradingEngine.getAccountState().lastFeatures || {}));
 
-// Socket.IO
-io.on('connection', (socket) => {
-  logger.info('Client connected');
-  socket.emit('EA_HEARTBEAT', tradingEngine.getAccountState());
-  socket.on('disconnect', () => logger.info('Client disconnected'));
+// New Historical API Endpoints
+app.get('/api/candles', async (req, res) => {
+  try {
+    const { symbol, timeframe, limit } = req.query;
+    const candles = await getCandles(
+      (symbol as string) || 'XAUUSD',
+      (timeframe as string) || 'M5',
+      Number(limit) || 1000
+    );
+    res.json(candles);
+  } catch (error) {
+    logger.error('Failed to fetch candles', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch candles' });
+  }
 });
 
-server.listen(PORT, () => {
-  logger.success('LiquiBot backend v4.0 LIVE on', PORT);
+// Socket.IO
+io.on('connection', (socket) => {
+  logger.info('Client connected', socket.id);
+  socket.emit('EA_HEARTBEAT', tradingEngine.getAccountState());
+  socket.on('disconnect', () => logger.info('Client disconnected', socket.id));
 });
+
+// Start server
+async function startServer() {
+  await tradingEngine.init();
+  server.listen(PORT, () => {
+    logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
+  });
+}
+
+startServer();

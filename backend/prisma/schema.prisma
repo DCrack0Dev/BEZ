@@ -1,129 +1,195 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
-enum TrendDirection {
-  BULLISH
-  BEARISH
-  NEUTRAL
+// --- MARKET DATA ---
+
+model Tick {
+  id        String   @id @default(cuid())
+  symbol    String
+  bid       Decimal
+  ask       Decimal
+  spread    Decimal
+  volume    Decimal
+  timestamp DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([symbol, timestamp])
 }
 
-enum MarketSession {
-  LONDON
-  NEWYORK
-  ASIA
-  OVERLAP
+model Candle {
+  id        String   @id @default(cuid())
+  symbol    String
+  timeframe String // 1m, 5m, 15m, 30m, 1h, 4h, 1d
+  open      Decimal
+  high      Decimal
+  low       Decimal
+  close     Decimal
+  volume    Decimal
+  timestamp DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  // Relations
+  indicators CandleIndicator?
+
+  @@index([symbol, timeframe, timestamp])
+  @@unique([symbol, timeframe, timestamp])
 }
 
-enum Volatility {
-  LOW
-  MEDIUM
-  HIGH
-  EXTREME
+model CandleIndicator {
+  id             String  @id @default(cuid())
+  candleId       String  @unique
+  atr            Decimal
+  rsi            Decimal
+  macd           Decimal?
+  macdSignal     Decimal?
+  macdHistogram  Decimal?
+  ema20          Decimal
+  ema50          Decimal
+  ema100         Decimal?
+  vwap           Decimal
+  adx            Decimal
+  bbUpper        Decimal
+  bbMiddle       Decimal
+  bbLower        Decimal
+  createdAt      DateTime @default(now())
+
+  candle Candle @relation(fields: [candleId], references: [id], onDelete: Cascade)
 }
 
-enum SpreadStatus {
-  NORMAL
-  WIDE
-  EXTREME
+// --- TRADING ACCOUNT ---
+
+model AccountSnapshot {
+  id              String   @id @default(cuid())
+  balance         Decimal
+  equity          Decimal
+  margin          Decimal
+  marginLevel     Decimal?
+  floatingPL      Decimal
+  openPositions   Int
+  currency        String
+  timestamp       DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  @@index([timestamp])
 }
 
-enum LiquiditySweep {
-  BULLISH
-  BEARISH
-  NONE
+model Position {
+  id            String   @id @default(cuid())
+  ticket        String
+  symbol        String
+  direction     String   // "BUY" | "SELL"
+  openPrice     Decimal
+  currentPrice  Decimal
+  sl            Decimal?
+  tp            Decimal?
+  lotSize       Decimal
+  profit        Decimal
+  openTimestamp DateTime
+  closeTimestamp DateTime?
+  isOpen        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // DNA Relation
+  tradeDnaId String?
+  tradeDna   TradeDNA? @relation(fields: [tradeDnaId], references: [id], onDelete: SetNull)
+
+  @@index([ticket])
+  @@index([isOpen])
+  @@index([createdAt])
 }
 
-enum FVG {
-  BULLISH
-  BEARISH
-  NONE
-}
-
-enum OrderBlock {
-  BULLISH
-  BEARISH
-  NONE
-}
-
-enum TradeOutcome {
-  WIN
-  LOSS
-  BREAKEVEN
-  OPEN
-}
+// --- TRADING ---
 
 model TradeDNA {
   id                String   @id @default(cuid())
   ticket            String
   symbol            String
   direction         String
-  entryTime         DateTime @default(now())
-  closeTime         DateTime?
-  durationMinutes   Int?
-  entryPrice        Float
-  stopLoss          Float
-  takeProfit        Float
-  lotSize           Float
-  riskPercent       Float
-  outcome           TradeOutcome @default(OPEN)
-  profitPips        Float   @default(0)
-  profitPercent     Float   @default(0)
-  profitDollars     Float   @default(0)
-  aiConfidence      Float   @default(0.75)
-  modelVersion      String  @default("v1.0")
+  entryPrice        Decimal
+  stopLoss          Decimal
+  takeProfit        Decimal
+  lotSize           Decimal
+  riskPercent       Decimal
+  outcome           String   // "WIN" | "LOSS" | "BREAKEVEN" | "OPEN"
+  profitPips        Decimal
+  profitPercent     Decimal
+  profitDollars     Decimal
+  aiConfidence      Decimal
+  modelVersion      String
   mistakes          String[]
   lessons           String[]
   notes             String?
   entryFeatures     Json
   closeFeatures     Json?
   screenshots       Json?
+  entryTimestamp    DateTime
+  closeTimestamp    DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
+  positions Position[]
+
   @@index([ticket])
-  @@index([symbol])
   @@index([outcome])
-  @@index([entryTime])
+  @@index([entryTimestamp])
 }
+
+// --- MARKET CONTEXT ---
+
+model EconomicEvent {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  currency    String
+  impact      String   // "LOW" | "MEDIUM" | "HIGH" | "EXTREME"
+  actual      String?
+  forecast    String?
+  previous    String?
+  timestamp   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([impact])
+}
+
+model MarketSession {
+  id        String   @id @default(cuid())
+  session   String   // "ASIA" | "LONDON" | "NEWYORK" | "OVERLAP"
+  startUTC  String
+  endUTC    String
+  createdAt DateTime @default(now())
+}
+
+// --- LEARNING & AI ---
 
 model Lesson {
   id          String   @id @default(cuid())
   category    String
   title       String
   description String
-  impact      String
+  impact      String   // "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
   dnaIds      String[]
   timestamp   DateTime @default(now())
-
-  @@index([category])
-  @@index([timestamp])
+  createdAt   DateTime @default(now())
 }
 
 model ModelCandidate {
-  id               String   @id @default(cuid())
-  version          String
-  trainingDate     DateTime @default(now())
-  winRate          Float
-  profitFactor     Float
-  avgProfit        Float
-  sharpeRatio      Float
-  status           String
-  deploymentRec    String
-  recReason        String
-  createdAt        DateTime @default(now())
-
-  @@index([version])
-  @@index([status])
+  id                   String   @id @default(cuid())
+  version              String
+  trainingDate         DateTime
+  winRate              Decimal
+  profitFactor         Decimal
+  avgProfit            Decimal
+  sharpeRatio          Decimal
+  status               String
+  deploymentRec        String
+  recReason            String
+  createdAt            DateTime @default(now())
 }
