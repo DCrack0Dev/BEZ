@@ -1,0 +1,37 @@
+# Keep EAS uploads small and avoid Windows path-casing noise.
+# EAS reinstalls JS deps on the build server — do not upload local node_modules.
+
+node_modules/
+**/node_modules/
+
+# Backend / Python / ML — not part of the mobile APK
+backend/
+.venv/
+Books/
+*.mq5
+*.mqh
+*.ex5
+
+# Local env / secrets / data
+.env
+.env.*
+!**/.env.example
+backend/data/
+backend/python/saved_models/
+backend/python/saved_scalers/
+backend/python/reports/
+
+# Native build junk (keep android/ sources; drop caches)
+android/.gradle/
+android/build/
+android/app/build/
+**/.cxx/
+**/*.apk
+**/*.aab
+
+# Misc
+.git/
+.cursor/
+canvases/
+*.log
+.DS_Store
