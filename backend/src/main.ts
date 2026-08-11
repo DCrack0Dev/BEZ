@@ -305,7 +305,7 @@ async function startServer() {
 
   await tradingEngine.init();
   continuousLearning.start();
-  server.listen(PORT, () => {
+  server.listen(Number(PORT), '0.0.0.0', () => {
     logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
     logger.info('Monitoring + continuous learning active');
     if (process.env.NODE_ENV === 'production') {

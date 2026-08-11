@@ -1,0 +1,33 @@
+# Render / cloud ops — fix "DATABASE_URL is required" crash
+# ========================================================
+#
+# Your deploy log shows a NATIVE Node service running:
+#   npm run start  →  ts-node src/main.ts
+# from Root Directory = backend
+#
+# The crash happens because DATABASE_URL is not set in the
+# Render service Environment. dotenv cannot invent it on Render
+# (there is no committed .env file — by design).
+#
+# FIX (2 minutes):
+# ----------------
+# 1. Render Dashboard → PostgreSQL
+#    - If you have no DB: New → PostgreSQL → create "liquibot-db"
+#    - Open the DB → Connect → copy "Internal Database URL"
+#
+# 2. Render Dashboard → Web Service (liquibot-back)
+#    → Environment → Add Environment Variable:
+#
+#      DATABASE_URL   = <Internal Database URL from step 1>
+#      JWT_SECRET     = <openssl rand -hex 32>
+#      EA_API_KEY     = <same as MT5 EA ApiKey, e.g. FXSK-...>
+#      NODE_ENV       = production
+#
+# 3. Manual Deploy → "Clear build cache & deploy" (or Redeploy)
+#
+# 4. Logs should show:
+#      LiquiBot backend v4.0 LIVE on port ...
+#    Health: GET https://liquibot-back.onrender.com/test → OK
+#
+# Optional: link DB in Blueprint via render.yaml (DATABASE_URL fromDatabase)
+# so future Blueprint syncs inject it automatically.

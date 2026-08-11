@@ -21,8 +21,13 @@ export type DbClient = PrismaClient | Prisma.TransactionClient;
 // (migrate/generate), but the adapter needs its own connection string at
 // runtime since the PrismaClient constructor no longer reads it implicitly.
 if (!process.env.DATABASE_URL) {
+  const hint =
+    process.env.RENDER === 'true' || process.env.RENDER_SERVICE_ID
+      ? ' On Render: Dashboard → your Web Service → Environment → Add DATABASE_URL ' +
+        '(Internal Database URL from your Render Postgres, or link the DB in Blueprint).'
+      : ' Set DATABASE_URL in backend/.env for local, or in your host env for cloud.';
   throw new Error(
-    'DATABASE_URL environment variable is required to initialize the database adapter.'
+    'DATABASE_URL environment variable is required to initialize the database adapter.' + hint
   );
 }
 
@@ -30,7 +35,7 @@ const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 
 const prisma = new PrismaClient({
   adapter,
-  log: ['query', 'info', 'warn', 'error'],
+  log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['query', 'info', 'warn', 'error'],
 });
 
 export async function initDb() {
