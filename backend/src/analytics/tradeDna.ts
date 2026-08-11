@@ -1,4 +1,4 @@
-import { FeatureSet } from '../features/featureEngine';
+import { FeatureSet } from '../types';
 
 /**
  * Trade DNA System

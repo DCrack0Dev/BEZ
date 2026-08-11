@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import DashboardScreen from '../screens/DashboardScreen';
 import ChartScreen from '../screens/ChartScreen';
 import JournalScreen from '../screens/JournalScreen';
+import AIDashboardScreen from '../screens/AIDashboardScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import { COLORS } from '../theme/colors';
 
@@ -42,6 +43,8 @@ const TabNavigator = () => {
             iconName = focused ? 'trending-up' : 'trending-up-outline';
           } else if (route.name === 'Journal') {
             iconName = focused ? 'book' : 'book-outline';
+          } else if (route.name === 'AI') {
+            iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
           } else if (route.name === 'Settings') {
             iconName = focused ? 'settings' : 'settings-outline';
           }
@@ -53,6 +56,7 @@ const TabNavigator = () => {
       <Tab.Screen name="Dashboard" component={DashboardScreen} />
       <Tab.Screen name="Charts" component={ChartScreen} />
       <Tab.Screen name="Journal" component={JournalScreen} />
+      <Tab.Screen name="AI" component={AIDashboardScreen} options={{ title: 'AI Lab' }} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );

@@ -4,3 +4,6 @@ node_modules/
 *.log
 
 /src/generated/prisma
+/data/
+/python/reports/
+/python/__pycache__/

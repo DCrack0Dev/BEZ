@@ -1,5 +1,5 @@
-import { TradeDNA } from '../dna/tradeDna';
-import { FeatureSet } from '../features/featureEngine';
+import { TradeDNA } from './tradeDna';
+import { FeatureSet } from '../types';
 
 /**
  * Experience Engine

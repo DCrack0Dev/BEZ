@@ -1,10 +1,11 @@
 import axios from 'axios';
 import { useAuthStore } from '../store/useAuthStore';
 
-const MOCK_MODE = false; // Set to false when backend is ready
+const DEFAULT_API_URL =
+  process.env.EXPO_PUBLIC_API_URL || 'https://liquibot-back.onrender.com';
 
 const apiClient = axios.create({
-  baseURL: 'https://liquibot-back.onrender.com', // Default backend URL - will be overridden by user input
+  baseURL: DEFAULT_API_URL,
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
@@ -13,12 +14,12 @@ const apiClient = axios.create({
 
 apiClient.interceptors.request.use((config) => {
   const { jwt, serverUrl, apiKey } = useAuthStore.getState();
-  
-  // Only override baseURL if it's the default one and we have a custom serverUrl
-  if (serverUrl && config.baseURL === 'https://liquibot-back.onrender.com') {
-    config.baseURL = serverUrl;
+
+  // Always prefer the URL the user entered at login when present.
+  if (serverUrl) {
+    config.baseURL = serverUrl.replace(/\/$/, '');
   }
-  
+
   if (jwt) {
     config.headers.Authorization = `Bearer ${jwt}`;
   }
@@ -27,8 +28,5 @@ apiClient.interceptors.request.use((config) => {
   }
   return config;
 });
-
-// Mock Data Interceptor
-// Mock mode is disabled - all requests go to real backend
 
 export default apiClient;

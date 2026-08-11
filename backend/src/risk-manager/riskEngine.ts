@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js';
-import { CONFIG } from './tradingConfig';
+import { CONFIG } from '../config/tradingConfig';
 
 /**
  * riskEngine.ts

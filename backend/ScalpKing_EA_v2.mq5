@@ -166,6 +166,10 @@ void SendHeartbeat()
    json += "\"spread\":" + DoubleToString((tick.ask - tick.bid)/_Point, 0) + ",";
    json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
    json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
+   // Additive fields for backend margin checks (see risk-manager). Backend field
+   // names expected: "freeMargin" and "marginLevel" (percent, e.g. 250 = 250%).
+   json += "\"freeMargin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ",";
+   json += "\"marginLevel\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_LEVEL), 2) + ",";
    json += "\"ema20\":" + DoubleToString(ema20[0], _Digits) + ",";
    json += "\"ema50\":" + DoubleToString(ema50[0], _Digits) + ",";
    json += "\"atr14\":" + DoubleToString(atr[0], _Digits) + ",";
@@ -293,46 +297,204 @@ void SendHeartbeat()
    FxScalpKing.SendHeartbeat(json, resp);
 }
 
+//+------------------------------------------------------------------+
+//| MINIMAL MANUAL JSON HELPERS                                      |
+//| No JSON library is used elsewhere in this project, so command    |
+//| payloads are parsed field-by-field rather than via fragile        |
+//| whole-response substring search.                                 |
+//+------------------------------------------------------------------+
+int SplitJsonArray(string json, string &out[])
+{
+   int start = StringFind(json, "[");
+   int stop  = StringFind(json, "]", start);
+   if(start < 0 || stop < 0) return 0;
+
+   string inner = StringSubstr(json, start + 1, stop - start - 1);
+   int depth = 0;
+   int objStart = -1;
+   int n = 0;
+   ArrayResize(out, 0);
+
+   for(int i = 0; i < StringLen(inner); i++)
+   {
+      ushort ch = StringGetCharacter(inner, i);
+      if(ch == '{')
+      {
+         if(depth == 0) objStart = i;
+         depth++;
+      }
+      else if(ch == '}')
+      {
+         depth--;
+         if(depth == 0 && objStart >= 0)
+         {
+            n++;
+            ArrayResize(out, n);
+            out[n - 1] = StringSubstr(inner, objStart, i - objStart + 1);
+            objStart = -1;
+         }
+      }
+   }
+   return n;
+}
+
+string GetJsonStringField(string obj, string key)
+{
+   string pattern = "\"" + key + "\":\"";
+   int idx = StringFind(obj, pattern);
+   if(idx < 0) return "";
+   int valStart = idx + StringLen(pattern);
+   int valEnd = StringFind(obj, "\"", valStart);
+   if(valEnd < 0) return "";
+   return StringSubstr(obj, valStart, valEnd - valStart);
+}
+
+double GetJsonNumberField(string obj, string key, double defaultVal)
+{
+   string pattern = "\"" + key + "\":";
+   int idx = StringFind(obj, pattern);
+   if(idx < 0) return defaultVal;
+   int valStart = idx + StringLen(pattern);
+   int valEnd = valStart;
+   int len = StringLen(obj);
+   while(valEnd < len)
+   {
+      ushort ch = StringGetCharacter(obj, valEnd);
+      bool isNumChar = (ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == '.' || ch == 'e' || ch == 'E';
+      if(!isNumChar) break;
+      valEnd++;
+   }
+   if(valEnd == valStart) return defaultVal;
+   return StringToDouble(StringSubstr(obj, valStart, valEnd - valStart));
+}
+
 void PollCommands()
 {
    string resp = FxScalpKing.GetCommands();
    if(resp == "" || resp == "[]") return;
-   
-   // The response is a JSON array of commands
-   // We will look for BUY, SELL, PAUSE, RESUME, CLOSE_ALL
-   if(StringFind(resp, "\"action\":\"BUY\"") >= 0 || StringFind(resp, "\"type\":\"BUY\"") >= 0) OpenBuy();
-   if(StringFind(resp, "\"action\":\"SELL\"") >= 0 || StringFind(resp, "\"type\":\"SELL\"") >= 0) OpenSell();
-   if(StringFind(resp, "\"action\":\"PAUSE\"") >= 0 || StringFind(resp, "\"type\":\"PAUSE\"") >= 0) { isPaused = true; Print("⏸ EA Paused"); }
-   if(StringFind(resp, "\"action\":\"RESUME\"") >= 0 || StringFind(resp, "\"type\":\"RESUME\"") >= 0) { isPaused = false; Print("▶ EA Resumed"); }
-   if(StringFind(resp, "\"action\":\"CLOSE_ALL\"") >= 0 || StringFind(resp, "\"type\":\"CLOSE_ALL\"") >= 0) CloseAllTrades();
+
+   string cmds[];
+   int count = SplitJsonArray(resp, cmds);
+
+   for(int i = 0; i < count; i++)
+   {
+      string obj = cmds[i];
+      string action = GetJsonStringField(obj, "action");
+      if(action == "") action = GetJsonStringField(obj, "type");
+
+      if(action == "BUY")
+      {
+         double lots = GetJsonNumberField(obj, "lots", 0);
+         double sl   = GetJsonNumberField(obj, "sl", 0);
+         double tp   = GetJsonNumberField(obj, "tp", 0);
+         OpenBuy(lots, sl, tp);
+      }
+      else if(action == "SELL")
+      {
+         double lots = GetJsonNumberField(obj, "lots", 0);
+         double sl   = GetJsonNumberField(obj, "sl", 0);
+         double tp   = GetJsonNumberField(obj, "tp", 0);
+         OpenSell(lots, sl, tp);
+      }
+      else if(action == "PAUSE")
+      {
+         isPaused = true;
+         Print("⏸ EA Paused");
+      }
+      else if(action == "RESUME")
+      {
+         isPaused = false;
+         Print("▶ EA Resumed");
+      }
+      else if(action == "CLOSE_ALL")
+      {
+         CloseAllTrades();
+      }
+      else if(action == "UPDATE_SL")
+      {
+         ulong ticket = (ulong)GetJsonNumberField(obj, "ticket", 0);
+         double newSl = GetJsonNumberField(obj, "sl", 0);
+         if(ticket > 0 && newSl > 0) UpdateStopLoss(ticket, newSl);
+         else Print("❌ UPDATE_SL command missing valid ticket/sl: ", obj);
+      }
+   }
 }
 
-void OpenBuy()
+// cmdLots/cmdSl/cmdTp: values sent by the backend in the trade command.
+// When present and non-zero they take priority over the static EA inputs.
+void OpenBuy(double cmdLots = 0, double cmdSl = 0, double cmdTp = 0)
 {
    if(isPaused) return;
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl = ask - StopLoss_Points * _Point;
-   double tp = ask + TakeProfit_Points * _Point;
-   double lot = FixedLotSize;
-   
-   if(trade.Buy(lot, _Symbol, ask, sl, tp, "App Brain Buy"))
-      Print("✅ Buy Order Placed: ", lot);
-   else
-      Print("❌ Buy Order Failed: ", GetLastError());
+
+   double lot = (cmdLots > 0) ? cmdLots : FixedLotSize;
+
+   const int maxAttempts = 3; // 1 initial try + 2 retries
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double sl = (cmdSl > 0) ? cmdSl : ask - StopLoss_Points * _Point;
+      double tp = (cmdTp > 0) ? cmdTp : ask + TakeProfit_Points * _Point;
+
+      ResetLastError();
+      if(trade.Buy(lot, _Symbol, ask, sl, tp, "App Brain Buy"))
+      {
+         Print("✅ Buy Order Placed: ", lot, " SL=", sl, " TP=", tp);
+         return;
+      }
+
+      Print("❌ Buy Order Failed (attempt ", attempt, "/", maxAttempts, "): broker error ", GetLastError());
+      if(attempt < maxAttempts) Sleep(300);
+   }
 }
 
-void OpenSell()
+void OpenSell(double cmdLots = 0, double cmdSl = 0, double cmdTp = 0)
 {
    if(isPaused) return;
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl = bid + StopLoss_Points * _Point;
-   double tp = bid - TakeProfit_Points * _Point;
-   double lot = FixedLotSize;
-   
-   if(trade.Sell(lot, _Symbol, bid, sl, tp, "App Brain Sell"))
-      Print("✅ Sell Order Placed: ", lot);
-   else
-      Print("❌ Sell Order Failed: ", GetLastError());
+
+   double lot = (cmdLots > 0) ? cmdLots : FixedLotSize;
+
+   const int maxAttempts = 3; // 1 initial try + 2 retries
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double sl = (cmdSl > 0) ? cmdSl : bid + StopLoss_Points * _Point;
+      double tp = (cmdTp > 0) ? cmdTp : bid - TakeProfit_Points * _Point;
+
+      ResetLastError();
+      if(trade.Sell(lot, _Symbol, bid, sl, tp, "App Brain Sell"))
+      {
+         Print("✅ Sell Order Placed: ", lot, " SL=", sl, " TP=", tp);
+         return;
+      }
+
+      Print("❌ Sell Order Failed (attempt ", attempt, "/", maxAttempts, "): broker error ", GetLastError());
+      if(attempt < maxAttempts) Sleep(300);
+   }
+}
+
+// Applies a trailing-stop update sent by the backend as an UPDATE_SL command.
+void UpdateStopLoss(ulong ticket, double newSl)
+{
+   if(!PositionSelectByTicket(ticket))
+   {
+      Print("❌ UPDATE_SL failed: position ticket ", ticket, " not found");
+      return;
+   }
+   double tp = PositionGetDouble(POSITION_TP);
+
+   const int maxAttempts = 3; // 1 initial try + 2 retries
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      ResetLastError();
+      if(trade.PositionModify(ticket, newSl, tp))
+      {
+         Print("✅ UPDATE_SL applied: ticket=", ticket, " newSL=", newSl);
+         return;
+      }
+
+      Print("❌ UPDATE_SL failed (attempt ", attempt, "/", maxAttempts, "): ticket=", ticket, " broker error ", GetLastError());
+      if(attempt < maxAttempts) Sleep(300);
+   }
 }
 
 void CloseAllTrades()

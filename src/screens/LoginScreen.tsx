@@ -8,7 +8,9 @@ import { SPACING } from '../theme/spacing';
 
 const LoginScreen = () => {
   const [apiKey, setApiKey] = useState('');
-  const [serverUrl, setServerUrl] = useState('https://liquibot-back.onrender.com');
+  const [serverUrl, setServerUrl] = useState(
+    process.env.EXPO_PUBLIC_API_URL || 'https://liquibot-back.onrender.com'
+  );
   const [loading, setLoading] = useState(false);
   const { setAuth } = useAuthStore();
 

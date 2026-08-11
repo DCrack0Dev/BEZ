@@ -1,9 +1,35 @@
-import { PrismaClient, Decimal } from '../generated/prisma';
+// Load .env before anything below reads process.env.DATABASE_URL. This
+// module must be self-sufficient regardless of import order in whatever
+// entry point requires it (ES import statements are hoisted and evaluated
+// before an importer's own top-level `dotenv.config()` call would run).
+import 'dotenv/config';
+import { PrismaClient, Prisma } from '../generated/prisma';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { logger } from '../logging';
 
-// Initialize Prisma Client (Prisma 7 style)
+const { Decimal } = Prisma;
+
+// Allows callers (e.g. trading-engine's close-trade transaction) to pass an
+// interactive transaction client so writes commit atomically, while
+// defaulting to the module-level client for existing non-transactional callers.
+export type DbClient = PrismaClient | Prisma.TransactionClient;
+
+// Initialize Prisma Client (Prisma 7 style).
+// As of Prisma 7, the "prisma-client-js" engine type requires an explicit
+// driver adapter (the Rust query engine binary is no longer embedded).
+// The datasource URL itself is resolved via prisma.config.ts for the CLI
+// (migrate/generate), but the adapter needs its own connection string at
+// runtime since the PrismaClient constructor no longer reads it implicitly.
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL environment variable is required to initialize the database adapter.'
+  );
+}
+
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+
 const prisma = new PrismaClient({
-  datasourceUrl: process.env.DATABASE_URL,
+  adapter,
   log: ['query', 'info', 'warn', 'error'],
 });
 
@@ -255,12 +281,29 @@ export async function saveTradeDna(data: {
   screenshots?: any;
   entryTimestamp: Date | number;
   closeTimestamp?: Date | number;
-}) {
+  // Ensemble Phase 1 (additive, all optional)
+  fnnOutput?: any;
+  cnnOutput?: any;
+  lstmOutput?: any;
+  ensembleOutput?: any;
+  marketRegime?: string;
+  regimeConfidence?: number;
+  executionQuality?: number;
+  slippagePips?: number;
+  entryLatencyMs?: number;
+  detectedPattern?: string;
+  patternConfidence?: number;
+  psychologyScore?: number;
+  misclassificationReason?: string;
+  confidenceError?: number;
+  predictionError?: number;
+}, db: DbClient = prisma) {
   try {
     const entryTs = data.entryTimestamp instanceof Date ? data.entryTimestamp : new Date(data.entryTimestamp);
     const closeTs = data.closeTimestamp ? (data.closeTimestamp instanceof Date ? data.closeTimestamp : new Date(data.closeTimestamp)) : null;
+    const dec = (n: number | undefined) => (n === undefined || n === null ? null : new Decimal(Number(n).toString()));
 
-    return await prisma.tradeDNA.upsert({
+    return await db.tradeDNA.upsert({
       where: {
         ticket: data.ticket,
       },
@@ -271,6 +314,21 @@ export async function saveTradeDna(data: {
         profitDollars: new Decimal(data.profitDollars.toString()),
         closeFeatures: data.closeFeatures || null,
         closeTimestamp: closeTs,
+        fnnOutput: data.fnnOutput,
+        cnnOutput: data.cnnOutput,
+        lstmOutput: data.lstmOutput,
+        ensembleOutput: data.ensembleOutput,
+        marketRegime: data.marketRegime,
+        regimeConfidence: dec(data.regimeConfidence),
+        executionQuality: dec(data.executionQuality),
+        slippagePips: dec(data.slippagePips),
+        entryLatencyMs: dec(data.entryLatencyMs),
+        detectedPattern: data.detectedPattern,
+        patternConfidence: dec(data.patternConfidence),
+        psychologyScore: dec(data.psychologyScore),
+        misclassificationReason: data.misclassificationReason,
+        confidenceError: dec(data.confidenceError),
+        predictionError: dec(data.predictionError),
         updatedAt: new Date(),
       },
       create: {
@@ -296,6 +354,21 @@ export async function saveTradeDna(data: {
         screenshots: data.screenshots || null,
         entryTimestamp: entryTs,
         closeTimestamp: closeTs,
+        fnnOutput: data.fnnOutput,
+        cnnOutput: data.cnnOutput,
+        lstmOutput: data.lstmOutput,
+        ensembleOutput: data.ensembleOutput,
+        marketRegime: data.marketRegime,
+        regimeConfidence: dec(data.regimeConfidence),
+        executionQuality: dec(data.executionQuality),
+        slippagePips: dec(data.slippagePips),
+        entryLatencyMs: dec(data.entryLatencyMs),
+        detectedPattern: data.detectedPattern,
+        patternConfidence: dec(data.patternConfidence),
+        psychologyScore: dec(data.psychologyScore),
+        misclassificationReason: data.misclassificationReason,
+        confidenceError: dec(data.confidenceError),
+        predictionError: dec(data.predictionError),
       },
     });
   } catch (error) {
@@ -324,6 +397,121 @@ export async function getCandles(symbol: string, timeframe: string, limit: numbe
   } catch (error) {
     logger.error('Failed to fetch candles', error);
     return [];
+  }
+}
+
+// --- POST-TRADE ANALYSIS ---
+
+export async function savePostTradeAnalysis(data: {
+  ticket: string;
+  symbol: string;
+  direction: string;
+  outcome: string;
+  profitPips: number;
+  profitDollars: number;
+  modelVersion?: string;
+  aiConfidence?: number;
+  analysis: any;
+  lessons: string[];
+  labeledSampleId?: string;
+}, db: DbClient = prisma) {
+  try {
+    const aiConfDecimal = data.aiConfidence !== undefined ? new Decimal(data.aiConfidence.toString()) : null;
+
+    return await db.postTradeAnalysis.upsert({
+      where: {
+        ticket: data.ticket,
+      },
+      update: {
+        outcome: data.outcome,
+        profitPips: new Decimal(data.profitPips.toString()),
+        profitDollars: new Decimal(data.profitDollars.toString()),
+        aiConfidence: aiConfDecimal,
+        analysis: data.analysis,
+        lessons: data.lessons,
+        labeledSampleId: data.labeledSampleId || null,
+      },
+      create: {
+        ticket: data.ticket,
+        symbol: data.symbol,
+        direction: data.direction,
+        outcome: data.outcome,
+        profitPips: new Decimal(data.profitPips.toString()),
+        profitDollars: new Decimal(data.profitDollars.toString()),
+        modelVersion: data.modelVersion || null,
+        aiConfidence: aiConfDecimal,
+        analysis: data.analysis,
+        lessons: data.lessons,
+        labeledSampleId: data.labeledSampleId || null,
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to save PostTradeAnalysis', error);
+    return null;
+  }
+}
+
+// --- ENSEMBLE PREDICTION (Phase 1, additive, nullable) ---
+
+export async function saveEnsemblePrediction(data: {
+  ticket?: string;
+  signalId?: string;
+  symbol: string;
+  proposedDirection: string;
+  finalScore: number;
+  decision: string;
+  fnnVersion?: string;
+  cnnVersion?: string;
+  lstmVersion?: string;
+  fnnOutput?: any;
+  cnnOutput?: any;
+  lstmOutput?: any;
+  ruleConfidence: number;
+  explainability: any;
+  regime: string;
+  regimeConfidence: number;
+  weightsUsed: any;
+  perModelScores: any;
+  reasons: string[];
+  hardGateEnabled?: boolean;
+  predictionLogId?: string;
+  tradeDnaId?: string;
+}, db: DbClient = prisma) {
+  try {
+    // NOTE: `ensemblePrediction` table is added to Prisma schema in Phase 1.
+    // Until `prisma generate` is re-run locally, `DbClient` types don't know
+    // about the new table. Cast through `any` so compilation passes before
+    // the developer runs the generate step; runtime path is identical.
+    const client: any = db;
+    return await client.ensemblePrediction.create({
+      data: {
+        ticket: data.ticket || null,
+        signalId: data.signalId || null,
+        symbol: data.symbol,
+        proposedDirection: data.proposedDirection,
+        finalScore: new Decimal(Number(data.finalScore).toString()),
+        decision: data.decision,
+        fnnVersion: data.fnnVersion || null,
+        cnnVersion: data.cnnVersion || null,
+        lstmVersion: data.lstmVersion || null,
+        fnnOutput: data.fnnOutput || null,
+        cnnOutput: data.cnnOutput || null,
+        lstmOutput: data.lstmOutput || null,
+        ruleConfidence: new Decimal(Number(data.ruleConfidence).toString()),
+        explainability: data.explainability,
+        regime: data.regime,
+        regimeConfidence: new Decimal(Number(data.regimeConfidence).toString()),
+        weightsUsed: data.weightsUsed,
+        perModelScores: data.perModelScores,
+        reasons: data.reasons,
+        hardGateEnabled: !!data.hardGateEnabled,
+        predictionLogId: data.predictionLogId || null,
+        tradeDnaId: data.tradeDnaId || null,
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to save EnsemblePrediction', error);
+    return null;
   }
 }
 

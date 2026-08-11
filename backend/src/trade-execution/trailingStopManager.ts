@@ -1,4 +1,4 @@
-import { CONFIG } from './tradingConfig';
+import { CONFIG } from '../config/tradingConfig';
 import { Decimal } from 'decimal.js';
 
 /**
@@ -15,7 +15,10 @@ export interface PositionState {
   openPrice: number;
   currentSL: number;
   currentPrice: number;
-  phase: 1 | 2 | 3 | 4 | 5;
+  // Relaxed from a `1 | 2 | 3 | 4 | 5` literal union to `number` so this
+  // interface stays structurally compatible with the persisted
+  // Position.trailingPhase column (plain Int) used for crash recovery.
+  phase: number;
   scaleInLevels: { price: number; newStopLoss: number }[];
   tpLevels: number[];
   spread: number;
@@ -38,9 +41,14 @@ export const processTrailingStop = (pos: PositionState): { newSL: number; phase:
   let targetSL = currentSL;
 
   // --- PHASE MANAGEMENT ---
-  
+  // Guard against empty scaleInLevels/tpLevels: nothing currently populates
+  // these arrays when a position is initialized (trading-engine sets them to
+  // []), so we must skip the scale-in/TP-phase logic gracefully instead of
+  // dereferencing undefined entries, while still allowing basic trailing
+  // (phases >= 2 driven purely by trailDistance) to run below.
+
   // Phase 2: ScaleIn2 Triggered
-  if (phase === 1) {
+  if (phase === 1 && scaleInLevels.length > 0) {
     const si2 = scaleInLevels[0];
     const triggerMet = isBuy ? currentPrice >= si2.price : currentPrice <= si2.price;
     if (triggerMet) {
@@ -50,7 +58,7 @@ export const processTrailingStop = (pos: PositionState): { newSL: number; phase:
   }
 
   // Phase 3: ScaleIn3 Triggered
-  if (phase === 2) {
+  if (phase === 2 && scaleInLevels.length > 1) {
     const si3 = scaleInLevels[1];
     const triggerMet = isBuy ? currentPrice >= si3.price : currentPrice <= si3.price;
     if (triggerMet) {
@@ -60,14 +68,14 @@ export const processTrailingStop = (pos: PositionState): { newSL: number; phase:
   }
 
   // Phase 4 & 5: TP Hits
-  if (phase < 4) {
+  if (phase < 4 && tpLevels.length > 0) {
     const tp1Met = isBuy ? currentPrice >= tpLevels[0] : currentPrice <= tpLevels[0];
     if (tp1Met) {
       nextPhase = 4;
       targetSL = tpLevels[0]; // Move stop to TP1
     }
   }
-  if (phase < 5) {
+  if (phase < 5 && tpLevels.length > 1) {
     const tp2Met = isBuy ? currentPrice >= tpLevels[1] : currentPrice <= tpLevels[1];
     if (tp2Met) {
       nextPhase = 5;

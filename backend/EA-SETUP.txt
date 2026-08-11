@@ -1,23 +1,61 @@
-FxScalpKing EA Setup Instructions
-==================================
+FxScalpKing EA Setup (v3) — LiquiBot
+====================================
 
-1. Copy the ea-template.mq5 file to your MT5 Experts folder
-2. Open the file in MetaEditor
-3. Change "FXSK-YOUR-API-KEY" to your actual API key
-4. Compile the EA
-5. Attach the EA to any chart in MT5
-6. The EA will automatically connect to the backend
+USE THESE FILES (from the backend/ folder — NOT empty root stubs):
+  1. backend/ScalpKing_EA_v3.mq5
+  2. backend/FxScalpKing_HTTP.mqh   (must sit next to the .mq5)
 
-Default Settings:
-- Server URL: https://liquibot-back.onrender.com
-- Update Interval: 5 seconds
-- API Key: FXSK-YOUR-API-KEY (change this)
+Steps
+-----
+1. Copy BOTH files into your MT5 Experts folder, same directory:
+     <MT5_DATA>\MQL5\Experts\FxScalpKing\
 
-What the EA Does:
-- Sends account balance, equity, profit
-- Sends open positions with real P&L
-- Sends technical indicators (EMA, RSI, ATR, BB)
-- Sends market structures (order blocks, FVGs)
-- Receives trading commands from the app
+2. Open ScalpKing_EA_v3.mq5 in MetaEditor → Compile (F7).
+   Fix any include path errors so FxScalpKing_HTTP.mqh resolves.
 
-No other configuration needed!
+3. In MT5: Tools → Options → Expert Advisors
+   - Allow WebRequest for listed URL
+   - Add your backend URL exactly, e.g.:
+       http://localhost:5000
+       OR https://liquibot-back.onrender.com
+
+4. Attach ScalpKing_EA_v3 to an XAUUSD (or your symbol) chart.
+   Inputs:
+     ApiKey    = EXACT value of backend .env EA_API_KEY
+                 (local default: FXSK-90e36448c3d1ef9d749aa155ba228541)
+     ServerURL = same host you allowlisted above (no trailing slash)
+
+5. Start the backend first:
+     cd backend
+     npm run migrate
+     npm run dev
+
+6. Enable AutoTrading in MT5. Journal should show:
+     License Validated Successfully
+     HEARTBEAT Sent successfully
+
+What the EA does
+----------------
+- Heartbeat → POST /api/ea/update  (x-api-key header)
+- Poll commands → GET /api/ea/commands
+- Executes brain lots/SL/TP (not FixedLotSize when brain sends values)
+- Applies UPDATE_SL trailing from backend
+- Reports fills → POST /api/ea/execution-report
+
+Mobile APK
+----------
+  npm run build:apk
+  (requires `eas login` and linked EAS project)
+
+Training
+--------
+  cd backend
+  npm run train
+  # or POST /api/ai/train  (JWT required on mobile-facing routes)
+  # Promote only after review: POST /api/ai/promote { "version": "vX.Y" }
+
+AI gating (optional, after shadow review)
+-----------------------------------------
+  In backend/.env set:
+    AI_TRADING_ENABLED=true
+  Restart backend. Until then AI runs in shadow mode only.

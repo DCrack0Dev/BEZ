@@ -17,6 +17,8 @@ export interface MT5Payload {
   spread: number;
   balance: number;
   equity: number;
+  price?: number;
+  chart?: Record<string, Candle[]>;
   pipSize: number;
   pointSize: number;
   pipValue: number;
@@ -30,6 +32,10 @@ export interface MT5Payload {
   ema20Prev: number;
   atr14?: number;
   newsFilterActive?: boolean;
+  freeMargin?: number;
+  marginLevel?: number;
+  margin?: number;
+  dailyLossPercent?: number;
   positions?: any[];
   openPositions?: any[];
   closedTrades?: any[];
@@ -167,4 +173,121 @@ export interface ModelCandidate {
   status: 'TRAINING' | 'EVALUATING' | 'RECOMMENDED' | 'DEPLOYED' | 'ARCHIVED';
   deploymentRecommendation: 'YES' | 'NO' | 'MONITOR';
   recommendationReason: string;
+}
+
+// ============================================================
+// MULTI-MODEL ENSEMBLE (Phase 1) — purely additive, no breaks.
+// Existing `TradingPrediction` is treated as the FNN output.
+// ============================================================
+
+export type ModelKind = 'FNN' | 'CNN' | 'LSTM' | 'ENSEMBLE';
+
+export interface FNNPrediction {
+  kind: 'FNN';
+  version: string;
+  latencyMs?: number;
+  marketQualityScore: number;       // 0-1, how "tradeable" current bar is
+  tradeConfidence: number;          // 0-1, confidence in the proposed direction
+  bullishProbability: number;       // 0-1
+  bearishProbability: number;       // 0-1
+  noTradeProbability: number;       // 0-1
+  /** Indicator/feature shap-style weights for explainability */
+  topDrivers: Array<{ name: string; contribution: number }>;
+}
+
+export type ChartPattern =
+  | 'TRIANGLE'
+  | 'FLAG'
+  | 'PENNANT'
+  | 'BREAKOUT'
+  | 'ORDER_BLOCK'
+  | 'LIQUIDITY_SWEEP'
+  | 'SUPPORT_HOLD'
+  | 'RESISTANCE_HOLD'
+  | 'TREND_CONTINUATION'
+  | 'REVERSAL'
+  | 'NONE';
+
+export interface CNNPrediction {
+  kind: 'CNN';
+  version: string;
+  latencyMs?: number;
+  patternConfidence: number;        // 0-1
+  pattern: ChartPattern;
+  patternProbabilities: Partial<Record<ChartPattern, number>>;
+  bullishProbability: number;
+  bearishProbability: number;
+  noTradeProbability: number;
+}
+
+export interface LSTMPrediction {
+  kind: 'LSTM';
+  version: string;
+  latencyMs?: number;
+  horizonBars: number;              // e.g. 3 = prediction horizon
+  upProbability: number;            // 0-1
+  downProbability: number;          // 0-1
+  sidewaysProbability: number;      // 0-1
+  predictedMoveSizePips: number;    // signed (positive = up)
+  confidence: number;               // 0-1
+}
+
+export type MarketRegime =
+  | 'TRENDING'
+  | 'RANGING'
+  | 'VOLATILE'
+  | 'NEWS_DRIVEN'
+  | 'LOW_LIQUIDITY'
+  | 'HIGH_LIQUIDITY';
+
+export interface MarketRegimeClassification {
+  regime: MarketRegime;
+  confidence: number;               // 0-1
+  scores: Record<MarketRegime, number>;
+  /** Compatible strategies given this regime (rule + model subsets). */
+  compatibleStrategies: string[];
+  /** Why this regime was chosen */
+  reasoning: string;
+}
+
+export interface ExplainabilityBundle {
+  reason: string;
+  confidence: number;
+  featuresResponsible: Array<{ name: string; weight: number }>;
+  patternDetected: ChartPattern | 'NONE';
+  trendDirection: TrendDirection;
+  risk: RiskScore;
+  expectedRr: number;
+  winProbability: number;
+  /** Which of the 8 post-trade dimensions *prior* trades in similar setup typically failed on (for user-facing context) */
+  typicalFailure?: string;
+}
+
+export interface EnsembleDecision {
+  timestamp: number;
+  symbol: string;
+  proposedDirection: 'BUY' | 'SELL';
+  finalScore: number;               // 0-1, blended
+  decision: 'ACCEPT' | 'REJECT' | 'SHADOW_REJECT';
+  fnn: FNNPrediction | null;
+  cnn: CNNPrediction | null;
+  lstm: LSTMPrediction | null;
+  ruleConfidence: number;           // 0-1 (rule engine)
+  regime: MarketRegimeClassification;
+  agreement: {
+    fnn: boolean | null;            // agrees with proposed direction?
+    cnn: boolean | null;
+    lstm: boolean | null;
+    countAgree: number;
+    countDisagree: number;
+    countUnavailable: number;
+  };
+  weights: Record<'FNN' | 'CNN' | 'LSTM' | 'RULE', number>;
+  perModelFinalScore: Record<'FNN' | 'CNN' | 'LSTM', number | null>;
+  explainability: ExplainabilityBundle;
+  reasons: string[];
+  /** If regime-incompatible, why */
+  regimeBlocked?: boolean;
+  /** Never remove old fields; this is persisted to SQL + JSONL for training */
+  aiMinConfidenceThreshold: number;
 }

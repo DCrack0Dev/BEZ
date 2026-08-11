@@ -36,6 +36,7 @@ model Candle {
 
   // Relations
   indicators CandleIndicator?
+  featureSet FeatureSet? @relation("CandleToFeatureSet")
 
   @@index([symbol, timeframe, timestamp])
   @@unique([symbol, timeframe, timestamp])
@@ -59,7 +60,77 @@ model CandleIndicator {
   bbLower        Decimal
   createdAt      DateTime @default(now())
 
-  candle Candle @relation(fields: [candleId], references: [id], onDelete: Cascade)
+  candle     Candle  @relation(fields: [candleId], references: [id], onDelete: Cascade)
+  featureSet FeatureSet? @relation("IndicatorToFeatureSet")
+}
+
+// --- FEATURE ENGINEERING ---
+
+model FeatureSet {
+  id                String  @id @default(cuid())
+  symbol            String
+  timeframe         String
+  
+  // --- TREND ---
+  trendStrength     Decimal
+  trendDirection    String
+  ema20DistancePips Decimal
+  ema50DistancePips Decimal
+  adxValue          Decimal
+  slope20           Decimal?
+  slope50           Decimal?
+  
+  // --- MOMENTUM ---
+  momentumDirection String
+  rsiStrength       Decimal
+  macdMomentum      String
+  cciValue          Decimal?
+  williamsR         Decimal?
+  
+  // --- VOLATILITY ---
+  atrRatio          Decimal
+  volatility        String
+  bbPercentWidth    Decimal?
+  bbPosition        Decimal?
+  
+  // --- LIQUIDITY ---
+  liquiditySweep    String
+  recentSweeps      Json?
+  
+  // --- PRICE STRUCTURE & SWINGS ---
+  swingHighs        Json
+  swingLows         Json
+  nearestSupport    Decimal?
+  nearestResistance Decimal?
+  structureType     String? // "HH_HL" | "LH_LL" | "RANGE"
+  structureStrength Decimal?
+  
+  // --- SMC ---
+  fvgPresent        String
+  fvgDetails        Json?
+  orderBlockConfirmed String
+  orderBlockDetails Json?
+  poiZones          Json?
+  
+  // --- MARKET SESSION ---
+  marketSession     String
+  
+  // --- PREVIOUS CANDLE RELATIONSHIPS ---
+  prevCandlePattern String?
+  prevCandleBodyPct Decimal?
+  prevCandleType    String? // "MARUBOZU" | "DOJI" | "HAMMER" | "SHOOTING_STAR" | "ENGULFING"
+  
+  // --- NORMALIZED & AI-READY ---
+  normalizedFeatures Json // Array of normalized floats
+  
+  // Relations
+  candleId          String  @unique
+  candle          Candle  @relation("CandleToFeatureSet", fields: [candleId], references: [id], onDelete: Cascade)
+  candleIndicatorId String? @unique
+  candleIndicator  CandleIndicator? @relation("IndicatorToFeatureSet", fields: [candleIndicatorId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+
+  @@index([symbol, timeframe, createdAt])
 }
 
 // --- TRADING ACCOUNT ---
@@ -81,7 +152,10 @@ model AccountSnapshot {
 
 model Position {
   id            String   @id @default(cuid())
-  ticket        String
+  // Broker order tickets are globally unique per account, so a plain unique
+  // constraint (rather than a compound [ticket, symbol]) is the safer choice:
+  // it prevents two rows ever silently coexisting for the same broker ticket.
+  ticket        String   @unique
   symbol        String
   direction     String   // "BUY" | "SELL"
   openPrice     Decimal
@@ -93,6 +167,8 @@ model Position {
   openTimestamp DateTime
   closeTimestamp DateTime?
   isOpen        Boolean  @default(true)
+  // Trailing-stop phase (1-5), persisted so it can be rehydrated after a restart.
+  trailingPhase Int      @default(1)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -100,7 +176,6 @@ model Position {
   tradeDnaId String?
   tradeDna   TradeDNA? @relation(fields: [tradeDnaId], references: [id], onDelete: SetNull)
 
-  @@index([ticket])
   @@index([isOpen])
   @@index([createdAt])
 }
@@ -108,8 +183,10 @@ model Position {
 // --- TRADING ---
 
 model TradeDNA {
-  id                String   @id @default(cuid())
-  ticket            String
+  id                String                 @id @default(cuid())
+  // Same rationale as Position.ticket: broker tickets are globally unique,
+  // so a plain unique constraint is safer than a compound key.
+  ticket            String                 @unique
   symbol            String
   direction         String
   entryPrice        Decimal
@@ -117,7 +194,7 @@ model TradeDNA {
   takeProfit        Decimal
   lotSize           Decimal
   riskPercent       Decimal
-  outcome           String   // "WIN" | "LOSS" | "BREAKEVEN" | "OPEN"
+  outcome           String                 // "WIN" | "LOSS" | "BREAKEVEN" | "OPEN"
   profitPips        Decimal
   profitPercent     Decimal
   profitDollars     Decimal
@@ -131,13 +208,152 @@ model TradeDNA {
   screenshots       Json?
   entryTimestamp    DateTime
   closeTimestamp    DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
 
-  positions Position[]
+  // ----------------
+  // ENSEMBLE PHASE 1 (ADDITIVE, NULLABLE, BACKWARDS COMPATIBLE)
+  // ----------------
+  fnnOutput         Json?
+  cnnOutput         Json?
+  lstmOutput        Json?
+  ensembleOutput    Json?                // full EnsembleDecision JSON
+  marketRegime      String?              // TRENDING / RANGING / VOLATILE / ...
+  regimeConfidence  Decimal?
+  executionQuality  Decimal?             // 0-1, composed from latency+slippage+spread
+  slippagePips      Decimal?
+  entryLatencyMs    Decimal?
+  detectedPattern   String?              // ChartPattern enum value
+  patternConfidence Decimal?
+  psychologyScore   Decimal?             // placeholder for future behavior-scoring layer
+  misclassificationReason String?
+  confidenceError   Decimal?
+  predictionError   Decimal?
 
-  @@index([ticket])
+  positions          Position[]
+  advancedJournals   AdvancedTradeJournal[] @relation("TradeDnaToJournal")
+  ensemblePredictions EnsemblePrediction[]
+
   @@index([outcome])
+  @@index([entryTimestamp])
+  @@index([marketRegime])
+}
+
+// --- ENSEMBLE PREDICTIONS (Phase 1) — every per-signal vote recorded
+model EnsemblePrediction {
+  id                String   @id @default(cuid())
+  ticket            String?  // optional, filled if this prediction became a live trade
+  signalId          String?  // optional correlation id
+  symbol            String
+  proposedDirection String   // BUY / SELL
+  finalScore        Decimal
+  decision          String   // ACCEPT / REJECT / SHADOW_REJECT
+
+  fnnVersion        String?
+  cnnVersion        String?
+  lstmVersion        String?
+  fnnOutput         Json?
+  cnnOutput         Json?
+  lstmOutput        Json?
+  ruleConfidence    Decimal
+  explainability    Json     // ExplainabilityBundle (featuresResponsible, pattern, regime, reason, …)
+  regime            String
+  regimeConfidence  Decimal
+  weightsUsed       Json     // normalized weights actually used
+  perModelScores    Json
+  reasons           String[]
+  hardGateEnabled   Boolean  @default(false)
+
+  // Audit
+  predictionLogId   String?  // FK to PredictionLog later if you want; nullable now
+  tradeDnaId        String?
+  tradeDna          TradeDNA? @relation(fields: [tradeDnaId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([symbol, createdAt])
+  @@index([decision])
+  @@index([tradeDnaId])
+}
+
+// --- ADVANCED TRADE JOURNAL ---
+model AdvancedTradeJournal {
+  id                  String   @id @default(cuid())
+  // Unique so journalManager can look up/update/delete a single entry per
+  // broker ticket (each trade has exactly one journal entry).
+  ticket              String   @unique
+
+  // --- MARKET ---
+  symbol              String
+  direction           String   // "BUY" | "SELL"
+  marketSnapshot      Json     // Full market state at entry time
+  marketSession       String
+
+  // --- INDICATORS & FEATURES ---
+  indicators          Json     // Full CandleIndicator data at entry
+  featureSet          Json     // Full FeatureSet data at entry
+
+  // --- AI ---
+  aiPrediction        String?  // "BUY" | "SELL" | "HOLD"
+  aiConfidence        Decimal?
+  aiExpectedRisk      Decimal?
+  aiExpectedReward    Decimal?
+  aiExpectedDuration  Decimal?
+  modelVersion        String?
+
+  // --- ENSEMBLE + REGIME (Phase 1, nullable, backwards compatible) ---
+  marketRegime        String?  // TRENDING / RANGING / VOLATILE / NEWS_DRIVEN / LOW_LIQUIDITY / HIGH_LIQUIDITY
+  regimeConfidence    Decimal?
+  detectedPattern     String?  // ChartPattern
+  patternConfidence   Decimal?
+  fnnConfidence       Decimal?
+  cnnConfidence       Decimal?
+  lstmConfidence      Decimal?
+  ensembleScore       Decimal? // 0-1 final blended score
+  ensembleDecision    String?  // ACCEPT / REJECT / SHADOW_REJECT
+  explainability      Json?    // ExplainabilityBundle snapshot
+
+  // --- EXECUTION ---
+  entryPrice          Decimal
+  executionPrice      Decimal  // Actual fill price
+  slippage            Decimal  // In pips/points
+  spreadAtEntry       Decimal
+
+  // --- RISK MANAGEMENT ---
+  sl                  Decimal
+  tp                  Decimal
+  lotSize             Decimal
+  riskPercent         Decimal
+  riskScore           Decimal? // 0-100 score
+
+  // --- TRADE RESULT ---
+  outcome             String   // "WIN" | "LOSS" | "BREAKEVEN" | "OPEN"
+  profitPips          Decimal
+  profitPercent       Decimal
+  profitDollars       Decimal
+
+  // --- TIMING ---
+  entryTimestamp      DateTime
+  closeTimestamp      DateTime?
+  durationMinutes     Decimal? // Duration in minutes
+
+  // --- REASONS & NOTES ---
+  reasonForEntry      String?
+  reasonForExit       String?
+  notes               String?
+
+  // --- SCREENSHOTS ---
+  screenshotRefs      Json? // Array of references/urls to screenshots before, at, after
+
+  // --- RELATIONS ---
+  tradeDnaId          String?
+  tradeDna            TradeDNA? @relation("TradeDnaToJournal", fields: [tradeDnaId], references: [id], onDelete: SetNull)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([outcome])
+  @@index([symbol])
   @@index([entryTimestamp])
 }
 
@@ -182,14 +398,188 @@ model Lesson {
 
 model ModelCandidate {
   id                   String   @id @default(cuid())
-  version              String
+  version              String   @unique
   trainingDate         DateTime
   winRate              Decimal
   profitFactor         Decimal
   avgProfit            Decimal
+  avgRr                Decimal?
   sharpeRatio          Decimal
-  status               String
-  deploymentRec        String
+  maxDrawdown          Decimal?
+  accuracy             Decimal?
+  precision            Decimal?
+  recall               Decimal?
+  f1Score              Decimal?
+  trainingLoss         Decimal?
+  validationLoss       Decimal?
+  tradeFrequency       Decimal?
+  stability            Decimal?
+  status               String   // "TRAINING" | "CANDIDATE" | "EVALUATING" | "RECOMMENDED" | "PRODUCTION" | "ARCHIVED"
+  deploymentRec        String   // "YES" | "NO" | "MONITOR"
   recReason            String
+  isProduction         Boolean  @default(false)
+  metricsJson          Json?
+  comparisonJson       Json?
   createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  trainingRuns         TrainingRun[]
+
+  @@index([status])
+  @@index([isProduction])
+}
+
+model ModelRegistry {
+  id                  String   @id @default(cuid())
+  productionVersion   String?
+  updatedAt           DateTime @updatedAt
+  createdAt           DateTime @default(now())
+}
+
+model TrainingRun {
+  id                  String   @id @default(cuid())
+  version             String
+  status              String   // "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
+  epochs              Int?
+  trainSamples        Int?
+  valSamples          Int?
+  holdoutSamples      Int?
+  trainingLoss        Decimal?
+  validationLoss      Decimal?
+  accuracy            Decimal?
+  precision           Decimal?
+  recall              Decimal?
+  f1Score             Decimal?
+  profitFactor        Decimal?
+  sharpeRatio         Decimal?
+  maxDrawdown         Decimal?
+  historyJson         Json?
+  errorMessage        String?
+  startedAt           DateTime @default(now())
+  completedAt         DateTime?
+  createdAt           DateTime @default(now())
+
+  candidateId         String?
+  candidate           ModelCandidate? @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+
+  @@index([version])
+  @@index([status])
+  @@index([startedAt])
+}
+
+model PredictionLog {
+  id                  String   @id @default(cuid())
+  modelVersion        String
+  symbol              String?
+  buyProbability      Decimal
+  sellProbability     Decimal
+  holdProbability     Decimal
+  confidence          Decimal
+  expectedRisk        Decimal?
+  expectedReward      Decimal?
+  expectedDuration    Decimal?
+  predictedAction     String   // "BUY" | "SELL" | "HOLD"
+  featuresSnapshot    Json?
+  createdAt           DateTime @default(now())
+
+  @@index([modelVersion, createdAt])
+  @@index([createdAt])
+}
+
+// --- MONITORING ---
+
+model SystemAlert {
+  id          String   @id @default(cuid())
+  severity    String   // "INFO" | "WARNING" | "CRITICAL"
+  category    String   // "API" | "INFERENCE" | "EXECUTION" | "DATABASE" | "SYSTEM" | "BROKER" | "ERROR"
+  metric      String
+  value       Decimal
+  threshold   Decimal
+  message     String
+  acknowledged Boolean @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([severity, createdAt])
+  @@index([acknowledged])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  category    String   // "TRAINING" | "EVALUATION" | "PROMOTION" | "BACKTEST" | "LEARNING" | "MONITORING"
+  action      String
+  version     String?
+  details     Json?
+  actor       String   @default("system")
+  createdAt   DateTime @default(now())
+
+  @@index([category, createdAt])
+  @@index([version])
+}
+
+model PostTradeAnalysis {
+  id              String   @id @default(cuid())
+  ticket          String   @unique
+  symbol          String
+  direction       String
+  outcome         String
+  profitPips      Decimal
+  profitDollars   Decimal
+  modelVersion    String?
+  aiConfidence    Decimal?
+  analysis        Json
+  lessons         String[]
+  labeledSampleId String?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([outcome])
+}
+
+model BacktestRun {
+  id                String   @id @default(cuid())
+  modelVersion      String
+  symbol            String?
+  status            String
+  winRate           Decimal?
+  profitFactor      Decimal?
+  sharpeRatio       Decimal?
+  maxDrawdown       Decimal?
+  totalTrades       Int?
+  monthlyReturns    Json?
+  tradeDistribution Json?
+  reportPath        String?
+  metricsJson       Json?
+  startedAt         DateTime @default(now())
+  completedAt       DateTime?
+  createdAt         DateTime @default(now())
+
+  @@index([modelVersion])
+  @@index([startedAt])
+}
+
+// ============================================================
+// CLOUD PERSISTENCE: Model + Scaler + Dataset Artifacts
+//
+// Render, Fly.io, Railway, and most PaaS have EPHEMERAL filesystems
+// — saved_models/, saved_scalers/, data/learning/*.json get wiped
+// on every deploy / restart. This table mirrors every artifact to
+// PostgreSQL (BYTEA blobs) so the server can:
+//   1. On cold boot: if local FS is empty → RESTORE all artifacts from DB
+//   2. On any save:   DUAL-WRITE to local FS + this table
+//   3. Optional:      Enable Render Persistent Disk for faster warm starts
+// ============================================================
+model ModelArtifact {
+  id          String   @id @default(cuid())
+  artifactKey String   @unique // e.g. "model:v1.3/weights.pt", "scaler:v1.3/scaler.joblib", "dataset:continuous_dataset.json"
+  type        String   // "MODEL_WEIGHTS" | "MODEL_METADATA" | "SCALER" | "REGISTRY" | "DATASET" | "BACKTEST_REPORT" | "AUDIT_LOG"
+  version     String?  // model version for model/scaler artifacts; null for global datasets
+  data        Bytes    // raw file content as BYTEA (Postgres blob — fine up to ~1GB)
+  sizeBytes   Int
+  checksum    String   // SHA-256 hex, used by restore() to skip identical files
+  mimeType    String?  // application/octet-stream, application/json, application/x-pytorch, ...
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([type])
+  @@index([version])
 }

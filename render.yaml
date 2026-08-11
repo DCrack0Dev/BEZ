@@ -1,13 +1,127 @@
+# ============================================================
+# LiquiBot — Render Cloud Deployment (Full Online Stack)
+# Deploys: Node.js backend + Python/PyTorch AI + PostgreSQL
+# Training, inference, continuous learning, journal, risk,
+# ensemble, regime detection — all run ONLINE, no localhost.
+#
+# Your MT5 EA simply points its ServerURL input to:
+#   https://<your-render-service>.onrender.com
+# ============================================================
+
 services:
+  # ==========================================================
+  # 1. Main Backend (Node + Python in one image — Docker Native)
+  #    Runs: REST API, Socket.IO, TradingEngine, Continuous
+  #    Learning scheduler, PyTorch train/inference via child_process
+  # ==========================================================
   - type: web
     name: liquibot-backend
-    runtime: node
-    rootDir: backend
-    plan: free
-    buildCommand: npm install
-    startCommand: npm run start
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: standard
     healthCheckPath: /test
     autoDeploy: true
+    numInstances: 1
+    # -- Persistent Disk: OPTIONAL but HIGHLY RECOMMENDED --
+    # Render's filesystem is EPHEMERAL by default. The codebase already dual-writes
+    # every model/scaler/dataset to PostgreSQL (ModelArtifact BYTEA blobs — see
+    # backend/prisma/schema.prisma + backend/src/storage/cloudPersistence.ts), so
+    # a cold boot with NO DISK still pulls everything from DB and works.
+    #
+    # Adding this disk makes warm boots INSTANT (no DB → FS restore needed) and
+    # gives you a second redundant copy of your training data. Enable after first
+    # deploy via Render Dashboard → Environments → Add Disk, then re-deploy.
+    disk:
+      name: liquibot-persist
+      mountPath: /app/persist
+      sizeGB: 15
+    # Docker CMD symlinks saved_models/ | saved_scalers/ | data/ into the above disk
+    # on boot (see backend/Dockerfile CMD). If disk is not attached, symlinks just
+    # point to local ephemeral FS and DB persistence takes over.
+
     envVars:
       - key: NODE_VERSION
-        value: 20
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+      # --- Secrets (set in Render Dashboard, do NOT hardcode) ---
+      # Generate with: openssl rand -hex 32
+      - key: JWT_SECRET
+        generateValue: true
+      # MUST match your MT5 EA's "ApiKey" input exactly
+      - key: EA_API_KEY
+        sync: false # set manually in Render Dashboard
+      # Mirror of EA_API_KEY (legacy bridge consumers)
+      - key: MT5_BRIDGE_API_KEY
+        sync: false # set manually = same as EA_API_KEY
+      # Your Render PostgreSQL connection string
+      # (create the DB first, Render shows it under "Connections")
+      - key: DATABASE_URL
+        fromDatabase:
+          name: liquibot-db
+          property: connectionString
+      # Python binary the Node child_process bridge calls
+      - key: PYTHON_PATH
+        value: "/usr/bin/python"
+      # Comma-separated: your mobile app Expo dev URL + any web dashboards
+      - key: ALLOWED_ORIGINS
+        value: "https://*.expo.dev,https://*.onrender.com"
+      # Trading defaults — override per environment
+      - key: SIGNAL_SCAN_INTERVAL_MS
+        value: "30000"
+      # AI gating — false = shadow mode (log predictions, do not block trades)
+      - key: AI_TRADING_ENABLED
+        value: "false"
+      - key: AI_MIN_CONFIDENCE
+        value: "0.65"
+      - key: AI_CONTRADICTION_VETO_THRESHOLD
+        value: "0.55"
+      # Continuous learning tuning
+      - key: CL_MIN_SAMPLES
+        value: "20"
+      - key: CL_TRAIN_EVERY_N
+        value: "15"
+      - key: CL_TRAIN_EPOCHS
+        value: "60"
+
+  # ==========================================================
+  # 2. PostgreSQL (persistent, managed by Render)
+  #    Stores: candles, positions, journal, DNA, predictions,
+  #    model registry, audit log, post-trade analyses
+  # ==========================================================
+databases:
+  - name: liquibot-db
+    databaseName: liquibot
+    user: liquibot
+    plan: standard
+    postgresMajorVersion: "16"
+    # Daily PITR enabled automatically on paid plans. Keep this on
+    # — it's your safety net against corrupted training data or
+    # bad manual promotions wiping production model history.
+    ipAllowList: []  # Only Render services can connect (default).
+
+  # ==========================================================
+  # 3. (OPTIONAL) Background GPU Worker for Long Training Jobs
+  #    Detach 30-min+ training runs from the web server. Only
+  #    needed once you have > 1000 labeled samples / > 100 epochs
+  #    per train, or CNN/LSTM heads added to the ensemble.
+  #    Skip this until the standard web service maxes its CPU.
+  # ==========================================================
+  # - type: worker
+  #   name: liquibot-train-worker
+  #   runtime: docker
+  #   dockerfilePath: ./backend/Dockerfile.worker
+  #   plan: pro
+  #   envVars:
+  #     - key: DATABASE_URL
+  #       fromDatabase:
+  #         name: liquibot-db
+  #         property: connectionString
+  #     - key: PYTHON_PATH
+  #       value: "/usr/bin/python"
+  #     # SQS/RabbitMQ/Render Redis queue URL — jobs picked up here
+  #     - key: QUEUE_URL
+  #       sync: false
