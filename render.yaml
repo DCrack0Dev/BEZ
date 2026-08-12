@@ -27,9 +27,9 @@ services:
     rootDir: backend
     plan: starter
     region: oregon
-    # --include=dev so typescript (devDependency) is present for `tsc` even when
-    # NODE_ENV=production is set on the service. copy-generated.js runs inside build.
-    buildCommand: npm ci --include=dev && npx prisma generate && npm run build
+    # typescript is a production dependency so npm ci always can compile.
+    # postinstall also runs prisma generate + build as a safety net.
+    buildCommand: npm ci && npx prisma generate && npm run build
     startCommand: npm run start
     healthCheckPath: /test
     autoDeploy: true
