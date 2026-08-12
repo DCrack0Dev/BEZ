@@ -53,7 +53,7 @@ export interface PositionState {
   currentSL: number;
   currentPrice: number;
   phase: number;
-  scaleInLevels: number[];
+  scaleInLevels: ScaleInLevel[];
   tpLevels: number[];
   spread: number;
   pipSize: number;
@@ -67,9 +67,13 @@ export interface TradeSignal {
   entryPrice: number;
   stopLoss: number;
   takeProfitLevels: number[];
-  lotSizes: { entry1: number; entry2?: number; entry3?: number };
-  confidence: number;
+  scaleInLevels: ScaleInLevel[];
+  lotSizes: { entry1: number; entry2: number; entry3: number };
+  riskPercent: number;
+  pipValue: number;
   timestamp: number;
+  timeframe: string;
+  confidence: number;
 }
 
 export interface RiskParams {
@@ -92,29 +96,93 @@ export type FVG = 'BULLISH' | 'BEARISH' | 'NONE';
 export type OrderBlock = 'BULLISH' | 'BEARISH' | 'NONE';
 export type TradeOutcome = 'WIN' | 'LOSS' | 'BREAKEVEN' | 'OPEN';
 export type RiskScore = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+export type StructureType = 'HH_HL' | 'LH_LL' | 'RANGE';
+export type NewsImpact = 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
+
+export interface SwingPoint {
+  price: number;
+  timestamp: number;
+  strength: number;
+}
+
+export interface FVGDetails {
+  type: 'BULLISH' | 'BEARISH' | 'NONE';
+  startPrice: number;
+  endPrice: number;
+  sizePips: number;
+  filledPercent: number;
+}
+
+export interface OrderBlockDetails {
+  type: 'BULLISH' | 'BEARISH' | 'NONE';
+  top: number;
+  bottom: number;
+  displacementStrength: number;
+}
+
+export interface ScaleInLevel {
+  price: number;
+  lotSize?: number;
+  newStopLoss: number;
+  isRiskFree?: boolean;
+}
 
 export interface FeatureSet {
   timestamp: number;
   symbol: string;
+  timeframe: string;
+
   trendStrength: number;
   trendDirection: TrendDirection;
   ema20DistancePips: number;
   ema50DistancePips: number;
-  atrRatio: number;
   adxValue: number;
+  slope20?: number;
+  slope50?: number;
+
   momentumDirection: TrendDirection;
   rsiStrength: number;
   macdMomentum: 'INCREASING' | 'DECREASING' | 'NEUTRAL';
-  liquiditySweep: LiquiditySweep;
-  fvgPresent: FVG;
-  orderBlockConfirmed: OrderBlock;
-  bullishStructurePercent: number;
-  bearishStructurePercent: number;
-  marketSession: MarketSession;
+  cciValue?: number;
+  williamsR?: number;
+
+  atrRatio: number;
   volatility: Volatility;
+  bbPercentWidth?: number;
+  bbPosition?: number;
+  bbWidth?: number;
+
+  liquiditySweep: LiquiditySweep;
+
+  swingHighs: SwingPoint[];
+  swingLows: SwingPoint[];
+  nearestSupport?: number;
+  nearestResistance?: number;
+  structureType?: StructureType;
+  structureStrength?: number;
+
+  fvgPresent: FVG;
+  fvgDetails?: FVGDetails;
+  orderBlockConfirmed: OrderBlock;
+  orderBlockDetails?: OrderBlockDetails;
+
+  marketSession: MarketSession;
+
+  prevCandlePattern?: string;
+  prevCandleBodyPct?: number;
+  prevCandleType?: string;
+
+  volumeRatio?: number;
+  newsImpact?: NewsImpact;
+
+  normalizedFeatures: number[];
+
   spreadStatus: SpreadStatus;
   similarSetupWinRate: number;
   riskScore: RiskScore;
+  bullishStructurePercent: number;
+  bearishStructurePercent: number;
+  candleId?: string;
 }
 
 export interface ScreenshotData {

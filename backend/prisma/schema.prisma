@@ -67,68 +67,77 @@ model CandleIndicator {
 // --- FEATURE ENGINEERING ---
 
 model FeatureSet {
-  id                String  @id @default(cuid())
-  symbol            String
-  timeframe         String
+  id                      String  @id @default(cuid())
+  symbol                  String
+  timeframe               String
   
   // --- TREND ---
-  trendStrength     Decimal
-  trendDirection    String
-  ema20DistancePips Decimal
-  ema50DistancePips Decimal
-  adxValue          Decimal
-  slope20           Decimal?
-  slope50           Decimal?
+  trendStrength           Decimal
+  trendDirection          String
+  ema20DistancePips       Decimal
+  ema50DistancePips       Decimal
+  adxValue                Decimal
+  slope20                 Decimal?
+  slope50                 Decimal?
   
   // --- MOMENTUM ---
-  momentumDirection String
-  rsiStrength       Decimal
-  macdMomentum      String
-  cciValue          Decimal?
-  williamsR         Decimal?
+  momentumDirection       String
+  rsiStrength             Decimal
+  macdMomentum            String
+  cciValue                Decimal?
+  williamsR               Decimal?
   
   // --- VOLATILITY ---
-  atrRatio          Decimal
-  volatility        String
-  bbPercentWidth    Decimal?
-  bbPosition        Decimal?
+  atrRatio                Decimal
+  volatility              String
+  bbPercentWidth          Decimal?
+  bbPosition              Decimal?
+  bbWidth                 Decimal?
   
   // --- LIQUIDITY ---
-  liquiditySweep    String
-  recentSweeps      Json?
+  liquiditySweep          String
   
   // --- PRICE STRUCTURE & SWINGS ---
-  swingHighs        Json
-  swingLows         Json
-  nearestSupport    Decimal?
-  nearestResistance Decimal?
-  structureType     String? // "HH_HL" | "LH_LL" | "RANGE"
-  structureStrength Decimal?
+  swingHighs              Json
+  swingLows               Json
+  nearestSupport          Decimal?
+  nearestResistance       Decimal?
+  structureType           String?
+  structureStrength       Decimal?
   
   // --- SMC ---
-  fvgPresent        String
-  fvgDetails        Json?
-  orderBlockConfirmed String
-  orderBlockDetails Json?
-  poiZones          Json?
+  fvgPresent              String
+  fvgDetails              Json?
+  orderBlockConfirmed     String
+  orderBlockDetails       Json?
   
   // --- MARKET SESSION ---
-  marketSession     String
+  marketSession           String
   
   // --- PREVIOUS CANDLE RELATIONSHIPS ---
-  prevCandlePattern String?
-  prevCandleBodyPct Decimal?
-  prevCandleType    String? // "MARUBOZU" | "DOJI" | "HAMMER" | "SHOOTING_STAR" | "ENGULFING"
+  prevCandlePattern       String?
+  prevCandleBodyPct       Decimal?
+  prevCandleType          String?
+  
+  // --- REGIME INPUTS (Phase 3 fixes) ---
+  volumeRatio             Decimal?
+  newsImpact              String?
   
   // --- NORMALIZED & AI-READY ---
-  normalizedFeatures Json // Array of normalized floats
+  normalizedFeatures      Json
+  
+  // --- STATS & SCORING (used by signal gate) ---
+  similarSetupWinRate     Decimal   @default(0)
+  riskScore               String
+  bullishStructurePercent Decimal
+  bearishStructurePercent Decimal
   
   // Relations
-  candleId          String  @unique
-  candle          Candle  @relation("CandleToFeatureSet", fields: [candleId], references: [id], onDelete: Cascade)
-  candleIndicatorId String? @unique
-  candleIndicator  CandleIndicator? @relation("IndicatorToFeatureSet", fields: [candleIndicatorId], references: [id], onDelete: SetNull)
-  createdAt         DateTime @default(now())
+  candleId                String  @unique
+  candle                  Candle  @relation("CandleToFeatureSet", fields: [candleId], references: [id], onDelete: Cascade)
+  candleIndicatorId       String? @unique
+  candleIndicator         CandleIndicator? @relation("IndicatorToFeatureSet", fields: [candleIndicatorId], references: [id], onDelete: SetNull)
+  createdAt               DateTime @default(now())
 
   @@index([symbol, timeframe, createdAt])
 }

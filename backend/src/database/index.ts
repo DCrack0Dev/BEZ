@@ -120,65 +120,6 @@ export async function saveCandle(data: {
   }
 }
 
-export async function saveCandleIndicators(data: {
-  candleId: string;
-  atr: number;
-  rsi: number;
-  macd?: number;
-  macdSignal?: number;
-  macdHistogram?: number;
-  ema20: number;
-  ema50: number;
-  ema100?: number;
-  vwap: number;
-  adx: number;
-  bbUpper: number;
-  bbMiddle: number;
-  bbLower: number;
-}) {
-  try {
-    return await prisma.candleIndicator.upsert({
-      where: {
-        candleId: data.candleId,
-      },
-      update: {
-        atr: new Decimal(data.atr.toString()),
-        rsi: new Decimal(data.rsi.toString()),
-        macd: data.macd ? new Decimal(data.macd.toString()) : null,
-        macdSignal: data.macdSignal ? new Decimal(data.macdSignal.toString()) : null,
-        macdHistogram: data.macdHistogram ? new Decimal(data.macdHistogram.toString()) : null,
-        ema20: new Decimal(data.ema20.toString()),
-        ema50: new Decimal(data.ema50.toString()),
-        ema100: data.ema100 ? new Decimal(data.ema100.toString()) : null,
-        vwap: new Decimal(data.vwap.toString()),
-        adx: new Decimal(data.adx.toString()),
-        bbUpper: new Decimal(data.bbUpper.toString()),
-        bbMiddle: new Decimal(data.bbMiddle.toString()),
-        bbLower: new Decimal(data.bbLower.toString()),
-      },
-      create: {
-        candleId: data.candleId,
-        atr: new Decimal(data.atr.toString()),
-        rsi: new Decimal(data.rsi.toString()),
-        macd: data.macd ? new Decimal(data.macd.toString()) : null,
-        macdSignal: data.macdSignal ? new Decimal(data.macdSignal.toString()) : null,
-        macdHistogram: data.macdHistogram ? new Decimal(data.macdHistogram.toString()) : null,
-        ema20: new Decimal(data.ema20.toString()),
-        ema50: new Decimal(data.ema50.toString()),
-        ema100: data.ema100 ? new Decimal(data.ema100.toString()) : null,
-        vwap: new Decimal(data.vwap.toString()),
-        adx: new Decimal(data.adx.toString()),
-        bbUpper: new Decimal(data.bbUpper.toString()),
-        bbMiddle: new Decimal(data.bbMiddle.toString()),
-        bbLower: new Decimal(data.bbLower.toString()),
-      },
-    });
-  } catch (error) {
-    logger.error('Failed to save candle indicators', error);
-    return null;
-  }
-}
-
 // --- ACCOUNT SNAPSHOTS ---
 
 export async function saveAccountSnapshot(data: {

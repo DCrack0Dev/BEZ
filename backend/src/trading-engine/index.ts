@@ -6,11 +6,14 @@ import {
   FeatureSet,
   TradeDNA,
   Lesson,
+  PositionState,
+  TradeSignal,
 } from '../types';
 import { logger, tradingLogger } from '../logging';
 import { CONFIG } from '../config/tradingConfig';
 import { FeatureEngineeringEngine } from '../feature-engineering/featureEngine';
-import { processTrailingStop, PositionState } from '../trade-execution/trailingStopManager';
+import { FeatureStorage } from '../feature-engineering/featureStorage';
+import { processTrailingStop } from '../trade-execution/trailingStopManager';
 import { validateSignal, calculateATR, calculateSwingHighs, calculateSwingLows, calculateEMA } from './signalValidator';
 import { evaluateSetupProgress, SetupProgress } from './setupProgress';
 import { TradeDnaEngine } from '../analytics/tradeDna';
@@ -142,8 +145,10 @@ export class TradingEngine {
   } | null = null;
 
   private featureEngine = new FeatureEngineeringEngine();
+  private featureStorage = new FeatureStorage();
   private dnaEngine = new TradeDnaEngine();
   private experienceEngine = new ExperienceEngine();
+  private lastSignal: TradeSignal | null = null;
 
   constructor(private io: Server) {}
 
@@ -269,6 +274,8 @@ export class TradingEngine {
   // --- MARKET DATA PIPELINE ---
   private async persistMarketData(payload: MT5Payload, features: FeatureSet) {
     try {
+      let savedCandleId: string | undefined;
+
       // 1. Save Tick Data
       if (payload.price && payload.spread !== undefined) {
         await saveTick({
@@ -276,7 +283,7 @@ export class TradingEngine {
           bid: payload.price - (payload.spread / 2),
           ask: payload.price + (payload.spread / 2),
           spread: payload.spread,
-          volume: 0, // Default to 0 if not provided
+          volume: 0,
         });
       }
 
@@ -293,6 +300,7 @@ export class TradingEngine {
           volume: lastCandle.volume || 0,
           timestamp: lastCandle.timestamp,
         });
+        savedCandleId = savedCandle?.id;
       }
 
       // 3. Save Account Snapshot (once per 5 seconds)
@@ -302,14 +310,26 @@ export class TradingEngine {
         await saveAccountSnapshot({
           balance: payload.balance,
           equity: payload.equity,
-          margin: 0, // Default if not available
+          margin: 0,
           floatingPL: payload.positions?.reduce((sum, p) => sum + (p.profit || 0), 0) || 0,
           openPositions: payload.positions?.length || 0,
           currency: 'USD',
         });
       }
 
-      // 4. Save Positions
+      // 4. Save FeatureSet (with candleId FK if available)
+      try {
+        const winRate = await this.featureStorage.computeSimilarSetupWinRate(features);
+        const enriched = { ...features, similarSetupWinRate: winRate };
+        const featureToSave = savedCandleId
+          ? { ...enriched, candleId: savedCandleId }
+          : enriched;
+        await this.featureStorage.saveFeature(featureToSave);
+      } catch (featureErr) {
+        logger.error('Failed to save FeatureSet', featureErr);
+      }
+
+      // 5. Save Positions
       for (const pos of this.accountState.positions) {
         const ticket = String(pos.ticket);
         const existingDna = this.dnaEngine.getDnaByTicket(ticket);
@@ -362,9 +382,6 @@ export class TradingEngine {
     );
 
     // --- Market Regime Detection (Phase 1) ---
-    // Runs EVERY heartbeat so the UI always has a regime label and so DNA
-    // init can snapshot the entry regime. Uses exactly the features already
-    // produced by the feature-engineering pipeline (no new data sources).
     try {
       const last20 = candlesReversed.slice(-20);
       const prev20 = candlesReversed.slice(-40, -20);
@@ -382,24 +399,24 @@ export class TradingEngine {
         });
         avgBodyPct = bodyPcts.reduce((s, v) => s + v, 0) / bodyPcts.length;
       }
-      const bbWidthRaw = Number((features as any).bbWidth ?? 0);
+      const bbWidthRaw = Number(features.bbWidth ?? features.bbPercentWidth ?? 0);
       const bbWidthRatio = Math.abs(bbWidthRaw - 1) < 0.1 ? 1 : Math.max(0.3, Math.min(2, 1 + (bbWidthRaw - 0.04) * 8));
-      const rsiCenter = Number((features as any).rsiStrength ?? 0.5) * 100;
+      const rsiCenter = Number(features.rsiStrength ?? 50);
       const emaGapPips = Math.abs(ema20 - ema50);
       const emaGapAtrRatio = atr14 > 0 ? emaGapPips / atr14 : 0;
-      const volRatio = Math.abs(Number((features as any).volumeRatio ?? 0) - 0.5) < 0.01 ? 1 : Number((features as any).volumeRatio ?? 1);
-      const adx = Number((features as any).adxValue ?? 20);
+      const volRatio = features.volumeRatio ?? 1;
+      const adx = Number(features.adxValue ?? 20);
 
       this.latestRegime = marketRegimeDetector.classify({
         adxValue: adx,
-        atrRatio: Number((features as any).atrRatio ?? 1),
+        atrRatio: Number(features.atrRatio ?? 1),
         bbWidthRatio,
         recentCandleBodyPctAvg: avgBodyPct,
         rangeExpansionRatio: rangePrev3 > 0 ? Math.max(0.2, Math.min(5, range3 / rangePrev3)) : 1,
-        spreadStatus: (features as any).spreadStatus ?? ('NORMAL' as SpreadStatus),
-        volatility: (features as any).volatility ?? ('MEDIUM' as Volatility),
-        marketSession: (features as any).marketSession ?? ('ASIA' as MarketSession),
-        nearbyHighImpactNews: !!((features as any).newsImpact === 'HIGH' || (features as any).newsImpact === 'EXTREME'),
+        spreadStatus: features.spreadStatus ?? ('NORMAL' as SpreadStatus),
+        volatility: features.volatility ?? ('MEDIUM' as Volatility),
+        marketSession: features.marketSession ?? ('ASIA' as MarketSession),
+        nearbyHighImpactNews: !!(features.newsImpact === 'HIGH' || features.newsImpact === 'EXTREME'),
         volumeRatio: volRatio,
         emaGapAtrRatio,
         rsiDeviationFrom50: Math.abs(rsiCenter - 50),
@@ -609,8 +626,8 @@ export class TradingEngine {
         // Continuous learning (file-system side effect) and DB PostTradeAnalysis
         // only run after the transaction above has committed successfully.
         try {
-          const swingHighs = (features as any)?.swingHighs?.map((s: any) => s.price) || calculateSwingHighs(this.accountState.candles.slice().reverse(), 2);
-          const swingLows = (features as any)?.swingLows?.map((s: any) => s.price) || calculateSwingLows(this.accountState.candles.slice().reverse(), 2);
+          const swingHighs = features?.swingHighs?.map((s: any) => s.price) || calculateSwingHighs(this.accountState.candles.slice().reverse(), 2);
+          const swingLows = features?.swingLows?.map((s: any) => s.price) || calculateSwingLows(this.accountState.candles.slice().reverse(), 2);
 
         const analysis = await continuousLearning.onTradeCompleted({
             ticket,
@@ -630,7 +647,7 @@ export class TradingEngine {
             modelVersion: finalizedDna?.modelVersion || modelManager.getProductionVersion() || undefined,
             entryFeatures: finalizedDna?.entryFeatures || features,
             closeFeatures: features,
-            marketSession: (features as any)?.marketSession,
+            marketSession: features?.marketSession,
             entryTimestamp: finalizedDna?.entryTimestamp,
             closeTimestamp: Date.now(),
             spreadAtEntry: this.accountState.spread,
@@ -810,10 +827,10 @@ export class TradingEngine {
             ticket,
             symbol: this.accountState.symbol,
             direction,
-            marketSnapshot: features as any,
-            marketSession: (features as any)?.marketSession || 'UNKNOWN',
-            indicators: features as any,
-            featureSet: features as any,
+            marketSnapshot: features,
+            marketSession: features?.marketSession || 'UNKNOWN',
+            indicators: features,
+            featureSet: features,
             aiConfidence: confidence,
             entryPrice,
             executionPrice: entryPrice,
@@ -848,22 +865,37 @@ export class TradingEngine {
       }
     }
 
-    // Trailing Stop
+    // Trailing Stop + Scale-In Watch
     for (const pos of this.accountState.positions) {
       const ticket = String(pos.ticket);
       try {
+        const posDirection: 'BUY' | 'SELL' = (pos.type === 'BUY' || pos.type === 0) ? 'BUY' : 'SELL';
+        const matchedSignal =
+          this.lastSignal &&
+          this.lastSignal.direction === posDirection &&
+          Date.now() - this.lastSignal.timestamp < 180000
+            ? this.lastSignal
+            : null;
+
         if (!this.positionStates[ticket]) {
           this.positionStates[ticket] = {
             ticket,
-            signalId: uuidv4(),
+            signalId: matchedSignal?.id || uuidv4(),
             symbol: pos.symbol || this.accountState.symbol,
-            direction: (pos.type === 'BUY' || pos.type === 0) ? 'BUY' : 'SELL',
+            direction: posDirection,
             openPrice: pos.openPrice || pos.price || this.accountState.price,
             currentSL: Number(pos.sl || 0),
             currentPrice: this.accountState.price,
             phase: 1,
-            scaleInLevels: [],
-            tpLevels: Number(pos.tp) > 0 ? [Number(pos.tp)] : [],
+            scaleInLevels: matchedSignal?.scaleInLevels?.map(si => ({
+              price: si.price,
+              lotSize: si.lotSize,
+              newStopLoss: si.newStopLoss,
+              isRiskFree: si.isRiskFree ?? true,
+            })) || [],
+            tpLevels: matchedSignal?.takeProfitLevels?.length
+              ? matchedSignal.takeProfitLevels
+              : (Number(pos.tp) > 0 ? [Number(pos.tp)] : []),
             spread: this.accountState.spread,
             pipSize: this.accountState.pipSize,
             pointSize: this.accountState.pointSize,
@@ -878,6 +910,51 @@ export class TradingEngine {
             Number(pos.tp) > 0
           ) {
             this.positionStates[ticket].tpLevels = [Number(pos.tp)];
+          }
+          if (
+            (!this.positionStates[ticket].scaleInLevels || this.positionStates[ticket].scaleInLevels.length === 0) &&
+            matchedSignal?.scaleInLevels?.length
+          ) {
+            this.positionStates[ticket].scaleInLevels = matchedSignal.scaleInLevels.map(si => ({
+              price: si.price,
+              lotSize: si.lotSize,
+              newStopLoss: si.newStopLoss,
+              isRiskFree: si.isRiskFree ?? true,
+            }));
+          }
+        }
+
+        // --- SCALE-IN EXECUTION WATCH LOOP (Phase 5) ---
+        // Fire additional entries when price crosses a scale-in trigger.
+        // Track executed levels via Set on positionState to avoid duplicates.
+        const ps = this.positionStates[ticket] as any;
+        if (!ps._executedScaleIns) ps._executedScaleIns = new Set<number>();
+        for (let i = 0; i < ps.scaleInLevels.length; i++) {
+          if (ps._executedScaleIns.has(i)) continue;
+          const si = ps.scaleInLevels[i];
+          const hit = ps.direction === 'BUY'
+            ? ps.currentPrice >= si.price
+            : ps.currentPrice <= si.price;
+          if (hit) {
+            ps._executedScaleIns.add(i);
+            if (si.lotSize && si.lotSize > 0) {
+              this.pendingCommands.push({
+                action: ps.direction,
+                symbol: ps.symbol,
+                lots: si.lotSize,
+                sl: si.newStopLoss,
+                tp: ps.tpLevels?.[0] || pos.tp || 0,
+                reason: `SCALE_IN_E${i + 2}`,
+              });
+              tradingLogger.info(`Scale-in E${i + 2} fired for ${ticket}`, `price=${ps.currentPrice}`);
+              this.io.emit('SCALE_IN_TRIGGERED', {
+                ticket,
+                entry: i + 2,
+                price: ps.currentPrice,
+                lotSize: si.lotSize,
+                newStopLoss: si.newStopLoss,
+              });
+            }
           }
         }
 
@@ -1010,7 +1087,7 @@ export class TradingEngine {
     this.accountState.lastSignalReason = setupProgress.summary;
 
     if (this.accountState.autoTradingEnabled) {
-      const signal = validateSignal(signalPayload);
+      const signal = validateSignal(signalPayload, features);
       const now = Date.now();
       if (signal && now - this.lastTradeTime > 30000 && now > this.cooldowns[signal.direction]) {
         // --- AI GATE — old + new side-by-side, shadow-safe ---
@@ -1044,7 +1121,7 @@ export class TradingEngine {
         );
 
         // --- NEW: Ensemble + Regime decision (Phase 1, additive) ---
-        const riskScore = (features as any).riskScore || 'MEDIUM';
+        const riskScore = features.riskScore || 'MEDIUM';
         const tpDistancePips = signal.takeProfitLevels?.[0]
           ? Math.abs(signal.takeProfitLevels[0] - (signal.entryPrice || this.accountState.price)) / (this.accountState.pipSize || 0.01)
           : 0;
@@ -1052,7 +1129,7 @@ export class TradingEngine {
           ? Math.abs(signal.stopLoss - (signal.entryPrice || this.accountState.price)) / (this.accountState.pipSize || 0.01)
           : 1;
         const expectedRr = slDistancePips > 0 ? tpDistancePips / slDistancePips : CONFIG.tp1RR;
-        const trendDir = (features as any).trendDirection || 'NEUTRAL';
+        const trendDir = features.trendDirection || 'NEUTRAL';
 
         let ensemble: EnsembleDecision | null = null;
         try {
@@ -1130,12 +1207,13 @@ export class TradingEngine {
           if (ensemble?.decision === 'SHADOW_REJECT') {
             tradingLogger.info(`Note: ensemble SHADOW_REJECT (shadow-only, not blocking). ${ensemble.explainability.reason}`);
           }
+          this.lastSignal = signal;
           this.pendingCommands.push({
             action: signal.direction,
             symbol: signal.symbol,
-            lots: signal.lotSizes?.entry1 || 0.01,
+            lots: signal.lotSizes.entry1,
             sl: signal.stopLoss,
-            tp: signal.takeProfitLevels?.[0] || 0,
+            tp: signal.takeProfitLevels[0] || 0,
           });
           this.io.emit('tradeSignal', signal);
           this.lastTradeTime = now;
@@ -1145,7 +1223,6 @@ export class TradingEngine {
             aiConfidence: evaluation.aiConfidence,
             modelVersion: modelManager.getProductionVersion(),
             timestamp: now,
-            // Ensemble/regime extras for DNA persistence (all optional)
             ensembleScore: ensemble?.finalScore,
             marketRegime: this.latestRegime?.regime,
             regimeConfidence: this.latestRegime?.confidence,

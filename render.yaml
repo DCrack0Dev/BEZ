@@ -27,7 +27,7 @@ services:
     rootDir: backend
     plan: starter
     region: oregon
-    buildCommand: npm ci && npx prisma generate
+    buildCommand: npm ci && npx prisma generate && npm run build
     startCommand: npm run start
     healthCheckPath: /test
     autoDeploy: true

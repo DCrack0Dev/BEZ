@@ -1,30 +1,12 @@
 import { CONFIG } from '../config/tradingConfig';
 import { Decimal } from 'decimal.js';
+import { PositionState } from '../types';
 
 /**
  * trailingStopManager.ts
  * Manages trailing stop phases (1-5) and scale-in triggers for both directions.
  * Ensures stops only move in the profit direction (idempotent).
  */
-
-export interface PositionState {
-  ticket: string;
-  signalId: string;
-  symbol: string;
-  direction: 'BUY' | 'SELL';
-  openPrice: number;
-  currentSL: number;
-  currentPrice: number;
-  // Relaxed from a `1 | 2 | 3 | 4 | 5` literal union to `number` so this
-  // interface stays structurally compatible with the persisted
-  // Position.trailingPhase column (plain Int) used for crash recovery.
-  phase: number;
-  scaleInLevels: { price: number; newStopLoss: number }[];
-  tpLevels: number[];
-  spread: number;
-  pipSize: number;
-  pointSize: number;
-}
 
 /**
  * JSDoc: Manages the 5-phase trailing stop logic for a position.

@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 import { 
-  FeatureSet as FeatureSetType, 
+  FeatureSet, 
   Candle, 
   TrendDirection, 
   MarketSession, 
@@ -9,7 +9,12 @@ import {
   LiquiditySweep, 
   FVG, 
   OrderBlock, 
-  RiskScore 
+  RiskScore,
+  SwingPoint,
+  FVGDetails,
+  OrderBlockDetails,
+  StructureType,
+  NewsImpact
 } from '../types';
 import { aiLogger } from '../logging';
 
@@ -20,87 +25,8 @@ const NEWYORK_END = 21;
 const ASIA_START = 22;
 const ASIA_END = 7;
 
-interface FVGDetails {
-  type: 'BULLISH' | 'BEARISH' | 'NONE';
-  startPrice: number;
-  endPrice: number;
-  sizePips: number;
-  filledPercent: number;
-}
-
-interface OrderBlockDetails {
-  type: 'BULLISH' | 'BEARISH' | 'NONE';
-  top: number;
-  bottom: number;
-  displacementStrength: number;
-}
-
-interface SwingPoint {
-  price: number;
-  timestamp: number;
-  strength: number;
-}
-
-type StructureType = 'HH_HL' | 'LH_LL' | 'RANGE';
-
-interface EnhancedFeatureSet {
-  timestamp: number;
-  symbol: string;
-  timeframe: string;
-  
-  trendStrength: number;
-  trendDirection: TrendDirection;
-  ema20DistancePips: number;
-  ema50DistancePips: number;
-  adxValue: number;
-  slope20?: number;
-  slope50?: number;
-  
-  momentumDirection: TrendDirection;
-  rsiStrength: number;
-  macdMomentum: 'INCREASING' | 'DECREASING' | 'NEUTRAL';
-  cciValue?: number;
-  williamsR?: number;
-  
-  atrRatio: number;
-  volatility: Volatility;
-  bbPercentWidth?: number;
-  bbPosition?: number;
-  
-  liquiditySweep: LiquiditySweep;
-  recentSweeps?: any[];
-  
-  swingHighs: SwingPoint[];
-  swingLows: SwingPoint[];
-  nearestSupport?: number;
-  nearestResistance?: number;
-  structureType?: StructureType;
-  structureStrength?: number;
-  
-  fvgPresent: FVG;
-  fvgDetails?: FVGDetails;
-  orderBlockConfirmed: OrderBlock;
-  orderBlockDetails?: OrderBlockDetails;
-  poiZones?: any[];
-  
-  marketSession: MarketSession;
-  
-  prevCandlePattern?: string;
-  prevCandleBodyPct?: number;
-  prevCandleType?: string;
-  
-  normalizedFeatures: number[];
-  
-  spreadStatus: SpreadStatus;
-  similarSetupWinRate: number;
-  riskScore: RiskScore;
-  bullishStructurePercent: number;
-  bearishStructurePercent: number;
-  candleId?: string;
-}
-
 export class FeatureEngineeringEngine {
-  private historicalFeatures: EnhancedFeatureSet[] = [];
+  private historicalFeatures: FeatureSet[] = [];
   private readonly maxHistory = 2000;
 
   private calculateEMA(candles: Candle[], period: number, priceKey: 'close' = 'close'): number {
@@ -361,7 +287,7 @@ export class FeatureEngineeringEngine {
     return 'ASIA';
   }
 
-  private normalizeFeatures(raw: EnhancedFeatureSet): number[] {
+  private normalizeFeatures(raw: FeatureSet): number[] {
     return [
       this.normalize(raw.trendStrength, 0, 1),
       ...this.oneHot(raw.trendDirection, ['NEUTRAL', 'BULLISH', 'BEARISH']),
@@ -405,7 +331,7 @@ export class FeatureEngineeringEngine {
     atr: number,
     spread: number,
     pipSize: number
-  ): EnhancedFeatureSet {
+  ): FeatureSet {
     const currentCandle = candles[candles.length - 1];
     const timestamp = currentCandle.timestamp;
 
@@ -476,7 +402,14 @@ export class FeatureEngineeringEngine {
 
     const range = currentCandle.high - currentCandle.low;
     const bbPercentWidth = atrHistory.length > 1 ? (atr / range) : 0.2;
+    const bbWidth = bbPercentWidth;
     const bbPosition = range > 0 ? (currentCandle.close - currentCandle.low) / range : 0.5;
+
+    const avgVolume = candles.length >= 20
+      ? candles.slice(-20).reduce((s, c) => s + c.volume, 0) / 20
+      : currentCandle.volume;
+    const volumeRatio = avgVolume > 0 ? currentCandle.volume / avgVolume : 1;
+    const newsImpact: NewsImpact = 'NONE';
 
     const marketSession = this.getMarketSession(timestamp);
 
@@ -488,7 +421,7 @@ export class FeatureEngineeringEngine {
     const bullishStructurePercent = trendDirection === 'BULLISH' ? 70 : 30;
     const bearishStructurePercent = 100 - bullishStructurePercent;
 
-    const featureSet: EnhancedFeatureSet = {
+    const featureSet: FeatureSet = {
       timestamp,
       symbol,
       timeframe,
@@ -510,10 +443,10 @@ export class FeatureEngineeringEngine {
       atrRatio,
       volatility,
       bbPercentWidth,
+      bbWidth,
       bbPosition,
       
       liquiditySweep: sweep,
-      recentSweeps: [],
       
       swingHighs,
       swingLows,
@@ -526,13 +459,15 @@ export class FeatureEngineeringEngine {
       fvgDetails: fvgData.details,
       orderBlockConfirmed: obData.type,
       orderBlockDetails: obData.details,
-      poiZones: [],
       
       marketSession,
       
       prevCandlePattern: candleData.pattern,
       prevCandleBodyPct: candleData.bodyPct,
       prevCandleType: candleData.type,
+      
+      volumeRatio,
+      newsImpact,
       
       normalizedFeatures: [],
       

@@ -1,5 +1,6 @@
 import { Decimal } from 'decimal.js';
 import { CONFIG } from '../config/tradingConfig';
+import { TradeSignal, ScaleInLevel } from '../types';
 
 /**
  * riskEngine.ts
@@ -13,42 +14,19 @@ export interface RiskParams {
   stopLoss: number;
   pipSize: number;
   pointSize: number;
-  pipValue: number; // Always live from MT5
+  pipValue: number;
   minLot: number;
   maxLot: number;
   minLotStep: number;
-  priorTarget: number; // Prior Resistance (Long) or Next Swing Low (Short)
+  priorTarget: number;
   direction: "BUY" | "SELL";
   spread: number;
-}
-
-export interface ScaleInLevel {
-  price: number;
-  lotSize: number;
-  newStopLoss: number;
-  isRiskFree: boolean;
 }
 
 export interface LotSizeMap {
   entry1: number;
   entry2: number;
   entry3: number;
-}
-
-export interface TradeSignal {
-  id: string;
-  symbol: string;
-  direction: "BUY" | "SELL";
-  entryPrice: number;
-  stopLoss: number;
-  takeProfitLevels: number[];      // [TP1, TP2, TP3]
-  scaleInLevels: ScaleInLevel[];
-  lotSizes: LotSizeMap;
-  riskPercent: number;
-  pipValue: number;
-  timestamp: number;
-  timeframe: string;
-  confidence: number;
 }
 
 /**

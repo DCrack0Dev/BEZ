@@ -18,17 +18,16 @@
  */
 
 import { getCandles } from '../database';
-import { Candle } from '../types';
+import { Candle, MT5Payload, PositionState } from '../types';
 import {
   validateSignal,
   calculateEMA,
   calculateATR,
   calculateSwingHighs,
   calculateSwingLows,
-  MT5Payload,
 } from '../trading-engine/signalValidator';
 import { FeatureEngineeringEngine } from '../feature-engineering/featureEngine';
-import { processTrailingStop, PositionState } from '../trade-execution/trailingStopManager';
+import { processTrailingStop } from '../trade-execution/trailingStopManager';
 import { TradeDnaEngine, TradeDNA } from '../analytics/tradeDna';
 import { ExperienceEngine, Lesson } from '../analytics/experienceEngine';
 import { SimulationBroker, SimBrokerConfig, SimClosedTrade } from './simulationBroker';

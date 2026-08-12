@@ -1,7 +1,8 @@
 module.exports = {
   apps: [{
     name: 'liquibot-backend',
-    script: 'src/index.js',
+    script: 'dist/boot.js',
+    cwd: __dirname,
     instances: 1,
     autorestart: true,
     watch: false,

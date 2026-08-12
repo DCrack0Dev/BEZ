@@ -1,5 +1,5 @@
 import { Server } from 'socket.io';
-import { TradeSignal } from '../risk-manager/riskEngine';
+import { TradeSignal } from '../types';
 
 /**
  * signalEmitter.ts

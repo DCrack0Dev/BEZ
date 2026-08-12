@@ -1,49 +1,104 @@
 import { prisma } from '../database';
+import { FeatureSet } from '../types';
+import { Prisma } from '../generated/prisma';
+
+const { Decimal } = Prisma;
+
+type JsonInput = Prisma.InputJsonValue;
 
 export class FeatureStorage {
-  async saveFeature(feature: any) {
+  async computeSimilarSetupWinRate(feature: FeatureSet): Promise<number> {
     try {
-      const savedFeature = await prisma.featureSet.create({
-        data: {
+      const similar = await prisma.tradeDNA.findMany({
+        where: {
           symbol: feature.symbol,
-          timeframe: feature.timeframe,
-          trendStrength: feature.trendStrength,
-          trendDirection: feature.trendDirection,
-          ema20DistancePips: feature.ema20DistancePips,
-          ema50DistancePips: feature.ema50DistancePips,
-          adxValue: feature.adxValue,
-          slope20: feature.slope20,
-          slope50: feature.slope50,
-          momentumDirection: feature.momentumDirection,
-          rsiStrength: feature.rsiStrength,
-          macdMomentum: feature.macdMomentum,
-          cciValue: feature.cciValue,
-          williamsR: feature.williamsR,
-          atrRatio: feature.atrRatio,
-          volatility: feature.volatility,
-          bbPercentWidth: feature.bbPercentWidth,
-          bbPosition: feature.bbPosition,
-          liquiditySweep: feature.liquiditySweep,
-          recentSweeps: feature.recentSweeps,
-          swingHighs: feature.swingHighs,
-          swingLows: feature.swingLows,
-          nearestSupport: feature.nearestSupport,
-          nearestResistance: feature.nearestResistance,
-          structureType: feature.structureType,
-          structureStrength: feature.structureStrength,
-          fvgPresent: feature.fvgPresent,
-          fvgDetails: feature.fvgDetails,
-          orderBlockConfirmed: feature.orderBlockConfirmed,
-          orderBlockDetails: feature.orderBlockDetails,
-          poiZones: feature.poiZones,
-          marketSession: feature.marketSession,
-          prevCandlePattern: feature.prevCandlePattern,
-          prevCandleBodyPct: feature.prevCandleBodyPct,
-          prevCandleType: feature.prevCandleType,
-          normalizedFeatures: feature.normalizedFeatures,
-          candleId: feature.candleId
-        }
+          outcome: { in: ['WIN', 'LOSS'] },
+          entryFeatures: { not: Prisma.AnyNull },
+        },
+        take: 100,
+        orderBy: { entryTimestamp: 'desc' },
+        select: { outcome: true, entryFeatures: true, direction: true },
       });
+
+      if (similar.length < 5) return 0;
+
+      const dir = feature.trendDirection === 'BULLISH' ? 'BUY' : feature.trendDirection === 'BEARISH' ? 'SELL' : null;
+
+      let matches = 0;
+      let wins = 0;
+      for (const dna of similar) {
+        const ef = dna.entryFeatures as Partial<FeatureSet> | null;
+        if (!ef) continue;
+        if (dir && dna.direction !== dir) continue;
+        const sameFvg = ef.fvgPresent === feature.fvgPresent;
+        const sameOb = ef.orderBlockConfirmed === feature.orderBlockConfirmed;
+        const samePattern = ef.prevCandlePattern === feature.prevCandlePattern || ef.prevCandleType === feature.prevCandleType;
+        if (!sameFvg && !sameOb && !samePattern) continue;
+        matches++;
+        if (dna.outcome === 'WIN') wins++;
+      }
+
+      return matches >= 3 ? wins / matches : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async saveFeature(feature: FeatureSet & { candleId?: string }) {
+    try {
+      const dec = (n: number | undefined | null) =>
+        n === undefined || n === null ? null : new Decimal(Number(n).toString());
+
+      const data: Prisma.FeatureSetUncheckedCreateInput = {
+        symbol: feature.symbol,
+        timeframe: feature.timeframe,
+        trendStrength: new Decimal(Number(feature.trendStrength).toString()),
+        trendDirection: feature.trendDirection,
+        ema20DistancePips: new Decimal(Number(feature.ema20DistancePips).toString()),
+        ema50DistancePips: new Decimal(Number(feature.ema50DistancePips).toString()),
+        adxValue: new Decimal(Number(feature.adxValue).toString()),
+        slope20: dec(feature.slope20),
+        slope50: dec(feature.slope50),
+        momentumDirection: feature.momentumDirection,
+        rsiStrength: new Decimal(Number(feature.rsiStrength).toString()),
+        macdMomentum: feature.macdMomentum,
+        cciValue: dec(feature.cciValue),
+        williamsR: dec(feature.williamsR),
+        atrRatio: new Decimal(Number(feature.atrRatio).toString()),
+        volatility: feature.volatility,
+        bbPercentWidth: dec(feature.bbPercentWidth),
+        bbPosition: dec(feature.bbPosition),
+        bbWidth: dec(feature.bbWidth),
+        liquiditySweep: feature.liquiditySweep,
+        swingHighs: feature.swingHighs as unknown as JsonInput,
+        swingLows: feature.swingLows as unknown as JsonInput,
+        nearestSupport: dec(feature.nearestSupport),
+        nearestResistance: dec(feature.nearestResistance),
+        structureType: feature.structureType,
+        structureStrength: dec(feature.structureStrength),
+        fvgPresent: feature.fvgPresent,
+        fvgDetails: feature.fvgDetails
+          ? (feature.fvgDetails as unknown as JsonInput)
+          : undefined,
+        orderBlockConfirmed: feature.orderBlockConfirmed,
+        orderBlockDetails: feature.orderBlockDetails
+          ? (feature.orderBlockDetails as unknown as JsonInput)
+          : undefined,
+        marketSession: feature.marketSession,
+        prevCandlePattern: feature.prevCandlePattern,
+        prevCandleBodyPct: dec(feature.prevCandleBodyPct),
+        prevCandleType: feature.prevCandleType,
+        volumeRatio: dec(feature.volumeRatio),
+        newsImpact: feature.newsImpact,
+        normalizedFeatures: (feature.normalizedFeatures ?? []) as unknown as JsonInput,
+        similarSetupWinRate: new Decimal(Number(feature.similarSetupWinRate || 0).toString()),
+        riskScore: feature.riskScore,
+        bullishStructurePercent: new Decimal(Number(feature.bullishStructurePercent || 0).toString()),
+        bearishStructurePercent: new Decimal(Number(feature.bearishStructurePercent || 0).toString()),
+        candleId: feature.candleId!,
+      };
+
+      const savedFeature = await prisma.featureSet.create({ data });
       return savedFeature;
     } catch (error) {
       console.error('Error saving feature:', error);

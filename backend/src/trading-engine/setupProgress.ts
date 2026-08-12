@@ -1,7 +1,6 @@
 import { CONFIG } from '../config/tradingConfig';
+import { Candle, MT5Payload } from '../types';
 import {
-  Candle,
-  MT5Payload,
   calculateATR,
   calculateSwingHighs,
   calculateSwingLows,
@@ -223,16 +222,16 @@ export function evaluateSetupProgress(
 
   // --- BUY pattern ---
   const isBullish = currentCandle.close > currentCandle.open;
-  const lookbackLows = candles.slice(-(N + 1), -1).map((c) => c.low);
+  const lookbackLows = candles.slice(-(N + 1), -1).map((c: Candle) => c.low);
   const isLowestLow = priorCandle.low === Math.min(...lookbackLows);
   const closesAboveMidpoint = currentCandle.close > (priorCandle.open + priorCandle.close) / 2;
   const isEngulfingBull = currentCandle.close > priorCandle.high && currentCandle.open < priorCandle.low;
   const bodySizePips = Math.abs(currentCandle.close - currentCandle.open) / (pipSize || 1);
   const isBodyLargeEnoughLong = bodySizePips >= CONFIG.minCandleBodyPips;
-  const avgVolume = candles.slice(-20).reduce((acc, c) => acc + c.volume, 0) / Math.max(1, Math.min(20, candles.length));
+  const avgVolume = candles.slice(-20).reduce((acc: number, c: Candle) => acc + c.volume, 0) / Math.max(1, Math.min(20, candles.length));
   const volTarget = avgVolume * CONFIG.volumeMultiplier;
   const isVolumeSpike = currentCandle.volume >= volTarget;
-  const supportCandidates = swingLows.filter((l) => l <= price);
+  const supportCandidates = swingLows.filter((l: number) => l <= price);
   const nearestSupport = supportCandidates.length ? Math.max(...supportCandidates) : NaN;
   const supportDistPips = Number.isFinite(nearestSupport)
     ? (price - nearestSupport) / (pipSize || 1)
@@ -284,7 +283,7 @@ export function evaluateSetupProgress(
 
   // --- SELL pattern ---
   const isBearish = currentCandle.close < currentCandle.open;
-  const lookbackHighs = candles.slice(-(N + 1), -1).map((c) => c.high);
+  const lookbackHighs = candles.slice(-(N + 1), -1).map((c: Candle) => c.high);
   const isHighestHigh = priorCandle.high === Math.max(...lookbackHighs);
   const isBelowEma = price < ema20;
   const isEmaSlopingDown = ema20 < ema20Prev;
@@ -301,7 +300,7 @@ export function evaluateSetupProgress(
     ? `${CONFIG.minCandleBodyPoints} pts`
     : `${CONFIG.minCandleBodyPips} pips`;
   const bodyActualShort = isXAUUSD ? `${fmt(bodySizePoints, 1)} pts` : `${fmt(bodySizePips, 1)} pips`;
-  const resistCandidates = swingHighs.filter((h) => h >= price);
+  const resistCandidates = swingHighs.filter((h: number) => h >= price);
   const nearestResistance = resistCandidates.length ? Math.min(...resistCandidates) : NaN;
   const resistDist = Number.isFinite(nearestResistance)
     ? isXAUUSD
