@@ -61,6 +61,7 @@ string            lastHeartbeatStatus = "INIT";
 int               heartbeatOkCount  = 0;
 int               heartbeatFailCount = 0;
 int               lastCommandCount  = 0;
+int               heartbeatSeq      = 0;
 string            EA_Name           = "FxScalpKing EA v3.0";
 
 // Chart history depths (must match app ChartScreen TF_COUNTS)
@@ -69,6 +70,8 @@ string            EA_Name           = "FxScalpKing EA v3.0";
 #define BARS_H1   400
 #define BARS_H4   100
 #define BARS_FEAT 600
+// Full multi-TF chart is large — sync less often so heartbeats stay reliable.
+#define CHART_SYNC_EVERY_N  15
 
 // Indicators
 int handle_ema20, handle_ema50, handle_atr;
@@ -139,18 +142,27 @@ int OnInit()
 {
    LogAction("INFO", "INIT", EA_Name + " starting");
    LogAction("INFO", "INIT", "ServerURL=" + ServerURL);
+   Comment(EA_Name + "\nConnecting to " + ServerURL + "…\n(Free Render cold start can take ~60s)");
 
    FxScalpKing.SetServerUrl(ServerURL);
    FxScalpKing.SetApiKey(ApiKey);
+   FxScalpKing.SetTimeoutMs(60000);
 
-   string expiry, plan;
-   if(!FxScalpKing.ValidateLicense(expiry, plan))
+   string expiry = "", plan = "";
+   // Free Render spins down — wake can take 50s+. Retry so init survives cold start.
+   if(!FxScalpKing.ValidateLicenseWithRetries(expiry, plan, 10, 5000))
    {
-      LogAction("ERROR", "LICENSE", "Validation failed. Check API key or Server URL.");
+      lastHeartbeatStatus = "LICENSE_FAIL";
+      LogAction("ERROR", "LICENSE",
+         "Validation failed after retries. Check: (1) ApiKey == Render EA_API_KEY (2) WebRequest allowlist for "
+         + ServerURL + " (3) service awake at /test");
+      Comment(EA_Name + "\nLICENSE FAIL\n" + ServerURL +
+              "\nAllowlist URL in Tools→Options→Expert Advisors\nApiKey must match EA_API_KEY");
       return INIT_FAILED;
    }
 
    licenseValid = true;
+   lastHeartbeatStatus = "LICENSED";
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
    trade.SetDeviationInPoints(20); // Allow 20 points deviation for requotes
@@ -161,7 +173,8 @@ int OnInit()
    handle_atr   = iATR(_Symbol, PERIOD_M5, 14);
 
    EventSetTimer(1);
-   LogAction("SUCCESS", "INIT", "Initialization complete");
+   LogAction("SUCCESS", "INIT", "Initialization complete · plan=" + plan + " expiry=" + expiry);
+   UpdateExpertComment();
    return INIT_SUCCEEDED;
 }
 
@@ -292,64 +305,65 @@ void SendHeartbeat()
    json += "\"timestamp\":" + IntegerToString((long)TimeCurrent() * 1000) + ",";
    json += "\"isPaused\":" + (isPaused ? "true" : "false") + ",";
    g_ema20Prev = ema20[0];
+   heartbeatSeq++;
 
-   // Multi-Timeframe Chart Data (counts match app ChartScreen TF_COUNTS)
-   json += "\"chart\":{";
+   int nM5 = 0, nM15 = 0, nH1 = 0, nH4 = 0;
+   // Full multi-TF chart is heavy — include on first HB and every CHART_SYNC_EVERY_N after.
+   bool sendChart = (heartbeatSeq == 1) || ((heartbeatSeq % CHART_SYNC_EVERY_N) == 0);
+   if(sendChart)
+   {
+      json += "\"chart\":{";
 
-   // M5 — 500 bars
-   json += "\"M5\":[";
-   MqlRates ratesM5[];
-   ArraySetAsSeries(ratesM5, true);
-   int nM5 = CopyRates(_Symbol, PERIOD_M5, 0, BARS_M5, ratesM5);
-   if(nM5 > 0) {
-      for(int i=0; i<nM5; i++) {
-         // time = unix seconds (app prefers timestamp over legacy index `x`)
-         json += "{\"time\":" + IntegerToString((long)ratesM5[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM5[i].time) + ",\"open\":" + DoubleToString(ratesM5[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM5[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM5[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM5[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM5[i].tick_volume) + "}";
-         if(i < nM5 - 1) json += ",";
+      json += "\"M5\":[";
+      MqlRates ratesM5[];
+      ArraySetAsSeries(ratesM5, true);
+      nM5 = CopyRates(_Symbol, PERIOD_M5, 0, BARS_M5, ratesM5);
+      if(nM5 > 0) {
+         for(int i=0; i<nM5; i++) {
+            json += "{\"time\":" + IntegerToString((long)ratesM5[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM5[i].time) + ",\"open\":" + DoubleToString(ratesM5[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM5[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM5[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM5[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM5[i].tick_volume) + "}";
+            if(i < nM5 - 1) json += ",";
+         }
       }
-   }
-   json += "],";
+      json += "],";
 
-   // M15 — 400 bars
-   json += "\"M15\":[";
-   MqlRates ratesM15[];
-   ArraySetAsSeries(ratesM15, true);
-   int nM15 = CopyRates(_Symbol, PERIOD_M15, 0, BARS_M15, ratesM15);
-   if(nM15 > 0) {
-      for(int i=0; i<nM15; i++) {
-         json += "{\"time\":" + IntegerToString((long)ratesM15[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM15[i].time) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM15[i].tick_volume) + "}";
-         if(i < nM15 - 1) json += ",";
+      json += "\"M15\":[";
+      MqlRates ratesM15[];
+      ArraySetAsSeries(ratesM15, true);
+      nM15 = CopyRates(_Symbol, PERIOD_M15, 0, BARS_M15, ratesM15);
+      if(nM15 > 0) {
+         for(int i=0; i<nM15; i++) {
+            json += "{\"time\":" + IntegerToString((long)ratesM15[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM15[i].time) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM15[i].tick_volume) + "}";
+            if(i < nM15 - 1) json += ",";
+         }
       }
-   }
-   json += "],";
+      json += "],";
 
-   // H1 — 336 bars (~14 days)
-   json += "\"H1\":[";
-   MqlRates ratesH1[];
-   ArraySetAsSeries(ratesH1, true);
-   int nH1 = CopyRates(_Symbol, PERIOD_H1, 0, BARS_H1, ratesH1);
-   if(nH1 > 0) {
-      for(int i=0; i<nH1; i++) {
-         json += "{\"time\":" + IntegerToString((long)ratesH1[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH1[i].time) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH1[i].tick_volume) + "}";
-         if(i < nH1 - 1) json += ",";
+      json += "\"H1\":[";
+      MqlRates ratesH1[];
+      ArraySetAsSeries(ratesH1, true);
+      nH1 = CopyRates(_Symbol, PERIOD_H1, 0, BARS_H1, ratesH1);
+      if(nH1 > 0) {
+         for(int i=0; i<nH1; i++) {
+            json += "{\"time\":" + IntegerToString((long)ratesH1[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH1[i].time) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH1[i].tick_volume) + "}";
+            if(i < nH1 - 1) json += ",";
+         }
       }
-   }
-   json += "],";
+      json += "],";
 
-   // H4 — 84 bars (~14 days)
-   json += "\"H4\":[";
-   MqlRates ratesH4[];
-   ArraySetAsSeries(ratesH4, true);
-   int nH4 = CopyRates(_Symbol, PERIOD_H4, 0, BARS_H4, ratesH4);
-   if(nH4 > 0) {
-      for(int i=0; i<nH4; i++) {
-         json += "{\"time\":" + IntegerToString((long)ratesH4[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH4[i].time) + ",\"open\":" + DoubleToString(ratesH4[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH4[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH4[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH4[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH4[i].tick_volume) + "}";
-         if(i < nH4 - 1) json += ",";
+      json += "\"H4\":[";
+      MqlRates ratesH4[];
+      ArraySetAsSeries(ratesH4, true);
+      nH4 = CopyRates(_Symbol, PERIOD_H4, 0, BARS_H4, ratesH4);
+      if(nH4 > 0) {
+         for(int i=0; i<nH4; i++) {
+            json += "{\"time\":" + IntegerToString((long)ratesH4[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH4[i].time) + ",\"open\":" + DoubleToString(ratesH4[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH4[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH4[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH4[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH4[i].tick_volume) + "}";
+            if(i < nH4 - 1) json += ",";
+         }
       }
-   }
-   json += "]";
+      json += "]";
 
-   json += "},";
+      json += "},";
+   }
 
    // Positions
    json += "\"openPositions\":[";
@@ -438,19 +452,27 @@ void SendHeartbeat()
       lastHeartbeatOk = TimeCurrent();
       lastHeartbeatStatus = "OK";
       LogAction("INFO", "HEARTBEAT",
-         "OK · " + _Symbol +
+         "OK · #" + IntegerToString(heartbeatSeq) +
+         " " + _Symbol +
          " bid=" + DoubleToString(tick.bid, _Digits) +
          " spread=" + DoubleToString(spreadPts, 0) + "pts" +
          " bal=" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) +
          " pos=" + IntegerToString(PositionsTotal()) +
-         " bars M5/M15/H1/H4=" + IntegerToString(nM5) + "/" + IntegerToString(nM15) + "/" + IntegerToString(nH1) + "/" + IntegerToString(nH4) +
+         (sendChart
+            ? (" chartBars M5/M15/H1/H4=" + IntegerToString(nM5) + "/" + IntegerToString(nM15) + "/" + IntegerToString(nH1) + "/" + IntegerToString(nH4))
+            : " chart=skip") +
+         " bytes~" + IntegerToString(StringLen(json)) +
          " queued=" + IntegerToString(ArraySize(pendingOrders)));
    }
    else
    {
       heartbeatFailCount++;
-      lastHeartbeatStatus = "FAIL";
-      LogAction("ERROR", "HEARTBEAT", "Failed to send · check ServerURL WebRequest allowlist · " + ServerURL);
+      lastHeartbeatStatus = "FAIL http=" + IntegerToString(FxScalpKing.LastHttpCode()) +
+         " err=" + IntegerToString(FxScalpKing.LastError());
+      LogAction("ERROR", "HEARTBEAT",
+         "Failed · http=" + IntegerToString(FxScalpKing.LastHttpCode()) +
+         " err=" + IntegerToString(FxScalpKing.LastError()) +
+         " · allowlist " + ServerURL + " · ApiKey must match EA_API_KEY");
    }
 }
 
@@ -526,12 +548,13 @@ void UpdateExpertComment()
 
    int age = lastHeartbeatOk > 0 ? (int)(TimeCurrent() - lastHeartbeatOk) : -1;
    string line =
-      EA_Name + "\n" +
+      EA_Name + " · " + (licenseValid ? "ONLINE" : "OFFLINE") + "\n" +
       "Server: " + ServerURL + "\n" +
       "HB: " + lastHeartbeatStatus +
          " ok=" + IntegerToString(heartbeatOkCount) +
          " fail=" + IntegerToString(heartbeatFailCount) +
-         " age=" + IntegerToString(age) + "s\n" +
+         " age=" + IntegerToString(age) + "s" +
+         " seq=" + IntegerToString(heartbeatSeq) + "\n" +
       _Symbol + " spread=" + DoubleToString(spreadPts, 0) + "pts" +
          " bid=" + DoubleToString(tick.bid, _Digits) + "\n" +
       "Paused=" + (isPaused ? "YES" : "NO") +
@@ -541,7 +564,8 @@ void UpdateExpertComment()
       "Bars H4=" + IntegerToString(BARS_H4) +
          " H1=" + IntegerToString(BARS_H1) +
          " M15=" + IntegerToString(BARS_M15) +
-         " M5=" + IntegerToString(BARS_M5);
+         " M5=" + IntegerToString(BARS_M5) +
+         " chartEvery=" + IntegerToString(CHART_SYNC_EVERY_N);
 
    Comment(line);
 }

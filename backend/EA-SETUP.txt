@@ -30,9 +30,19 @@ Steps
      npm run migrate
      npm run dev
 
-6. Enable AutoTrading in MT5. Journal should show:
+6. Enable AutoTrading in MT5. Experts tab / Journal should show:
      License Validated Successfully
-     HEARTBEAT Sent successfully
+     HEARTBEAT OK · #N …
+     Chart Comment: ONLINE · HB: OK …
+
+Cloud / Render notes
+--------------------
+- Free Render sleeps after idle; first connect can take ~50–60s.
+  The EA retries license validation (10× / 5s) with a 60s WebRequest timeout.
+- ApiKey MUST match Render Environment → EA_API_KEY exactly.
+- If Experts shows LICENSE FAIL + err 4060: URL not allowlisted.
+- If HTTP 401: ApiKey mismatch.
+- Recompile after every .mq5 / .mqh change (F7), then remove+reattach the EA.
 
 What the EA does
 ----------------

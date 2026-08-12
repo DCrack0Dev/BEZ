@@ -8,10 +8,11 @@ const jsonRateLimitHandler = (req: any, res: any) => {
   });
 };
 
-// Strict: protects the EA key-validation endpoint from brute-force guessing.
+// EA license validate: allow retries during Render free-tier cold start (EA may
+// attempt ~10 times over ~50s). Still caps brute-force guessing.
 export const eaValidateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 5,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
   handler: jsonRateLimitHandler,
