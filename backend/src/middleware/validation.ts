@@ -22,17 +22,28 @@ export function validateBody(schema: ZodSchema) {
   };
 }
 
+// EA DoubleToString / IntegerToString always produce JSON numbers, but coerce
+// defensively so a quoted numeric never 400s the whole heartbeat.
+const num = () => z.coerce.number();
+const numOpt = () => z.coerce.number().optional();
+
 const candleSchema = z
   .object({
-    open: z.number(),
-    high: z.number(),
-    low: z.number(),
-    close: z.number(),
-    volume: z.number().optional().default(0),
-    timestamp: z.number(),
-    x: z.number().optional(),
+    open: num(),
+    high: num(),
+    low: num(),
+    close: num(),
+    volume: numOpt().default(0),
+    // EA sends `time` (unix sec) and/or `timestamp`
+    timestamp: numOpt(),
+    time: numOpt(),
+    x: numOpt(),
   })
-  .passthrough();
+  .passthrough()
+  .transform((c) => ({
+    ...c,
+    timestamp: c.timestamp ?? c.time ?? 0,
+  }));
 
 // Matches MT5Payload in src/types/index.ts.
 // Optional numeric fields are filled by the EA v3 heartbeat; defaults keep
@@ -42,29 +53,29 @@ export const eaUpdateSchema = z
     symbol: z.string().min(1),
     timeframe: z.string().min(1).optional().default('M5'),
     candles: z.array(candleSchema).optional().default([]),
-    spread: z.number(),
-    balance: z.number(),
-    equity: z.number(),
-    pipSize: z.number().optional().default(0.01),
-    pointSize: z.number().optional().default(0.001),
-    pipValue: z.number().optional().default(1),
-    minLot: z.number().optional().default(0.01),
-    maxLot: z.number().optional().default(100),
-    minLotStep: z.number().optional().default(0.01),
-    swingHighs: z.array(z.number()).optional(),
-    swingLows: z.array(z.number()).optional(),
-    openPositionsCount: z.number().optional().default(0),
-    ema20: z.number().optional().default(0),
-    ema20Prev: z.number().optional().default(0),
-    atr14: z.number().optional(),
+    spread: num(),
+    balance: num(),
+    equity: num(),
+    pipSize: numOpt().default(0.01),
+    pointSize: numOpt().default(0.001),
+    pipValue: numOpt().default(1),
+    minLot: numOpt().default(0.01),
+    maxLot: numOpt().default(100),
+    minLotStep: numOpt().default(0.01),
+    swingHighs: z.array(num()).optional(),
+    swingLows: z.array(num()).optional(),
+    openPositionsCount: numOpt().default(0),
+    ema20: numOpt().default(0),
+    ema20Prev: numOpt().default(0),
+    atr14: numOpt(),
     newsFilterActive: z.boolean().optional(),
-    freeMargin: z.number().optional(),
-    marginLevel: z.number().optional(),
-    margin: z.number().optional(),
+    freeMargin: numOpt(),
+    marginLevel: numOpt(),
+    margin: numOpt(),
     positions: z.array(z.any()).optional(),
     openPositions: z.array(z.any()).optional(),
     closedTrades: z.array(z.any()).optional(),
-    timestamp: z.number().optional(), // replay-protection helper (see replayGuard.ts)
+    timestamp: numOpt(), // replay-protection helper (see replayGuard.ts)
   })
   .passthrough();
 

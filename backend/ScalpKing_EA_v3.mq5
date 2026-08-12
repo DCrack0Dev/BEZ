@@ -302,7 +302,9 @@ void SendHeartbeat()
    json += "\"ema20Prev\":" + DoubleToString(g_ema20Prev > 0 ? g_ema20Prev : ema20[0], _Digits) + ",";
    json += "\"ema50\":" + DoubleToString(ema50[0], _Digits) + ",";
    json += "\"atr14\":" + DoubleToString(atr[0], _Digits) + ",";
-   json += "\"timestamp\":" + IntegerToString((long)TimeCurrent() * 1000) + ",";
+   // TimeGMT() aligns with Render UTC; TimeCurrent() is broker time and was
+   // causing HTTP 400 from replayGuard when clocks diverged.
+   json += "\"timestamp\":" + IntegerToString((long)TimeGMT() * 1000) + ",";
    json += "\"isPaused\":" + (isPaused ? "true" : "false") + ",";
    g_ema20Prev = ema20[0];
    heartbeatSeq++;

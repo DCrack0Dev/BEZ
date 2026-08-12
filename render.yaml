@@ -29,7 +29,8 @@ services:
     region: oregon
     # typescript is a production dependency so npm ci always can compile.
     # postinstall also runs prisma generate + build as a safety net.
-    buildCommand: npm ci && npx prisma generate && npm run build
+    # Python deps required for AI Lab train/backtest (numpy/torch CPU).
+    buildCommand: npm ci && npx prisma generate && npm run build && node scripts/install-python-deps.js
     startCommand: npm run start
     healthCheckPath: /test
     autoDeploy: true
@@ -38,6 +39,8 @@ services:
         value: production
       - key: NODE_VERSION
         value: "20"
+      - key: PYTHON_PATH
+        value: "python3"
       - key: DATABASE_URL
         fromDatabase:
           name: liquibot-db
@@ -48,8 +51,6 @@ services:
         sync: false
       - key: MT5_BRIDGE_API_KEY
         sync: false
-      - key: PYTHON_PATH
-        value: python3
       - key: ALLOWED_ORIGINS
         value: "https://*.expo.dev,https://*.onrender.com"
       - key: AI_TRADING_ENABLED
