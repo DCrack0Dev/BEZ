@@ -71,6 +71,8 @@ export interface AccountState {
   autoTradingEnabled: boolean;
   /** When true, respect CONFIG.blockedSessions (Asia). When false, trade any time. */
   timezoneTradingEnabled: boolean;
+  /** Max allowed spread in points (XAUUSD). Adjustable from app settings. */
+  maxSpreadPoints: number;
   lastFeatures?: FeatureSet;
   setupProgress?: SetupProgress;
   lastSignalReason?: string;
@@ -100,6 +102,7 @@ export class TradingEngine {
     candles: [],
     autoTradingEnabled: false,
     timezoneTradingEnabled: true,
+    maxSpreadPoints: CONFIG.maxSpreadPoints,
   };
 
   private pendingCommands: any[] = [];
@@ -232,16 +235,24 @@ export class TradingEngine {
   }
 
   /** Apply mobile/settings flags without requiring a full EA heartbeat. */
-  applyBotConfig(cfg: { autoTradingEnabled?: boolean; timezoneTradingEnabled?: boolean }) {
+  applyBotConfig(cfg: {
+    autoTradingEnabled?: boolean;
+    timezoneTradingEnabled?: boolean;
+    maxSpreadPoints?: number;
+  }) {
     if (cfg.autoTradingEnabled !== undefined) {
       this.accountState.autoTradingEnabled = !!cfg.autoTradingEnabled;
     }
     if (cfg.timezoneTradingEnabled !== undefined) {
       this.accountState.timezoneTradingEnabled = !!cfg.timezoneTradingEnabled;
     }
+    if (cfg.maxSpreadPoints !== undefined && Number.isFinite(cfg.maxSpreadPoints) && cfg.maxSpreadPoints > 0) {
+      this.accountState.maxSpreadPoints = Math.round(cfg.maxSpreadPoints);
+    }
     this.io.emit('BOT_CONFIG', {
       autoTradingEnabled: this.accountState.autoTradingEnabled,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+      maxSpreadPoints: this.accountState.maxSpreadPoints,
     });
   }
 
@@ -1077,6 +1088,7 @@ export class TradingEngine {
       marginLevel: (payload as any).marginLevel,
       dailyLossPercent: (payload as any).dailyLossPercent,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+      maxSpreadPoints: this.accountState.maxSpreadPoints,
     };
 
     const setupProgress = evaluateSetupProgress(signalPayload, {

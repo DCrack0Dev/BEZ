@@ -28,6 +28,7 @@ export const usePolling = () => {
   const socketRef = useRef<Socket | null>(null);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
   const prevTimezone = useRef<boolean>(botSettings.timezoneTradingEnabled !== false);
+  const prevMaxSpread = useRef<number>(botSettings.maxSpreadPoints ?? 800);
   const lastSetupLog = useRef<string>('');
 
   useEffect(() => {
@@ -183,21 +184,25 @@ export const usePolling = () => {
         setOpenPositions(openPositions);
 
         const tzEnabled = botSettings.timezoneTradingEnabled !== false;
+        const maxSpread = botSettings.maxSpreadPoints ?? 800;
         if (
           accountData.ea_connected &&
           (prevAutoTrading.current !== botSettings.autoTradingEnabled ||
-            prevTimezone.current !== tzEnabled)
+            prevTimezone.current !== tzEnabled ||
+            prevMaxSpread.current !== maxSpread)
         ) {
           prevAutoTrading.current = botSettings.autoTradingEnabled;
           prevTimezone.current = tzEnabled;
+          prevMaxSpread.current = maxSpread;
           await setBotConfig({
             autoTradingEnabled: botSettings.autoTradingEnabled,
             timezoneTradingEnabled: tzEnabled,
+            maxSpreadPoints: maxSpread,
           });
           addLog({
             component: 'App',
             level: 'info',
-            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'}`,
+            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'} · maxSpread=${maxSpread}pts`,
           } as any);
         }
 

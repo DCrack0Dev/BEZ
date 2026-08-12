@@ -33,7 +33,7 @@ export const CONFIG = {
   minCandleBodyPoints: 50,        // short XAUUSD minimum body (50 points)
   volumeMultiplier: 1.5,
   maxSpreadPips: 2.0,             // forex
-  maxSpreadPoints: 30,            // XAUUSD (30 points for Deriv)
+  maxSpreadPoints: 800,           // XAUUSD default (points); adjustable via bot config / settings
   spreadBuffer: 30,               // Deriv Gold buffer (30 points)
   supportProximityPips: 10,       // long: how close to support
   resistanceProximityPoints: 100, // short XAUUSD: how close to resistance

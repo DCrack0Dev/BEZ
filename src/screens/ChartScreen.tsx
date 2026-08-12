@@ -39,11 +39,11 @@ type TradeVisual = {
 };
 
 const TF_COUNTS: Record<Timeframe, number> = {
-  // ~14 days of history (H4×84). Live EA streams these counts each heartbeat.
-  M5: 500,
-  M15: 400,
-  H1: 336,
-  H4: 84,
+  // ~16.7 days of history (H4×100). Live EA streams these counts each heartbeat.
+  M5: 600,
+  M15: 480,
+  H1: 400,
+  H4: 100,
 };
 const TF_INTERVAL_SECONDS: Record<Timeframe, number> = { M5: 300, M15: 900, H1: 3600, H4: 14400 };
 const timeframes: Timeframe[] = ['M5', 'M15', 'H1', 'H4'];

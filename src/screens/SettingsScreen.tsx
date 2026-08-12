@@ -52,6 +52,21 @@ const SettingsScreen = () => {
               placeholderTextColor={COLORS.textSecondary}
             />
           </View>
+          <View style={styles.inputRow}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={TYPOGRAPHY.body}>Max Spread (Points)</Text>
+              <Text style={[TYPOGRAPHY.caption, { marginTop: 2, opacity: 0.7 }]}>
+                Block entries when spread exceeds this (XAUUSD)
+              </Text>
+            </View>
+            <TextInput
+              style={styles.smallInput}
+              value={(botSettings.maxSpreadPoints ?? 800).toString()}
+              onChangeText={(text) => updateBotSettings({ maxSpreadPoints: parseInt(text) || 800 })}
+              keyboardType="number-pad"
+              placeholderTextColor={COLORS.textSecondary}
+            />
+          </View>
           <View style={styles.toggleRow}>
             <Text style={TYPOGRAPHY.body}>Trailing Stop</Text>
             <Switch

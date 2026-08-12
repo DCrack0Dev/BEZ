@@ -116,8 +116,16 @@ export const validateSignal = (payload: MT5Payload, features?: FeatureSet): Trad
   const maxOpen = isXAUUSD ? 2 : CONFIG.maxOpenTrades;
   if (openPositionsCount >= maxOpen) return null;
 
-  const maxSpread = isXAUUSD ? CONFIG.maxSpreadPoints * pointSize : CONFIG.maxSpreadPips * pipSize;
-  if (spread > maxSpread) return null;
+  // EA heartbeat reports spread in points ((ask-bid)/_Point). Compare points→points.
+  const maxSpreadPts =
+    (payload as MT5Payload & { maxSpreadPoints?: number }).maxSpreadPoints ??
+    CONFIG.maxSpreadPoints;
+  if (isXAUUSD) {
+    if (spread > maxSpreadPts) return null;
+  } else {
+    const spreadPips = pointSize > 0 ? (spread * pointSize) / pipSize : spread;
+    if (spreadPips > CONFIG.maxSpreadPips) return null;
+  }
 
   const timezoneTradingEnabled = payload.timezoneTradingEnabled !== false;
   const currentSession = getCurrentSession();

@@ -86,6 +86,7 @@ export const botConfigSchema = z
   .object({
     autoTradingEnabled: z.boolean().optional(),
     timezoneTradingEnabled: z.boolean().optional(),
+    maxSpreadPoints: z.number().positive().optional(),
     timestamp: z.number().optional(),
   })
   .passthrough();

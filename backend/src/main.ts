@@ -198,7 +198,7 @@ app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema)
     if (lots < (state.minLot || 0.01) || lots > (state.maxLot || 100)) {
       return res.status(400).json({ success: false, error: `lots outside broker min/max (${state.minLot}-${state.maxLot})` });
     }
-    if ((state.positions?.length || 0) >= 3) {
+    if ((state.positions?.length || 0) >= 5) {
       return res.status(400).json({ success: false, error: 'max open positions reached' });
     }
     tradingEngine.addCommand({
@@ -218,12 +218,14 @@ app.post('/api/bot/config', requireAuth, userActionLimiter, validateBody(botConf
   tradingEngine.applyBotConfig({
     autoTradingEnabled: req.body.autoTradingEnabled,
     timezoneTradingEnabled: req.body.timezoneTradingEnabled,
+    maxSpreadPoints: req.body.maxSpreadPoints,
   });
   tradingEngine.addCommand({ action: 'CONFIG_SYNC', ...req.body });
   res.json({
     success: true,
     autoTradingEnabled: tradingEngine.getAccountState().autoTradingEnabled,
     timezoneTradingEnabled: tradingEngine.getAccountState().timezoneTradingEnabled,
+    maxSpreadPoints: tradingEngine.getAccountState().maxSpreadPoints,
   });
 });
 app.get('/api/subscription', requireAuth, (req, res) => res.json({ active: true, plan: 'Lifetime Pro', expiry: '2027-12-31' }));

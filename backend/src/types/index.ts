@@ -42,6 +42,8 @@ export interface MT5Payload {
   autoTradingEnabled?: boolean;
   /** When false, skip blocked session filter (trade any time). Default true. */
   timezoneTradingEnabled?: boolean;
+  /** Max allowed spread in points (XAUUSD). From app settings / bot config. */
+  maxSpreadPoints?: number;
 }
 
 export interface PositionState {

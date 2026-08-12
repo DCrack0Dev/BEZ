@@ -57,21 +57,46 @@ const DashboardScreen = () => {
   const handleConfirmOrder = async () => {
     if (!pendingOrder) return;
     setConfirmVisible(false);
-    
-    logApp(`Placing ${pendingOrder.type} order`, 'info', `Symbol: ${pendingOrder.symbol}, Lots: ${botSettings.defaultLots}`);
-    
+
+    const point = Number(account?.pointSize) || 0.01;
+    const price = Number(account?.price) || 0;
+    const slPts = Number(botSettings.stopLoss) || 100;
+    const tpPts = Number(botSettings.takeProfit) || 200;
+    const lots = Number(botSettings.defaultLots) || 0.01;
+
+    if (!price || price <= 0) {
+      Alert.alert('Error', 'No live price from EA yet — wait for heartbeat.');
+      return;
+    }
+
+    const isBuy = pendingOrder.type === 'BUY';
+    const sl = isBuy ? price - slPts * point : price + slPts * point;
+    const tp = isBuy ? price + tpPts * point : price - tpPts * point;
+
+    logApp(
+      `Placing ${pendingOrder.type} order`,
+      'info',
+      `Symbol: ${pendingOrder.symbol}, Lots: ${lots}, SL: ${sl.toFixed(2)}, TP: ${tp.toFixed(2)}`
+    );
+
     try {
       await placeOrder({
         symbol: pendingOrder.symbol,
         type: pendingOrder.type,
-        lots: botSettings.defaultLots
+        lots,
+        sl,
+        tp,
       });
       logApp(`Order sent successfully`, 'success', `${pendingOrder.type} ${pendingOrder.symbol}`);
       Alert.alert('Success', 'Order Sent Successfully');
       refresh();
-    } catch (error) {
-      logApp(`Order failed`, 'error', error as string);
-      Alert.alert('Error', 'Failed to place order');
+    } catch (error: any) {
+      const msg =
+        error?.response?.data?.error ||
+        error?.message ||
+        String(error);
+      logApp(`Order failed`, 'error', msg);
+      Alert.alert('Error', msg || 'Failed to place order');
     }
   };
 

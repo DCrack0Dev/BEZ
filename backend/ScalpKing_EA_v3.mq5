@@ -56,7 +56,19 @@ COrderInfo        ordInfo;
 bool              licenseValid      = false;
 bool              isPaused          = false;
 datetime          lastHeartbeat     = 0;
+datetime          lastHeartbeatOk   = 0;
+string            lastHeartbeatStatus = "INIT";
+int               heartbeatOkCount  = 0;
+int               heartbeatFailCount = 0;
+int               lastCommandCount  = 0;
 string            EA_Name           = "FxScalpKing EA v3.0";
+
+// Chart history depths (must match app ChartScreen TF_COUNTS)
+#define BARS_M5   600
+#define BARS_M15  480
+#define BARS_H1   400
+#define BARS_H4   100
+#define BARS_FEAT 600
 
 // Indicators
 int handle_ema20, handle_ema50, handle_atr;
@@ -169,6 +181,7 @@ void OnTimer()
       PollCommands();
       ProcessPendingOrders();
       lastHeartbeat = TimeCurrent();
+      UpdateExpertComment();
    }
 }
 
@@ -287,7 +300,7 @@ void SendHeartbeat()
    json += "\"M5\":[";
    MqlRates ratesM5[];
    ArraySetAsSeries(ratesM5, true);
-   int nM5 = CopyRates(_Symbol, PERIOD_M5, 0, 500, ratesM5);
+   int nM5 = CopyRates(_Symbol, PERIOD_M5, 0, BARS_M5, ratesM5);
    if(nM5 > 0) {
       for(int i=0; i<nM5; i++) {
          // time = unix seconds (app prefers timestamp over legacy index `x`)
@@ -301,7 +314,7 @@ void SendHeartbeat()
    json += "\"M15\":[";
    MqlRates ratesM15[];
    ArraySetAsSeries(ratesM15, true);
-   int nM15 = CopyRates(_Symbol, PERIOD_M15, 0, 400, ratesM15);
+   int nM15 = CopyRates(_Symbol, PERIOD_M15, 0, BARS_M15, ratesM15);
    if(nM15 > 0) {
       for(int i=0; i<nM15; i++) {
          json += "{\"time\":" + IntegerToString((long)ratesM15[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM15[i].time) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM15[i].tick_volume) + "}";
@@ -314,7 +327,7 @@ void SendHeartbeat()
    json += "\"H1\":[";
    MqlRates ratesH1[];
    ArraySetAsSeries(ratesH1, true);
-   int nH1 = CopyRates(_Symbol, PERIOD_H1, 0, 336, ratesH1);
+   int nH1 = CopyRates(_Symbol, PERIOD_H1, 0, BARS_H1, ratesH1);
    if(nH1 > 0) {
       for(int i=0; i<nH1; i++) {
          json += "{\"time\":" + IntegerToString((long)ratesH1[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH1[i].time) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH1[i].tick_volume) + "}";
@@ -327,7 +340,7 @@ void SendHeartbeat()
    json += "\"H4\":[";
    MqlRates ratesH4[];
    ArraySetAsSeries(ratesH4, true);
-   int nH4 = CopyRates(_Symbol, PERIOD_H4, 0, 84, ratesH4);
+   int nH4 = CopyRates(_Symbol, PERIOD_H4, 0, BARS_H4, ratesH4);
    if(nH4 > 0) {
       for(int i=0; i<nH4; i++) {
          json += "{\"time\":" + IntegerToString((long)ratesH4[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH4[i].time) + ",\"open\":" + DoubleToString(ratesH4[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH4[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH4[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH4[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH4[i].tick_volume) + "}";
@@ -399,7 +412,7 @@ void SendHeartbeat()
    json += "\"candles\":[";
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int lookback = 500;
+   int lookback = BARS_FEAT;
    int nCandles = CopyRates(_Symbol, PERIOD_M5, 0, lookback, rates);
    if(nCandles > 0)
    {
@@ -418,13 +431,26 @@ void SendHeartbeat()
    json += "]}";
 
    string resp;
+   double spreadPts = (tick.ask - tick.bid) / _Point;
    if(FxScalpKing.SendHeartbeat(json, resp))
    {
-      LogAction("DEBUG", "HEARTBEAT", "Sent successfully");
+      heartbeatOkCount++;
+      lastHeartbeatOk = TimeCurrent();
+      lastHeartbeatStatus = "OK";
+      LogAction("INFO", "HEARTBEAT",
+         "OK · " + _Symbol +
+         " bid=" + DoubleToString(tick.bid, _Digits) +
+         " spread=" + DoubleToString(spreadPts, 0) + "pts" +
+         " bal=" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) +
+         " pos=" + IntegerToString(PositionsTotal()) +
+         " bars M5/M15/H1/H4=" + IntegerToString(nM5) + "/" + IntegerToString(nM15) + "/" + IntegerToString(nH1) + "/" + IntegerToString(nH4) +
+         " queued=" + IntegerToString(ArraySize(pendingOrders)));
    }
    else
    {
-      LogAction("ERROR", "HEARTBEAT", "Failed to send");
+      heartbeatFailCount++;
+      lastHeartbeatStatus = "FAIL";
+      LogAction("ERROR", "HEARTBEAT", "Failed to send · check ServerURL WebRequest allowlist · " + ServerURL);
    }
 }
 
@@ -434,12 +460,17 @@ void SendHeartbeat()
 void PollCommands()
 {
    string resp = FxScalpKing.GetCommands();
-   if(resp == "" || resp == "[]") return;
+   if(resp == "" || resp == "[]")
+   {
+      lastCommandCount = 0;
+      return;
+   }
 
-   LogAction("DEBUG", "COMMANDS", "Received response: " + resp);
+   LogAction("INFO", "COMMANDS", "Received: " + resp);
 
    // Walk each object in the JSON array and honour brain-calculated lots/SL/TP.
    int searchFrom = 0;
+   int cmdCount = 0;
    while(true)
    {
       int objStart = StringFind(resp, "{", searchFrom);
@@ -448,6 +479,7 @@ void PollCommands()
       if(objEnd < 0) break;
       string obj = StringSubstr(resp, objStart, objEnd - objStart + 1);
       searchFrom = objEnd + 1;
+      cmdCount++;
 
       string action = JsonGetString(obj, "action", "");
       if(action == "") action = JsonGetString(obj, "type", "");
@@ -457,6 +489,8 @@ void PollCommands()
          double lots = JsonGetNumber(obj, "lots", FixedLotSize);
          double sl = JsonGetNumber(obj, "sl", 0);
          double tp = JsonGetNumber(obj, "tp", 0);
+         LogAction("INFO", "COMMAND", action + " lots=" + DoubleToString(lots, 2) +
+            " sl=" + DoubleToString(sl, _Digits) + " tp=" + DoubleToString(tp, _Digits));
          QueueOrder(action, lots, sl, tp);
       }
       else if(action == "UPDATE_SL")
@@ -474,7 +508,42 @@ void PollCommands()
       else if(action == "PAUSE") { isPaused = true; LogAction("INFO", "COMMAND", "EA Paused"); }
       else if(action == "RESUME") { isPaused = false; LogAction("INFO", "COMMAND", "EA Resumed"); }
       else if(action == "CLOSE_ALL") CloseAllTrades();
+      else if(action == "CONFIG_SYNC") LogAction("INFO", "COMMAND", "CONFIG_SYNC acknowledged");
+      else LogAction("WARN", "COMMAND", "Unknown action: " + action);
    }
+   lastCommandCount = cmdCount;
+}
+
+//+------------------------------------------------------------------+
+//| Chart + Experts tab status (Comment + Print)                     |
+//+------------------------------------------------------------------+
+void UpdateExpertComment()
+{
+   MqlTick tick;
+   double spreadPts = 0;
+   if(SymbolInfoTick(_Symbol, tick))
+      spreadPts = (tick.ask - tick.bid) / _Point;
+
+   int age = lastHeartbeatOk > 0 ? (int)(TimeCurrent() - lastHeartbeatOk) : -1;
+   string line =
+      EA_Name + "\n" +
+      "Server: " + ServerURL + "\n" +
+      "HB: " + lastHeartbeatStatus +
+         " ok=" + IntegerToString(heartbeatOkCount) +
+         " fail=" + IntegerToString(heartbeatFailCount) +
+         " age=" + IntegerToString(age) + "s\n" +
+      _Symbol + " spread=" + DoubleToString(spreadPts, 0) + "pts" +
+         " bid=" + DoubleToString(tick.bid, _Digits) + "\n" +
+      "Paused=" + (isPaused ? "YES" : "NO") +
+         " queued=" + IntegerToString(ArraySize(pendingOrders)) +
+         " cmds=" + IntegerToString(lastCommandCount) +
+         " positions=" + IntegerToString(PositionsTotal()) + "\n" +
+      "Bars H4=" + IntegerToString(BARS_H4) +
+         " H1=" + IntegerToString(BARS_H1) +
+         " M15=" + IntegerToString(BARS_M15) +
+         " M5=" + IntegerToString(BARS_M5);
+
+   Comment(line);
 }
 
 //+------------------------------------------------------------------+

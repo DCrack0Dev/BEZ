@@ -54,6 +54,7 @@ export const closeOrder = async (ticket: string) => {
 export const setBotConfig = async (config: {
   autoTradingEnabled?: boolean;
   timezoneTradingEnabled?: boolean;
+  maxSpreadPoints?: number;
   executionMode?: 'app' | 'backend';
   defaultLots?: number;
   maxOpenTrades?: number;

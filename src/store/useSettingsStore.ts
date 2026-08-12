@@ -14,6 +14,8 @@ interface BotSettings {
   playbookTimeFilter: boolean;
   autoTradingEnabled: boolean;
   executionMode: 'app' | 'backend';
+  /** Max allowed spread in points (XAUUSD). Synced to backend. */
+  maxSpreadPoints: number;
 }
 
 interface NotificationSettings {
@@ -47,6 +49,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   playbookTimeFilter: false,
   autoTradingEnabled: false,
   executionMode: 'app',
+  maxSpreadPoints: 800,
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {

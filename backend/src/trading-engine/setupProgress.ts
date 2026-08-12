@@ -131,9 +131,19 @@ export function evaluateSetupProgress(
 
   const drawdown = balance > 0 ? ((balance - equity) / balance) * 100 : 0;
   const maxOpen = isXAUUSD ? 2 : CONFIG.maxOpenTrades;
-  const maxSpread = isXAUUSD ? CONFIG.maxSpreadPoints * pointSize : CONFIG.maxSpreadPips * pipSize;
-  const maxSpreadDisplay = isXAUUSD ? CONFIG.maxSpreadPoints : CONFIG.maxSpreadPips;
-  const spreadActual = isXAUUSD ? spread / (pointSize || 1) : spread / (pipSize || 1);
+  // EA reports spread in points — compare/display in points for XAUUSD.
+  const maxSpreadPts =
+    (payload as MT5Payload & { maxSpreadPoints?: number }).maxSpreadPoints ??
+    CONFIG.maxSpreadPoints;
+  const maxSpreadDisplay = isXAUUSD ? maxSpreadPts : CONFIG.maxSpreadPips;
+  const spreadActual = isXAUUSD
+    ? spread
+    : pointSize > 0
+      ? (spread * pointSize) / (pipSize || 1)
+      : spread;
+  const spreadOk = isXAUUSD
+    ? spread <= maxSpreadPts
+    : spreadActual <= CONFIG.maxSpreadPips;
 
   const sessionBlocked =
     timezoneTradingEnabled && CONFIG.blockedSessions.includes(session);
@@ -166,7 +176,7 @@ export function evaluateSetupProgress(
     req(
       'spread',
       'Spread',
-      spread <= maxSpread,
+      spreadOk,
       `≤ ${maxSpreadDisplay} ${isXAUUSD ? 'pts' : 'pips'}`,
       `${fmt(spreadActual, 1)} ${isXAUUSD ? 'pts' : 'pips'}`,
       clamp(100 - (spreadActual / maxSpreadDisplay) * 100)
