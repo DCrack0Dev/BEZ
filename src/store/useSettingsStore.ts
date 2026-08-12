@@ -7,7 +7,10 @@ interface BotSettings {
   takeProfit: number;
   maxOpenTrades: number;
   trailingStopEnabled: boolean;
-  sessionFilterEnabled: boolean;
+  /** When true, Asia (and CONFIG blocked sessions) are blocked. When false, trade any time. */
+  timezoneTradingEnabled: boolean;
+  /** @deprecated use timezoneTradingEnabled */
+  sessionFilterEnabled?: boolean;
   playbookTimeFilter: boolean;
   autoTradingEnabled: boolean;
   executionMode: 'app' | 'backend';
@@ -40,7 +43,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   takeProfit: 200,
   maxOpenTrades: 5,
   trailingStopEnabled: false,
-  sessionFilterEnabled: true,
+  timezoneTradingEnabled: true,
   playbookTimeFilter: false,
   autoTradingEnabled: false,
   executionMode: 'app',
@@ -78,6 +81,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const notifications = await AsyncStorage.getItem('notifications');
       if (botSettings) {
         const parsed = JSON.parse(botSettings);
+        // Migrate older sessionFilterEnabled → timezoneTradingEnabled
+        if (parsed.timezoneTradingEnabled === undefined && parsed.sessionFilterEnabled !== undefined) {
+          parsed.timezoneTradingEnabled = !!parsed.sessionFilterEnabled;
+        }
         set({ botSettings: { ...DEFAULT_BOT_SETTINGS, ...parsed } });
       }
       if (notifications) {

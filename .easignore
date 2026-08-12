@@ -7,7 +7,10 @@ node_modules/
 # Backend / Python / ML — not part of the mobile APK
 backend/
 .venv/
+**/.venv/
 Books/
+.expo/
+.idea/
 *.mq5
 *.mqh
 *.ex5
@@ -21,10 +24,10 @@ backend/python/saved_models/
 backend/python/saved_scalers/
 backend/python/reports/
 
-# Native build junk (keep android/ sources; drop caches)
-android/.gradle/
-android/build/
-android/app/build/
+# Native projects are generated on EAS — do not upload local prebuild output
+# (avoids 300MB+ archives and "android directory detected" package mismatches)
+android/
+ios/
 **/.cxx/
 **/*.apk
 **/*.aab

@@ -85,6 +85,7 @@ export const orderSchema = z
 export const botConfigSchema = z
   .object({
     autoTradingEnabled: z.boolean().optional(),
+    timezoneTradingEnabled: z.boolean().optional(),
     timestamp: z.number().optional(),
   })
   .passthrough();

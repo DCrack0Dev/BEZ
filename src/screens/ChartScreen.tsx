@@ -38,7 +38,13 @@ type TradeVisual = {
   closedAt?: number;
 };
 
-const TF_COUNTS: Record<Timeframe, number> = { M5: 576, M15: 192, H1: 48, H4: 12 };
+const TF_COUNTS: Record<Timeframe, number> = {
+  // ~14 days of history (H4×84). Live EA streams these counts each heartbeat.
+  M5: 500,
+  M15: 400,
+  H1: 336,
+  H4: 84,
+};
 const TF_INTERVAL_SECONDS: Record<Timeframe, number> = { M5: 300, M15: 900, H1: 3600, H4: 14400 };
 const timeframes: Timeframe[] = ['M5', 'M15', 'H1', 'H4'];
 const CLOSED_LINE_FADE_MS = 12000;
@@ -196,7 +202,8 @@ const normalizeCandles = (raw: RawCandle[], timeframe: Timeframe, fallbackPrice:
 
   const sanitized = (Array.isArray(raw) ? raw : [])
     .map((c) => {
-      const t = Number(c.x ?? c.time ?? 0);
+      // Prefer real unix timestamps — EA used to send chart index in `x`
+      const t = Number((c as any).timestamp ?? c.time ?? (Number(c.x) > 1e9 ? c.x : 0) ?? 0);
       const open = Number(c.open);
       const high = Number(c.high);
       const low = Number(c.low);
@@ -204,7 +211,7 @@ const normalizeCandles = (raw: RawCandle[], timeframe: Timeframe, fallbackPrice:
       const volume = Number(c.tick_volume ?? c.volume ?? 0);
       if (!t || !open || !high || !low || !close) return null;
       return {
-        time: roundToBucket(t, interval),
+        time: roundToBucket(t > 1e12 ? Math.floor(t / 1000) : t, interval),
         open,
         high: Math.max(high, open, close),
         low: Math.min(low, open, close),
@@ -218,6 +225,11 @@ const normalizeCandles = (raw: RawCandle[], timeframe: Timeframe, fallbackPrice:
 
   const byTime = new Map<number, Candle>();
   sanitized.forEach((c) => byTime.set(c.time, c));
+
+  // Prefer real EA candles — avoid inventing hundreds of mock bars when history is short
+  if (sanitized.length >= Math.min(24, count)) {
+    return sanitized.slice(-count);
+  }
 
   const output: Candle[] = [];
   let prevClose = fallbackPrice > 0 ? fallbackPrice : 4500;

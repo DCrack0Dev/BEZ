@@ -17,7 +17,7 @@ import { usePolling } from '../hooks/usePolling';
 import { logApp } from '../store/useLogStore';
 
 const DashboardScreen = () => {
-  const { account, openPositions, isLoading } = useTradeStore();
+  const { account, openPositions, isLoading, setupProgress, lastSignalReason } = useTradeStore();
   const { botSettings } = useSettingsStore();
   const { logs, keyLevelDistance, clearLogs } = useLogStore();
   const [refreshing, setRefreshing] = useState(false);
@@ -36,7 +36,7 @@ const DashboardScreen = () => {
 
   const latestAppLog = [...logs].reverse().find((log) => log.component === 'App');
 
-  const { refresh } = usePolling();
+  const { refresh, setTimezoneTrading } = usePolling();
 
   // Log dashboard events
   useEffect(() => {
@@ -149,17 +149,24 @@ const DashboardScreen = () => {
             </View>
 
             <View style={styles.debugPanel}>
-              <Text style={styles.debugTitle}>Debug Panel</Text>
+              <Text style={styles.debugTitle}>Live Setup</Text>
               <Text style={styles.debugLine}>EA: {account.eaConnected ? 'Connected' : 'Disconnected'}</Text>
               <Text style={styles.debugLine}>Auto Trading: {botSettings.autoTradingEnabled ? 'ON' : 'OFF'}</Text>
-              <Text style={styles.debugLine}>Brain Mode: {(botSettings.executionMode || 'app').toUpperCase()}</Text>
+              <Text style={styles.debugLine}>
+                Timezone: {botSettings.timezoneTradingEnabled !== false ? 'ON (Asia blocked)' : 'OFF (any time)'}
+              </Text>
+              <Text style={styles.debugLine}>
+                Setup: {setupProgress
+                  ? `${setupProgress.overallProgress.toFixed(0)}% · ${setupProgress.bias} · ${setupProgress.trend}`
+                  : 'Waiting for heartbeat…'}
+              </Text>
               <Text style={styles.debugLine}>Price: {account.price || 0} | ATR: {account.atr || 0} | Spread: {account.spread || 0}</Text>
               <Text style={styles.debugLine}>Open Trades: {openPositions.length}/{Math.max(1, botSettings.maxOpenTrades || 1)}</Text>
               <Text style={styles.debugLine}>
                 Key Level: {displayKeyLevel ? `${displayKeyLevel.type} (${displayKeyLevel.distance.toFixed(2)} pts)` : 'N/A'}
               </Text>
               <Text style={styles.debugLine}>
-                Last App Log: {latestAppLog ? `${latestAppLog.message}` : 'No app logs yet'}
+                Heartbeat: {lastSignalReason || latestAppLog?.message || 'No updates yet'}
               </Text>
             </View>
           </>
@@ -197,6 +204,9 @@ const DashboardScreen = () => {
         logs={logs} 
         onClear={clearLogs}
         keyLevelDistance={displayKeyLevel}
+        setupProgress={setupProgress || account.setupProgress}
+        timezoneTradingEnabled={botSettings.timezoneTradingEnabled !== false}
+        onTimezoneTradingChange={setTimezoneTrading}
       />
 
       {pendingOrder && (

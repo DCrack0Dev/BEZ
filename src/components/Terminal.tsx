@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Dimensions, Switch } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS } from '../theme/colors';
-import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
+import type { SetupProgress, SetupRequirement } from '../store/useTradeStore';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-const TERMINAL_MAX_HEIGHT = SCREEN_HEIGHT / 3;
+const TERMINAL_MAX_HEIGHT = Math.min(SCREEN_HEIGHT * 0.55, 420);
 
 interface LogEntry {
   id: string;
@@ -21,20 +21,50 @@ interface TerminalProps {
   logs: LogEntry[];
   onClear: () => void;
   keyLevelDistance?: { level: number; distance: number; type: string };
+  setupProgress?: SetupProgress | null;
+  timezoneTradingEnabled?: boolean;
+  onTimezoneTradingChange?: (enabled: boolean) => void;
 }
 
-const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) => {
+const GateRow = ({ gate }: { gate: SetupRequirement }) => (
+  <View style={styles.gateRow}>
+    <MaterialCommunityIcons
+      name={gate.met ? 'check-circle' : 'close-circle-outline'}
+      size={14}
+      color={gate.met ? COLORS.buy : COLORS.textSecondary}
+    />
+    <View style={styles.gateTextWrap}>
+      <Text style={[styles.gateLabel, gate.met && styles.gateMet]} numberOfLines={1}>
+        {gate.label}
+      </Text>
+      <Text style={styles.gateDetail} numberOfLines={1}>
+        need {gate.expected} · now {gate.actual}
+      </Text>
+    </View>
+    <Text style={[styles.gatePct, { color: gate.met ? COLORS.buy : COLORS.warning }]}>
+      {Math.round(gate.progress)}%
+    </Text>
+  </View>
+);
+
+const Terminal: React.FC<TerminalProps> = ({
+  logs,
+  onClear,
+  keyLevelDistance,
+  setupProgress,
+  timezoneTradingEnabled = true,
+  onTimezoneTradingChange,
+}) => {
   const scrollViewRef = useRef<ScrollView>(null);
-  const [isExpanded, setIsExpanded] = useState(false); // Default to collapsed as requested
+  const [isExpanded, setIsExpanded] = useState(true);
 
   useEffect(() => {
-    // Auto-scroll to bottom when new logs arrive and it's expanded
     if (isExpanded && scrollViewRef.current) {
       setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+        scrollViewRef.current?.scrollTo({ y: 0, animated: false });
+      }, 50);
     }
-  }, [logs, isExpanded]);
+  }, [setupProgress?.summary, isExpanded]);
 
   const getComponentColor = (component: string) => {
     switch (component) {
@@ -60,31 +90,45 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
     if (!timestamp) return '--:--:--';
     const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
     if (isNaN(date.getTime())) return '--:--:--';
-    return date.toLocaleTimeString('en-US', { 
-      hour12: false, 
-      hour: '2-digit', 
-      minute: '2-digit', 
-      second: '2-digit' 
+    return date.toLocaleTimeString('en-US', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
     });
   };
 
+  const bias = setupProgress?.bias || 'NONE';
+  const progressPct = Math.round(setupProgress?.overallProgress || 0);
+  const activeGates =
+    bias === 'SELL'
+      ? setupProgress?.sellGates || []
+      : setupProgress?.buyGates || [];
+
   return (
     <View style={[styles.container, isExpanded && styles.expanded]}>
-      <TouchableOpacity 
+      <TouchableOpacity
         activeOpacity={0.8}
         onPress={() => setIsExpanded(!isExpanded)}
         style={styles.header}
       >
         <View style={styles.headerLeft}>
-          <MaterialCommunityIcons name="console" size={18} color={COLORS.primary} />
-          <Text style={styles.title} numberOfLines={1}>TERMINAL</Text>
+          <MaterialCommunityIcons name="radar" size={18} color={COLORS.primary} />
+          <Text style={styles.title} numberOfLines={1}>SETUP</Text>
           <View style={styles.badge}>
-            <Text style={styles.badgeText}>{logs.length}</Text>
+            <Text style={styles.badgeText}>{progressPct}%</Text>
           </View>
         </View>
-        
+
         <View style={styles.headerRight}>
-          {keyLevelDistance && (
+          {setupProgress && (
+            <View style={styles.keyLevelInfo}>
+              <Text style={styles.keyLevelText} numberOfLines={1}>
+                {setupProgress.trend} · {setupProgress.tradeType} · {setupProgress.session}
+              </Text>
+            </View>
+          )}
+          {!setupProgress && keyLevelDistance && (
             <View style={styles.keyLevelInfo}>
               <MaterialCommunityIcons name="map-marker" size={12} color={COLORS.warning} />
               <Text style={styles.keyLevelText} numberOfLines={1}>
@@ -92,34 +136,101 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
               </Text>
             </View>
           )}
-          
+
           <View style={styles.controls}>
             <TouchableOpacity onPress={onClear} style={styles.controlBtn}>
               <MaterialCommunityIcons name="delete-outline" size={18} color={COLORS.error} />
             </TouchableOpacity>
-            <MaterialCommunityIcons 
-              name={isExpanded ? "chevron-down" : "chevron-up"} 
-              size={22} 
-              color={COLORS.textPrimary} 
+            <MaterialCommunityIcons
+              name={isExpanded ? 'chevron-down' : 'chevron-up'}
+              size={22}
+              color={COLORS.textPrimary}
             />
           </View>
         </View>
       </TouchableOpacity>
 
       {isExpanded && (
-        <ScrollView 
+        <ScrollView
           ref={scrollViewRef}
           style={styles.logContainer}
-          showsVerticalScrollIndicator={true}
-          nestedScrollEnabled={true}
+          showsVerticalScrollIndicator
+          nestedScrollEnabled
         >
-          {logs.length === 0 ? (
-            <View style={styles.emptyState}>
-              <MaterialCommunityIcons name="console" size={30} color="#333" />
-              <Text style={styles.emptyText}>No logs yet...</Text>
+          {onTimezoneTradingChange && (
+            <View style={styles.tzRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.tzTitle}>Timezone trading</Text>
+                <Text style={styles.tzHint}>
+                  {timezoneTradingEnabled
+                    ? 'ON — Asia session blocked'
+                    : 'OFF — trade any time if conditions met'}
+                </Text>
+              </View>
+              <Switch
+                value={timezoneTradingEnabled}
+                onValueChange={onTimezoneTradingChange}
+                trackColor={{ false: COLORS.border, true: COLORS.primary + '50' }}
+                thumbColor={timezoneTradingEnabled ? COLORS.primary : COLORS.textSecondary}
+              />
+            </View>
+          )}
+
+          {setupProgress ? (
+            <View style={styles.setupCard}>
+              <Text style={styles.setupSummary}>{setupProgress.summary}</Text>
+              <View style={styles.progressTrack}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      width: `${progressPct}%`,
+                      backgroundColor:
+                        progressPct >= 100
+                          ? COLORS.buy
+                          : bias === 'BUY'
+                            ? COLORS.buy
+                            : bias === 'SELL'
+                              ? COLORS.sell
+                              : COLORS.primary,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.setupMeta}>
+                Looking for: {bias === 'NONE' ? 'setup' : bias} · ATR / levels update every heartbeat
+              </Text>
+
+              <Text style={styles.sectionLabel}>HARD GATES</Text>
+              {setupProgress.hardGates.map((g) => (
+                <GateRow key={g.id} gate={g} />
+              ))}
+
+              <Text style={styles.sectionLabel}>
+                {bias === 'SELL' ? 'SELL ENTRY' : 'BUY ENTRY'} REQUIREMENTS
+              </Text>
+              {activeGates.map((g) => (
+                <GateRow key={g.id} gate={g} />
+              ))}
+
+              {setupProgress.blockers.length > 0 && progressPct < 100 && (
+                <Text style={styles.blockers}>
+                  Still need: {setupProgress.blockers.join(' · ')}
+                </Text>
+              )}
             </View>
           ) : (
-            [...logs].reverse().map((log) => (
+            <View style={styles.emptyState}>
+              <MaterialCommunityIcons name="lan-pending" size={28} color="#333" />
+              <Text style={styles.emptyText}>Waiting for EA heartbeat…</Text>
+            </View>
+          )}
+
+          <Text style={styles.sectionLabel}>LOGS ({logs.length})</Text>
+          {logs.length === 0 ? (
+            <Text style={styles.emptyText}>No logs yet…</Text>
+          ) : (
+            [...logs].slice(0, 40).map((log) => (
               <View key={log.id} style={styles.logEntry}>
                 <View style={styles.logHeader}>
                   <Text style={[styles.logTime, { color: '#666' }]}>
@@ -132,14 +243,10 @@ const Terminal: React.FC<TerminalProps> = ({ logs, onClear, keyLevelDistance }) 
                     {log.level.toUpperCase()}
                   </Text>
                 </View>
-                <Text style={[styles.logMessage, { color: '#ccc' }]}>
-                  {log.message}
-                </Text>
-                {log.details && (
-                  <Text style={[styles.logDetails, { color: '#888' }]}>
-                    {log.details}
-                  </Text>
-                )}
+                <Text style={[styles.logMessage, { color: '#ccc' }]}>{log.message}</Text>
+                {log.details ? (
+                  <Text style={[styles.logDetails, { color: '#888' }]}>{log.details}</Text>
+                ) : null}
               </View>
             ))
           )}
@@ -179,7 +286,7 @@ const styles = StyleSheet.create({
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    maxWidth: '40%',
+    maxWidth: '35%',
   },
   headerRight: {
     flexDirection: 'row',
@@ -216,7 +323,7 @@ const styles = StyleSheet.create({
     marginRight: SPACING.s,
     borderWidth: 1,
     borderColor: '#333',
-    maxWidth: '60%',
+    maxWidth: '55%',
   },
   keyLevelText: {
     fontSize: 10,
@@ -236,6 +343,99 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: SPACING.m,
     paddingTop: SPACING.s,
+  },
+  tzRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#121212',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 8,
+    padding: SPACING.s,
+    marginBottom: SPACING.s,
+  },
+  tzTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  tzHint: {
+    color: '#888',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  setupCard: {
+    backgroundColor: '#111',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    padding: SPACING.s,
+    marginBottom: SPACING.m,
+  },
+  setupSummary: {
+    color: '#eee',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginBottom: 8,
+  },
+  progressTrack: {
+    height: 6,
+    backgroundColor: '#222',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  setupMeta: {
+    color: '#777',
+    fontSize: 10,
+    marginBottom: 8,
+  },
+  sectionLabel: {
+    color: COLORS.primary,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  gateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  gateTextWrap: {
+    flex: 1,
+    marginLeft: 6,
+    marginRight: 6,
+  },
+  gateLabel: {
+    color: '#bbb',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  gateMet: {
+    color: '#ddd',
+  },
+  gateDetail: {
+    color: '#666',
+    fontSize: 9,
+    fontFamily: 'monospace',
+  },
+  gatePct: {
+    fontSize: 10,
+    fontWeight: '700',
+    width: 36,
+    textAlign: 'right',
+  },
+  blockers: {
+    marginTop: 8,
+    color: COLORS.warning,
+    fontSize: 10,
+    fontFamily: 'monospace',
   },
   logEntry: {
     marginBottom: 10,
@@ -273,10 +473,9 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   emptyState: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 24,
   },
   emptyText: {
     fontSize: 12,

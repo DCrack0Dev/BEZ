@@ -13,6 +13,31 @@ export interface Position {
   tp?: number;
 }
 
+export interface SetupRequirement {
+  id: string;
+  label: string;
+  detail: string;
+  expected: string;
+  actual: string;
+  met: boolean;
+  progress: number;
+}
+
+export interface SetupProgress {
+  updatedAt: number;
+  session: string;
+  timezoneTradingEnabled: boolean;
+  trend: string;
+  bias: 'BUY' | 'SELL' | 'NONE';
+  tradeType: 'BUY' | 'SELL' | 'WAITING';
+  overallProgress: number;
+  summary: string;
+  hardGates: SetupRequirement[];
+  buyGates: SetupRequirement[];
+  sellGates: SetupRequirement[];
+  blockers: string[];
+}
+
 export interface AccountData {
   balance: number;
   equity: number;
@@ -33,6 +58,9 @@ export interface AccountData {
   chart: any;
   keyLevelInfo?: { level: number; distance: number; type: string };
   logs?: any[];
+  setupProgress?: SetupProgress | null;
+  timezoneTradingEnabled?: boolean;
+  autoTradingEnabled?: boolean;
 }
 
 interface TradeState {
@@ -42,6 +70,7 @@ interface TradeState {
   structures: any;
   activeTimeframe: string;
   lastSignalReason: string;
+  setupProgress: SetupProgress | null;
   isLoading: boolean;
   error: string | null;
   setAccount: (account: AccountData) => void;
@@ -51,6 +80,7 @@ interface TradeState {
   setStructures: (structures: any) => void;
   setActiveTimeframe: (timeframe: string) => void;
   setLastSignalReason: (reason: string) => void;
+  setSetupProgress: (progress: SetupProgress | null) => void;
   setKeyLevelInfo: (info: { level: number; distance: number; type: string }) => void;
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
@@ -71,12 +101,14 @@ export const useTradeStore = create<TradeState>((set) => ({
     bbLower: 0,
     chart: [],
     logs: [],
+    setupProgress: null,
   },
   openPositions: [],
   closedPositions: [],
   structures: {},
   activeTimeframe: 'M15',
   lastSignalReason: 'Waiting for Setup...',
+  setupProgress: null,
   isLoading: false,
   error: null,
   setAccount: (account) => set({ account }),
@@ -88,6 +120,10 @@ export const useTradeStore = create<TradeState>((set) => ({
   setStructures: (structures) => set({ structures }),
   setActiveTimeframe: (activeTimeframe) => set({ activeTimeframe }),
   setLastSignalReason: (lastSignalReason) => set({ lastSignalReason }),
+  setSetupProgress: (setupProgress) => set((state) => ({
+    setupProgress,
+    account: { ...state.account, setupProgress },
+  })),
   setKeyLevelInfo: (keyLevelInfo) => set((state) => ({ account: { ...state.account, keyLevelInfo } })),
   setLoading: (isLoading) => set({ isLoading }),
   setError: (error) => set({ error }),

@@ -88,12 +88,17 @@ const SettingsScreen = () => {
             </View>
           </View>
           <View style={styles.toggleRow}>
-            <Text style={TYPOGRAPHY.body}>Session Filter (07:00 - 20:00)</Text>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={TYPOGRAPHY.body}>Timezone Trading</Text>
+              <Text style={[TYPOGRAPHY.caption, { marginTop: 2, opacity: 0.7 }]}>
+                ON = block Asia · OFF = trade any time when conditions are met
+              </Text>
+            </View>
             <Switch
-              value={botSettings.sessionFilterEnabled}
-              onValueChange={(val) => updateBotSettings({ sessionFilterEnabled: val })}
+              value={botSettings.timezoneTradingEnabled !== false}
+              onValueChange={(val) => updateBotSettings({ timezoneTradingEnabled: val })}
               trackColor={{ false: COLORS.border, true: COLORS.primary + '50' }}
-              thumbColor={botSettings.sessionFilterEnabled ? COLORS.primary : COLORS.textSecondary}
+              thumbColor={botSettings.timezoneTradingEnabled !== false ? COLORS.primary : COLORS.textSecondary}
             />
           </View>
           <View style={styles.toggleRow}>

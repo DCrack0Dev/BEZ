@@ -12,6 +12,7 @@ import { CONFIG } from '../config/tradingConfig';
 import { FeatureEngineeringEngine } from '../feature-engineering/featureEngine';
 import { processTrailingStop, PositionState } from '../trade-execution/trailingStopManager';
 import { validateSignal, calculateATR, calculateSwingHighs, calculateSwingLows, calculateEMA } from './signalValidator';
+import { evaluateSetupProgress, SetupProgress } from './setupProgress';
 import { TradeDnaEngine } from '../analytics/tradeDna';
 import { ExperienceEngine } from '../analytics/experienceEngine';
 import { liveTradeObserver } from '../analytics/tradeObserver';
@@ -65,7 +66,11 @@ export interface AccountState {
   atr14: number;
   candles: Candle[];
   autoTradingEnabled: boolean;
+  /** When true, respect CONFIG.blockedSessions (Asia). When false, trade any time. */
+  timezoneTradingEnabled: boolean;
   lastFeatures?: FeatureSet;
+  setupProgress?: SetupProgress;
+  lastSignalReason?: string;
 }
 
 export class TradingEngine {
@@ -91,6 +96,7 @@ export class TradingEngine {
     atr14: 0,
     candles: [],
     autoTradingEnabled: false,
+    timezoneTradingEnabled: true,
   };
 
   private pendingCommands: any[] = [];
@@ -219,6 +225,21 @@ export class TradingEngine {
   getAccountState(): AccountState {
     return { ...this.accountState };
   }
+
+  /** Apply mobile/settings flags without requiring a full EA heartbeat. */
+  applyBotConfig(cfg: { autoTradingEnabled?: boolean; timezoneTradingEnabled?: boolean }) {
+    if (cfg.autoTradingEnabled !== undefined) {
+      this.accountState.autoTradingEnabled = !!cfg.autoTradingEnabled;
+    }
+    if (cfg.timezoneTradingEnabled !== undefined) {
+      this.accountState.timezoneTradingEnabled = !!cfg.timezoneTradingEnabled;
+    }
+    this.io.emit('BOT_CONFIG', {
+      autoTradingEnabled: this.accountState.autoTradingEnabled,
+      timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+    });
+  }
+
   getPendingCommands(): any[] {
     return [...this.pendingCommands];
   }
@@ -667,16 +688,30 @@ export class TradingEngine {
         }
 
         monitoring.trackBrokerResponse(true, undefined, 'TRADE_CLOSED');
+        const posState = this.positionStates[ticket];
+        const dnaAny: any = finalizedDna || dna || {};
+        const dnaSl = Number(dnaAny.stopLoss || 0);
+        const dnaTp = Number(dnaAny.takeProfitLevels?.[0] || 0);
         this.closedTrades.unshift({
           ticket,
-          symbol: this.accountState.symbol,
+          symbol: closedTrade?.symbol || this.accountState.symbol,
+          type: closedTrade?.type || dnaAny.direction || 'BUY',
+          lots: Number(closedTrade?.lots || dnaAny.lots || dnaAny.lotSize || 0),
+          openPrice: Number(closedTrade?.openPrice || dnaAny.entryPrice || 0),
+          closePrice,
           profit,
+          pnl: profit,
           profitPips,
           outcome,
-          closePrice,
-          closeTime: Date.now(),
+          sl: Number(closedTrade?.sl || posState?.currentSL || dnaSl || 0),
+          tp: Number(closedTrade?.tp || posState?.tpLevels?.[0] || dnaTp || 0),
+          stopLoss: Number(closedTrade?.sl || posState?.currentSL || dnaSl || 0),
+          takeProfit: Number(closedTrade?.tp || posState?.tpLevels?.[0] || dnaTp || 0),
+          openTime: closedTrade?.openTime || dnaAny.entryTime || null,
+          closeTime: closedTrade?.closeTime || Date.now(),
         });
         if (this.closedTrades.length > 200) this.closedTrades.pop();
+        delete this.positionStates[ticket];
       } catch (error) {
         // Never let one bad position's close-handling abort processing of the
         // rest of processMT5Update. Re-add the ticket so we retry on next tick
@@ -824,17 +859,26 @@ export class TradingEngine {
             symbol: pos.symbol || this.accountState.symbol,
             direction: (pos.type === 'BUY' || pos.type === 0) ? 'BUY' : 'SELL',
             openPrice: pos.openPrice || pos.price || this.accountState.price,
-            currentSL: pos.sl || 0,
+            currentSL: Number(pos.sl || 0),
             currentPrice: this.accountState.price,
             phase: 1,
             scaleInLevels: [],
-            tpLevels: [],
+            tpLevels: Number(pos.tp) > 0 ? [Number(pos.tp)] : [],
             spread: this.accountState.spread,
             pipSize: this.accountState.pipSize,
             pointSize: this.accountState.pointSize,
           };
         } else {
           this.positionStates[ticket].currentPrice = this.accountState.price;
+          if (!this.positionStates[ticket].currentSL && Number(pos.sl) > 0) {
+            this.positionStates[ticket].currentSL = Number(pos.sl);
+          }
+          if (
+            (!this.positionStates[ticket].tpLevels || this.positionStates[ticket].tpLevels.length === 0) &&
+            Number(pos.tp) > 0
+          ) {
+            this.positionStates[ticket].tpLevels = [Number(pos.tp)];
+          }
         }
 
         // --- LIVE AI WATCH: rate entry/timing/pattern, track MFE/MAE, adjust ---
@@ -929,35 +973,43 @@ export class TradingEngine {
       }
     }
 
-    // Auto Trading
-    if (this.accountState.autoTradingEnabled) {
-      const swingHighs = payload.swingHighs || calculateSwingHighs(candlesReversed, 2);
-      const swingLows = payload.swingLows || calculateSwingLows(candlesReversed, 2);
-      const signalPayload: MT5Payload = {
-        ...payload,
-        symbol: this.accountState.symbol,
-        timeframe: 'M5',
-        candles: candlesReversed,
-        spread: this.accountState.spread,
-        balance: this.accountState.balance,
-        equity: this.accountState.equity,
-        pipSize: this.accountState.pipSize,
-        pointSize: this.accountState.pointSize,
-        pipValue: this.accountState.pipValue,
-        minLot: this.accountState.minLot,
-        maxLot: this.accountState.maxLot,
-        minLotStep: this.accountState.minLotStep,
-        swingHighs,
-        swingLows,
-        openPositionsCount: this.accountState.positions.length,
-        ema20,
-        ema20Prev: this.accountState.ema20Prev,
-        atr14,
-        freeMargin: (payload as any).freeMargin,
-        marginLevel: (payload as any).marginLevel,
-        dailyLossPercent: (payload as any).dailyLossPercent,
-      };
+    // Auto Trading + live setup scoreboard (always evaluated so Terminal can show progress)
+    const swingHighs = payload.swingHighs || calculateSwingHighs(candlesReversed, 2);
+    const swingLows = payload.swingLows || calculateSwingLows(candlesReversed, 2);
+    const signalPayload: MT5Payload = {
+      ...payload,
+      symbol: this.accountState.symbol,
+      timeframe: 'M5',
+      candles: candlesReversed,
+      spread: this.accountState.spread,
+      balance: this.accountState.balance,
+      equity: this.accountState.equity,
+      pipSize: this.accountState.pipSize,
+      pointSize: this.accountState.pointSize,
+      pipValue: this.accountState.pipValue,
+      minLot: this.accountState.minLot,
+      maxLot: this.accountState.maxLot,
+      minLotStep: this.accountState.minLotStep,
+      swingHighs,
+      swingLows,
+      openPositionsCount: this.accountState.positions.length,
+      ema20,
+      ema20Prev: this.accountState.ema20Prev,
+      atr14,
+      freeMargin: (payload as any).freeMargin,
+      marginLevel: (payload as any).marginLevel,
+      dailyLossPercent: (payload as any).dailyLossPercent,
+      timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+    };
 
+    const setupProgress = evaluateSetupProgress(signalPayload, {
+      timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+      autoTradingEnabled: this.accountState.autoTradingEnabled,
+    });
+    this.accountState.setupProgress = setupProgress;
+    this.accountState.lastSignalReason = setupProgress.summary;
+
+    if (this.accountState.autoTradingEnabled) {
       const signal = validateSignal(signalPayload);
       const now = Date.now();
       if (signal && now - this.lastTradeTime > 30000 && now > this.cooldowns[signal.direction]) {
@@ -1115,7 +1167,10 @@ export class TradingEngine {
 
     this.io.emit('EA_HEARTBEAT', {
       ...this.accountState,
-      lastSignalReason: `Trend: ${features.trendDirection} | Session: ${features.marketSession} | Vol: ${features.volatility}`,
+      lastSignalReason: this.accountState.lastSignalReason || setupProgress.summary,
+      setupProgress,
+      timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+      autoTradingEnabled: this.accountState.autoTradingEnabled,
       regime: this.latestRegime,
       ensemble: this.latestEnsembleDecision
         ? {

@@ -43,6 +43,8 @@ export interface MT5Payload {
   freeMargin?: number;
   marginLevel?: number; // percent, e.g. 250 = 250%
   dailyLossPercent?: number;
+  /** When false, skip CONFIG.blockedSessions (trade any time of day). Default true. */
+  timezoneTradingEnabled?: boolean;
 }
 
 // --- UTILITY CALCULATION FUNCTIONS ---
@@ -156,8 +158,10 @@ export const validateSignal = (payload: MT5Payload): TradeSignal | null => {
   if (spread > maxSpread) return null;
 
   // 4. Session Blocklist Filter (computed from server UTC time, no EA data needed)
+  // timezoneTradingEnabled=false → trade any session when other conditions pass.
+  const timezoneTradingEnabled = payload.timezoneTradingEnabled !== false;
   const currentSession = getCurrentSession();
-  if (CONFIG.blockedSessions.includes(currentSession)) return null;
+  if (timezoneTradingEnabled && CONFIG.blockedSessions.includes(currentSession)) return null;
 
   // 5. Margin Check (only enforced if EA/caller actually supplies marginLevel)
   // TODO: EA must be updated to send marginLevel in payload for this to be exercised.

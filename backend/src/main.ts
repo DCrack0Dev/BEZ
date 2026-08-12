@@ -215,12 +215,16 @@ app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema)
   res.json({ success: true });
 });
 app.post('/api/bot/config', requireAuth, userActionLimiter, validateBody(botConfigSchema), replayGuard, (req, res) => {
-  if (req.body.autoTradingEnabled !== undefined) {
-    const state = tradingEngine.getAccountState();
-    tradingEngine.processMT5Update({ ...state, autoTradingEnabled: req.body.autoTradingEnabled } as any);
-  }
+  tradingEngine.applyBotConfig({
+    autoTradingEnabled: req.body.autoTradingEnabled,
+    timezoneTradingEnabled: req.body.timezoneTradingEnabled,
+  });
   tradingEngine.addCommand({ action: 'CONFIG_SYNC', ...req.body });
-  res.json({ success: true });
+  res.json({
+    success: true,
+    autoTradingEnabled: tradingEngine.getAccountState().autoTradingEnabled,
+    timezoneTradingEnabled: tradingEngine.getAccountState().timezoneTradingEnabled,
+  });
 });
 app.get('/api/subscription', requireAuth, (req, res) => res.json({ active: true, plan: 'Lifetime Pro', expiry: '2027-12-31' }));
 app.get('/api/dna', requireAuth, (req, res) => res.json(tradingEngine.getDna()));
@@ -239,6 +243,81 @@ app.get('/api/ai/dashboard', requireAuth, async (req, res) => {
   try {
     const { modelManager } = await import('./model-management');
     res.json({ success: true, data: await modelManager.getDashboard() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// Explicit AI train/backtest routes (also on api router) so cloud deploys always expose them
+app.get('/api/ai/training/status', requireAuth, async (_req, res) => {
+  try {
+    const { modelManager } = await import('./model-management');
+    res.json({ success: true, data: modelManager.getTrainingStatus() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/ai/train', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const { modelManager } = await import('./model-management');
+    const kickoff = modelManager.enqueueTraining({
+      version: req.body?.version,
+      epochs: req.body?.epochs ?? 40,
+      dataPath: req.body?.dataPath,
+    });
+    if (!kickoff.accepted) {
+      return res.status(409).json({
+        success: false,
+        accepted: false,
+        error: kickoff.error || 'Unable to start training',
+        status: kickoff.status,
+        data: modelManager.getTrainingStatus(),
+      });
+    }
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      auto_promoted: false,
+      status: kickoff.status,
+      data: modelManager.getTrainingStatus(),
+      dataSource: kickoff.dataSource,
+      note: 'Training started. Poll GET /api/ai/training/status.',
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/ai/promote', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const { modelManager } = await import('./model-management');
+    const version = String(req.body?.version || '');
+    if (!version) return res.status(400).json({ success: false, error: 'version required' });
+    const result = await modelManager.promoteCandidate(version);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/backtest', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const { backtestEngine } = await import('./backtesting');
+    const result = await backtestEngine.run({
+      dataPath: req.body?.dataPath,
+      modelVersion: req.body?.modelVersion,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+app.get('/api/backtest/reports', requireAuth, async (_req, res) => {
+  try {
+    const { backtestEngine } = await import('./backtesting');
+    res.json({ success: true, data: backtestEngine.listReports() });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }

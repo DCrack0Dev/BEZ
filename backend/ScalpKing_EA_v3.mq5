@@ -6,7 +6,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "FxScalpKing"
 #property link        "https://fxscalpking.com"
-#property version     "3.00"
+#property version     "3.01"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -20,11 +20,12 @@
 // --- BACKEND CONNECTION ---
 // ApiKey MUST match the value in your backend .env (EA_API_KEY) / Render Env Vars EXACTLY.
 // ServerURL options:
-//   [LOCAL DEV]   http://localhost:5000     (your PC, same machine as MT5)
-//   [LOCAL LAN]   http://192.168.1.50:5000  (LAN IP, backend on different PC)
-//   [CLOUD]       https://liquibot-back.onrender.com  (online — replace with YOUR Render URL after deploy)
+//   [CLOUD]       https://liquibot-back.onrender.com  (default — production)
+//   [LOCAL DEV]   http://localhost:5000              (backend on same PC as MT5)
+//   [LOCAL LAN]   http://192.168.1.50:5000           (backend on another LAN PC)
+// Also allowlist ServerURL in MT5: Tools → Options → Expert Advisors → Allow WebRequest.
 input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
-input string   ServerURL         = "http://localhost:5000";
+input string   ServerURL         = "https://liquibot-back.onrender.com";
 input int      MagicNumber       = 20260101;
 input int      HeartbeatInterval = 1; // seconds
 input double   FixedLotSize      = 0.01;
@@ -125,6 +126,7 @@ void LogAction(string level, string action, string details)
 int OnInit()
 {
    LogAction("INFO", "INIT", EA_Name + " starting");
+   LogAction("INFO", "INIT", "ServerURL=" + ServerURL);
 
    FxScalpKing.SetServerUrl(ServerURL);
    FxScalpKing.SetApiKey(ApiKey);
@@ -278,41 +280,58 @@ void SendHeartbeat()
    json += "\"isPaused\":" + (isPaused ? "true" : "false") + ",";
    g_ema20Prev = ema20[0];
 
-   // Multi-Timeframe Chart Data
+   // Multi-Timeframe Chart Data (counts match app ChartScreen TF_COUNTS)
    json += "\"chart\":{";
 
-   // M5
+   // M5 — 500 bars
    json += "\"M5\":[";
    MqlRates ratesM5[];
    ArraySetAsSeries(ratesM5, true);
-   if(CopyRates(_Symbol, PERIOD_M5, 0, 100, ratesM5) > 0) {
-      for(int i=0; i<100; i++) {
-         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesM5[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM5[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM5[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM5[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesM5[i].time) + "}";
-         if(i < 99) json += ",";
+   int nM5 = CopyRates(_Symbol, PERIOD_M5, 0, 500, ratesM5);
+   if(nM5 > 0) {
+      for(int i=0; i<nM5; i++) {
+         // time = unix seconds (app prefers timestamp over legacy index `x`)
+         json += "{\"time\":" + IntegerToString((long)ratesM5[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM5[i].time) + ",\"open\":" + DoubleToString(ratesM5[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM5[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM5[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM5[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM5[i].tick_volume) + "}";
+         if(i < nM5 - 1) json += ",";
       }
    }
    json += "],";
 
-   // M15
+   // M15 — 400 bars
    json += "\"M15\":[";
    MqlRates ratesM15[];
    ArraySetAsSeries(ratesM15, true);
-   if(CopyRates(_Symbol, PERIOD_M15, 0, 100, ratesM15) > 0) {
-      for(int i=0; i<100; i++) {
-         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesM15[i].time) + "}";
-         if(i < 99) json += ",";
+   int nM15 = CopyRates(_Symbol, PERIOD_M15, 0, 400, ratesM15);
+   if(nM15 > 0) {
+      for(int i=0; i<nM15; i++) {
+         json += "{\"time\":" + IntegerToString((long)ratesM15[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesM15[i].time) + ",\"open\":" + DoubleToString(ratesM15[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesM15[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesM15[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesM15[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesM15[i].tick_volume) + "}";
+         if(i < nM15 - 1) json += ",";
       }
    }
    json += "],";
 
-   // H1
+   // H1 — 336 bars (~14 days)
    json += "\"H1\":[";
    MqlRates ratesH1[];
    ArraySetAsSeries(ratesH1, true);
-   if(CopyRates(_Symbol, PERIOD_H1, 0, 100, ratesH1) > 0) {
-      for(int i=0; i<100; i++) {
-         json += "{\"x\":" + IntegerToString(100 - i) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"timestamp\":" + IntegerToString(ratesH1[i].time) + "}";
-         if(i < 99) json += ",";
+   int nH1 = CopyRates(_Symbol, PERIOD_H1, 0, 336, ratesH1);
+   if(nH1 > 0) {
+      for(int i=0; i<nH1; i++) {
+         json += "{\"time\":" + IntegerToString((long)ratesH1[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH1[i].time) + ",\"open\":" + DoubleToString(ratesH1[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH1[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH1[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH1[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH1[i].tick_volume) + "}";
+         if(i < nH1 - 1) json += ",";
+      }
+   }
+   json += "],";
+
+   // H4 — 84 bars (~14 days)
+   json += "\"H4\":[";
+   MqlRates ratesH4[];
+   ArraySetAsSeries(ratesH4, true);
+   int nH4 = CopyRates(_Symbol, PERIOD_H4, 0, 84, ratesH4);
+   if(nH4 > 0) {
+      for(int i=0; i<nH4; i++) {
+         json += "{\"time\":" + IntegerToString((long)ratesH4[i].time) + ",\"timestamp\":" + IntegerToString((long)ratesH4[i].time) + ",\"open\":" + DoubleToString(ratesH4[i].open, _Digits) + ",\"high\":" + DoubleToString(ratesH4[i].high, _Digits) + ",\"low\":" + DoubleToString(ratesH4[i].low, _Digits) + ",\"close\":" + DoubleToString(ratesH4[i].close, _Digits) + ",\"volume\":" + IntegerToString((long)ratesH4[i].tick_volume) + "}";
+         if(i < nH4 - 1) json += ",";
       }
    }
    json += "]";
@@ -376,23 +395,24 @@ void SendHeartbeat()
    }
    json += "],";
 
-   // Send M5 candles
+   // Send M5 candles (engine features / signals)
    json += "\"candles\":[";
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int lookback = 100;
-   if(CopyRates(_Symbol, PERIOD_M5, 0, lookback, rates) > 0)
+   int lookback = 500;
+   int nCandles = CopyRates(_Symbol, PERIOD_M5, 0, lookback, rates);
+   if(nCandles > 0)
    {
-      for(int i=0; i<lookback; i++)
+      for(int i=0; i<nCandles; i++)
       {
-         json += "{\"x\":" + IntegerToString(lookback - i) + ",";
+         json += "{\"time\":" + IntegerToString((long)rates[i].time) + ",";
+         json += "\"timestamp\":" + IntegerToString((long)rates[i].time) + ",";
          json += "\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
          json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
          json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
          json += "\"close\":" + DoubleToString(rates[i].close, _Digits) + ",";
-         json += "\"volume\":" + DoubleToString((double)rates[i].tick_volume, 0) + ",";
-         json += "\"timestamp\":" + IntegerToString(rates[i].time) + "}";
-         if(i < lookback - 1) json += ",";
+         json += "\"volume\":" + DoubleToString((double)rates[i].tick_volume, 0) + "}";
+         if(i < nCandles - 1) json += ",";
       }
    }
    json += "]}";
@@ -560,13 +580,14 @@ void ProcessPendingOrders()
 
    for(int i = ArraySize(pendingOrders)-1; i >=0; i--)
    {
-      PendingOrder &order = pendingOrders[i];
+      // MQL5 forbids local references to array elements (PendingOrder &x = arr[i])
+      PendingOrder order = pendingOrders[i];
 
       // Check if ready to retry
       ulong now = (ulong)TimeCurrent() * 1000;
       if(now - (ulong)order.lastAttempt * 1000 < (ulong)RetryDelayMs) continue;
 
-      // Attempt execution
+      // Attempt execution (may update ticket/entry/sl/tp on the copy)
       bool success = ExecuteOrder(order);
       if(success)
       {
@@ -577,6 +598,7 @@ void ProcessPendingOrders()
          order.retriesLeft--;
          order.retriesUsed++;
          order.lastAttempt = TimeCurrent();
+         pendingOrders[i] = order; // write back retry state + any requote SL/TP tweaks
 
          if(order.retriesLeft <= 0)
          {

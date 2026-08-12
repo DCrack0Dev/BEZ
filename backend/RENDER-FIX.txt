@@ -1,33 +1,36 @@
-# Render / cloud ops — fix "DATABASE_URL is required" crash
+# Render / cloud ops — fix "DATABASE_URL is required" / Prisma migrate crash
 # ========================================================
 #
-# Your deploy log shows a NATIVE Node service running:
-#   npm run start  →  ts-node src/main.ts
-# from Root Directory = backend
+# Crash messages you may see:
+#   - The datasource.url property is required in your Prisma config
+#   - FATAL: DATABASE_URL is not set / Missing DATABASE_URL
 #
-# The crash happens because DATABASE_URL is not set in the
-# Render service Environment. dotenv cannot invent it on Render
-# (there is no committed .env file — by design).
+# Cause: Render has no committed .env. DATABASE_URL must be set on the
+# Web Service Environment (or linked from a Render Postgres).
 #
 # FIX (2 minutes):
 # ----------------
-# 1. Render Dashboard → PostgreSQL
-#    - If you have no DB: New → PostgreSQL → create "liquibot-db"
-#    - Open the DB → Connect → copy "Internal Database URL"
+# 1. https://dashboard.render.com → PostgreSQL
+#    - No DB? New → PostgreSQL → name liquibot-db → Create
+#    - Open DB → Connect → copy "Internal Database URL"
+#      (must contain *.render.com / dpg-... — NOT localhost)
 #
-# 2. Render Dashboard → Web Service (liquibot-back)
-#    → Environment → Add Environment Variable:
+# 2. Web Service → liquibot-back → Environment → Add:
 #
 #      DATABASE_URL   = <Internal Database URL from step 1>
-#      JWT_SECRET     = <openssl rand -hex 32>
-#      EA_API_KEY     = <same as MT5 EA ApiKey, e.g. FXSK-...>
+#      JWT_SECRET     = <node -e "console.log(require('crypto').randomBytes(32).toString('hex'))">
+#      EA_API_KEY     = <same as MT5 EA ApiKey / backend/.env>
 #      NODE_ENV       = production
 #
-# 3. Manual Deploy → "Clear build cache & deploy" (or Redeploy)
+#    Tip: On the Web Service, click "Connect Database" / link liquibot-db
+#    so Render injects DATABASE_URL automatically.
+#
+# 3. Manual Deploy → "Clear build cache & deploy"
 #
 # 4. Logs should show:
-#      LiquiBot backend v4.0 LIVE on port ...
-#    Health: GET https://liquibot-back.onrender.com/test → OK
+#      DATABASE_URL present (postgresql://…)
+#      LiquiBot backend v4.0 LIVE on port …
+#    Health: https://liquibot-back.onrender.com/test → OK
 #
-# Optional: link DB in Blueprint via render.yaml (DATABASE_URL fromDatabase)
-# so future Blueprint syncs inject it automatically.
+# Optional script (needs RENDER_API_KEY):
+#   .\scripts\setup-render-env.ps1 -DatabaseUrl 'postgresql://...@dpg-....render.com/liquibot'

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { getAccountData, setBotConfig, closeOrder } from '../api/orders';
+import { getAccountData, setBotConfig } from '../api/orders';
 import { useTradeStore } from '../store/useTradeStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
@@ -9,36 +9,36 @@ import { useAuthStore } from '../store/useAuthStore';
 /**
  * usePolling.ts (UI Only)
  * Mobile app hook to update UI based on backend WebSocket heartbeats.
- * No trading logic here!
  */
 
 export const usePolling = () => {
-  const { 
-    setAccount, 
+  const {
+    setAccount,
     setAccountPrice,
-    setOpenPositions, 
-    setError, 
-    setLoading, 
-    setLastSignalReason
+    setOpenPositions,
+    setError,
+    setLoading,
+    setLastSignalReason,
+    setSetupProgress,
   } = useTradeStore();
-  const { botSettings } = useSettingsStore();
+  const { botSettings, updateBotSettings } = useSettingsStore();
   const { addLog } = useLogStore();
   const { serverUrl } = useAuthStore();
-  
+
   const socketRef = useRef<Socket | null>(null);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
-  
-  // Initialize WebSocket for real-time state updates
+  const prevTimezone = useRef<boolean>(botSettings.timezoneTradingEnabled !== false);
+  const lastSetupLog = useRef<string>('');
+
   useEffect(() => {
     const url = serverUrl || 'https://liquibot-back.onrender.com';
     socketRef.current = io(url);
 
     socketRef.current.on('EA_HEARTBEAT', (data) => {
-      // Update UI state from backend heartbeat
       if (data.price) {
         setAccountPrice(Number(data.price));
       }
-      
+
       setAccount({
         ...data,
         eaConnected: data.ea_connected,
@@ -52,9 +52,15 @@ export const usePolling = () => {
         slowEMA: Number(data.ema50 || 0),
         atr: Number(data.atr14 || 0),
         spread: Number(data.spread || 0),
+        setupProgress: data.setupProgress || null,
+        timezoneTradingEnabled: data.timezoneTradingEnabled,
+        autoTradingEnabled: data.autoTradingEnabled,
       });
 
-      // Update open positions
+      if (data.setupProgress) {
+        setSetupProgress(data.setupProgress);
+      }
+
       const openPositions = (data.positions || []).map((p: any) => ({
         ticket: String(p.ticket),
         symbol: p.symbol,
@@ -68,103 +74,184 @@ export const usePolling = () => {
       }));
       setOpenPositions(openPositions);
 
-      // Log signal reason if provided
       if (data.lastSignalReason) {
         setLastSignalReason(data.lastSignalReason);
-        if (!data.lastSignalReason.startsWith('Searching')) {
+        // Throttle terminal spam: log when summary changes (heartbeat = setup update)
+        if (data.lastSignalReason !== lastSetupLog.current) {
+          lastSetupLog.current = data.lastSignalReason;
+          const ready = data.setupProgress?.overallProgress >= 100;
           addLog({
-            level: data.lastSignalReason.includes('✅') ? 'success' : 'info',
+            component: 'Backend',
+            level: ready ? 'success' : 'info',
             message: data.lastSignalReason,
-            timestamp: new Date().toISOString(),
-          });
+            details: data.setupProgress?.blockers?.length
+              ? `Need: ${data.setupProgress.blockers.slice(0, 3).join(' · ')}`
+              : undefined,
+          } as any);
         }
       }
     });
 
     socketRef.current.on('TRADE_SIGNAL', (data) => {
       addLog({
+        component: 'Backend',
         level: 'success',
-        message: `🚀 SIGNAL: ${data.signal?.direction || 'UNKNOWN'} ${data.signal?.symbol || 'XAUUSD'}`,
-        timestamp: new Date().toISOString(),
-      });
+        message: `SIGNAL: ${data.signal?.direction || 'UNKNOWN'} ${data.signal?.symbol || 'XAUUSD'}`,
+      } as any);
     });
 
     socketRef.current.on('STOP_UPDATE', (data) => {
       addLog({
+        component: 'Backend',
         level: 'info',
-        message: `🛡️ TS Update: #${data.positionTicket} → SL ${data.newStopLoss} (Phase ${data.phase})`,
-        timestamp: new Date().toISOString(),
-      });
+        message: `TS Update: #${data.positionTicket} → SL ${data.newStopLoss} (Phase ${data.phase})`,
+      } as any);
+    });
+
+    socketRef.current.on('BOT_CONFIG', (data) => {
+      if (typeof data.timezoneTradingEnabled === 'boolean') {
+        updateBotSettings({ timezoneTradingEnabled: data.timezoneTradingEnabled });
+        prevTimezone.current = data.timezoneTradingEnabled;
+      }
+      if (typeof data.autoTradingEnabled === 'boolean') {
+        updateBotSettings({ autoTradingEnabled: data.autoTradingEnabled });
+        prevAutoTrading.current = data.autoTradingEnabled;
+      }
     });
 
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [serverUrl, setAccountPrice, setAccount, setOpenPositions, setLastSignalReason, addLog]);
+  }, [
+    serverUrl,
+    setAccountPrice,
+    setAccount,
+    setOpenPositions,
+    setLastSignalReason,
+    setSetupProgress,
+    addLog,
+    updateBotSettings,
+  ]);
 
-  // Initial refresh and periodic check
-  const refresh = useCallback(async (showLoading = false) => {
-    if (showLoading) setLoading(true);
-    try {
-      const accountData = await getAccountData();
-      if (!accountData) return;
+  const refresh = useCallback(
+    async (showLoading = false) => {
+      if (showLoading) setLoading(true);
+      try {
+        const accountData = await getAccountData();
+        if (!accountData) return;
 
-      setAccount({
-        ...accountData,
-        eaConnected: accountData.ea_connected,
-        eaSymbol: accountData.symbol || 'XAUUSD',
-        currency: accountData.currency || 'USD',
-        price: Number(accountData.price || 0),
-        equity: Number(accountData.equity || accountData.account_equity || 0),
-        balance: Number(accountData.balance || accountData.account_balance || 0),
-        pnlToday: Number(accountData.pnl_today || accountData.pnlToday || 0),
-        fastEMA: Number(accountData.ema20 || 0),
-        slowEMA: Number(accountData.ema50 || 0),
-        atr: Number(accountData.atr14 || 0),
-        spread: Number(accountData.spread || 0),
-      });
-
-      setAccountPrice(Number(accountData.price || 0));
-      
-      const openPositions = (accountData.positions || []).map((p: any) => ({
-        ticket: String(p.ticket),
-        symbol: p.symbol,
-        type: p.type,
-        lots: p.volume || p.lots || 0,
-        openPrice: p.openPrice || p.price || 0,
-        currentPrice: accountData.price || p.price || 0,
-        profit: Number(p.profit || p.pnl || 0),
-        pnl: Number(p.profit || p.pnl || 0),
-        openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
-      }));
-      setOpenPositions(openPositions);
-
-      // Sync auto trading setting to backend
-      if (accountData.ea_connected && prevAutoTrading.current !== botSettings.autoTradingEnabled) {
-        prevAutoTrading.current = botSettings.autoTradingEnabled;
-        await setBotConfig({ autoTradingEnabled: botSettings.autoTradingEnabled });
-        addLog({
-          level: 'info',
-          message: `⚙️ Auto Trading ${botSettings.autoTradingEnabled ? 'ENABLED' : 'DISABLED'}`,
-          timestamp: new Date().toISOString(),
+        setAccount({
+          ...accountData,
+          eaConnected: accountData.ea_connected,
+          eaSymbol: accountData.symbol || 'XAUUSD',
+          currency: accountData.currency || 'USD',
+          price: Number(accountData.price || 0),
+          equity: Number(accountData.equity || accountData.account_equity || 0),
+          balance: Number(accountData.balance || accountData.account_balance || 0),
+          pnlToday: Number(accountData.pnl_today || accountData.pnlToday || 0),
+          fastEMA: Number(accountData.ema20 || 0),
+          slowEMA: Number(accountData.ema50 || 0),
+          atr: Number(accountData.atr14 || 0),
+          spread: Number(accountData.spread || 0),
+          setupProgress: accountData.setupProgress || null,
+          timezoneTradingEnabled: accountData.timezoneTradingEnabled,
+          autoTradingEnabled: accountData.autoTradingEnabled,
         });
-      }
 
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Refresh failed');
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, [setAccount, setAccountPrice, setOpenPositions, setError, setLoading, botSettings, setBotConfig, addLog]);
+        if (accountData.setupProgress) {
+          setSetupProgress(accountData.setupProgress);
+        }
+        if (accountData.lastSignalReason) {
+          setLastSignalReason(accountData.lastSignalReason);
+        }
+
+        setAccountPrice(Number(accountData.price || 0));
+
+        const openPositions = (accountData.positions || []).map((p: any) => ({
+          ticket: String(p.ticket),
+          symbol: p.symbol,
+          type: p.type,
+          lots: p.volume || p.lots || 0,
+          openPrice: p.openPrice || p.price || 0,
+          currentPrice: accountData.price || p.price || 0,
+          profit: Number(p.profit || p.pnl || 0),
+          pnl: Number(p.profit || p.pnl || 0),
+          openTime: p.time
+            ? new Date(Number(p.time) * 1000).toISOString()
+            : new Date().toISOString(),
+        }));
+        setOpenPositions(openPositions);
+
+        const tzEnabled = botSettings.timezoneTradingEnabled !== false;
+        if (
+          accountData.ea_connected &&
+          (prevAutoTrading.current !== botSettings.autoTradingEnabled ||
+            prevTimezone.current !== tzEnabled)
+        ) {
+          prevAutoTrading.current = botSettings.autoTradingEnabled;
+          prevTimezone.current = tzEnabled;
+          await setBotConfig({
+            autoTradingEnabled: botSettings.autoTradingEnabled,
+            timezoneTradingEnabled: tzEnabled,
+          });
+          addLog({
+            component: 'App',
+            level: 'info',
+            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'}`,
+          } as any);
+        }
+
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Refresh failed');
+      } finally {
+        if (showLoading) setLoading(false);
+      }
+    },
+    [
+      setAccount,
+      setAccountPrice,
+      setOpenPositions,
+      setError,
+      setLoading,
+      setSetupProgress,
+      setLastSignalReason,
+      botSettings,
+      addLog,
+    ]
+  );
 
   useEffect(() => {
     refresh(true);
     const interval = setInterval(() => {
       refresh(false);
-    }, 5000); 
+    }, 5000);
     return () => clearInterval(interval);
   }, [refresh]);
 
-  return { refresh };
+  const setTimezoneTrading = useCallback(
+    async (enabled: boolean) => {
+      await updateBotSettings({ timezoneTradingEnabled: enabled });
+      prevTimezone.current = enabled;
+      try {
+        await setBotConfig({ timezoneTradingEnabled: enabled });
+        addLog({
+          component: 'App',
+          level: 'info',
+          message: enabled
+            ? 'Timezone trading ON — Asia session blocked'
+            : 'Timezone trading OFF — any session allowed',
+        } as any);
+      } catch (err) {
+        addLog({
+          component: 'App',
+          level: 'error',
+          message: `Failed to sync timezone setting: ${err instanceof Error ? err.message : String(err)}`,
+        } as any);
+      }
+    },
+    [updateBotSettings, addLog]
+  );
+
+  return { refresh, setTimezoneTrading };
 };

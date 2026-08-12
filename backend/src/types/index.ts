@@ -39,6 +39,9 @@ export interface MT5Payload {
   positions?: any[];
   openPositions?: any[];
   closedTrades?: any[];
+  autoTradingEnabled?: boolean;
+  /** When false, skip blocked session filter (trade any time). Default true. */
+  timezoneTradingEnabled?: boolean;
 }
 
 export interface PositionState {
