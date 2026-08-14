@@ -1,20 +1,8 @@
 import { CONFIG } from '../config/tradingConfig';
 import { calculateRisk, RiskParams } from '../risk-manager/riskEngine';
-import { TradeSignal, FeatureSet, Candle, MT5Payload } from '../types';
+import { TradeSignal, FeatureSet, Candle, MT5Payload, MarketRegime } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
-/**
- * signalValidator.ts
- * Validates incoming MT5 data against SMC reversal entry rules (OB/FVG + candlestick patterns).
- * Strictly gates on Smart Money Concepts zones confirmed by price action patterns.
- */
-
-// --- UTILITY CALCULATION FUNCTIONS ---
-
-/** Calculate ATR (Average True Range) for given candles and period.
- * Candles are assumed to be in chronological-ascending order (oldest first),
- * matching feature-engineering/featureEngine.ts::calculateATR.
- */
 export const calculateATR = (candles: Candle[], period: number = 14): number => {
   if (candles.length < period + 1) return 0;
   const trs: number[] = [];
@@ -31,11 +19,6 @@ export const calculateATR = (candles: Candle[], period: number = 14): number => 
   return atr;
 };
 
-/**
- * Determine the current forex trading session purely from server UTC time.
- * Approximate session hours (UTC): Asia 00:00-09:00, London 08:00-17:00,
- * New York 13:00-22:00. Overlap = London & New York both active.
- */
 export const getCurrentSession = (): "ASIA" | "LONDON" | "NEWYORK" | "OVERLAP" => {
   const hourUTC = new Date().getUTCHours();
   const isAsia = hourUTC >= 0 && hourUTC < 9;
@@ -47,7 +30,6 @@ export const getCurrentSession = (): "ASIA" | "LONDON" | "NEWYORK" | "OVERLAP" =
   return "ASIA";
 };
 
-/** Calculate swing highs (lookback N candles) */
 export const calculateSwingHighs = (candles: Candle[], lookback: number = 2): number[] => {
   const swingHighs: number[] = [];
   for (let i = lookback; i < candles.length - lookback; i++) {
@@ -58,7 +40,6 @@ export const calculateSwingHighs = (candles: Candle[], lookback: number = 2): nu
   return swingHighs;
 };
 
-/** Calculate swing lows (lookback N candles) */
 export const calculateSwingLows = (candles: Candle[], lookback: number = 2): number[] => {
   const swingLows: number[] = [];
   for (let i = lookback; i < candles.length - lookback; i++) {
@@ -69,7 +50,6 @@ export const calculateSwingLows = (candles: Candle[], lookback: number = 2): num
   return swingLows;
 };
 
-/** Calculate Exponential Moving Average (EMA) */
 export const calculateEMA = (candles: Candle[], period: number): number => {
   if (candles.length < period) return 0;
   const k = 2 / (period + 1);
@@ -80,72 +60,177 @@ export const calculateEMA = (candles: Candle[], period: number): number => {
   return ema;
 };
 
-/**
- * Validates trade signals using strict SMC gating:
- *   1. Order Block or FVG zone must align with proposed direction
- *   2. Confirmation candlestick pattern required (HAMMER/PIN_BAR/ENGULFING)
- *   3. Trend/structure alignment check
- *
- * @param payload - MT5 data packet
- * @param features - Pre-computed FeatureSet from the feature engineering pipeline
- * @returns TradeSignal or null if SMC conditions are not met
- */
-export const validateSignal = (payload: MT5Payload, features?: FeatureSet): TradeSignal | null => {
+const REGIME_SL_MULTIPLIERS: Record<MarketRegime, number> = {
+  TRENDING: 1.2,
+  RANGING: 0.8,
+  VOLATILE: 2.0,
+  NEWS_DRIVEN: 2.5,
+  LOW_LIQUIDITY: 1.5,
+  HIGH_LIQUIDITY: 1.0,
+};
+
+const REGIME_TP_RR: Record<MarketRegime, { tp1: number; tp2: number; tp3: number }> = {
+  TRENDING: { tp1: 2.0, tp2: 3.5, tp3: 5.5 },
+  RANGING: { tp1: 1.0, tp2: 1.8, tp3: 2.5 },
+  VOLATILE: { tp1: 1.2, tp2: 2.0, tp3: 2.8 },
+  NEWS_DRIVEN: { tp1: 1.0, tp2: 1.5, tp3: 2.0 },
+  LOW_LIQUIDITY: { tp1: 1.0, tp2: 1.5, tp3: 2.0 },
+  HIGH_LIQUIDITY: { tp1: 1.8, tp2: 3.0, tp3: 5.0 },
+};
+
+interface DynamicSizingResult {
+  stopLoss: number;
+  tpLevels: [number, number, number];
+  slDistancePips: number;
+}
+
+function calculateDynamicSLTP(
+  direction: 'BUY' | 'SELL',
+  price: number,
+  atr14: number,
+  pipSize: number,
+  pointSize: number,
+  isXAUUSD: boolean,
+  swingHighs: number[],
+  swingLows: number[],
+  features: FeatureSet | undefined,
+  regime: MarketRegime = 'HIGH_LIQUIDITY',
+  regimeConfidence: number = 0.6
+): DynamicSizingResult {
+  const unit = isXAUUSD ? pointSize : pipSize;
+  const slMultiplier = REGIME_SL_MULTIPLIERS[regime] ?? 1.2;
+  const atrSLDistance = atr14 * slMultiplier;
+
+  const nearestResistanceRaw = swingHighs.filter(h => h >= price);
+  const nearestResistance = nearestResistanceRaw.length > 0 ? Math.min(...nearestResistanceRaw) : price + unit * 100;
+  const nearestSupportRaw = swingLows.filter(l => l <= price);
+  const nearestSupport = nearestSupportRaw.length > 0 ? Math.max(...nearestSupportRaw) : price - unit * 100;
+
+  const fvgDetails = features?.fvgDetails;
+  const obDetails = features?.orderBlockDetails;
+
+  let structureSL: number;
+  if (direction === 'BUY') {
+    let candidate = nearestSupport - unit * 2;
+    if (obDetails && features?.orderBlockConfirmed === 'BULLISH') {
+      candidate = Math.min(candidate, obDetails.bottom - unit);
+    }
+    if (fvgDetails && features?.fvgPresent === 'BULLISH' && fvgDetails.type !== 'NONE') {
+      candidate = Math.min(candidate, Math.min(fvgDetails.startPrice, fvgDetails.endPrice) - unit);
+    }
+    structureSL = candidate;
+  } else {
+    let candidate = nearestResistance + unit * 2;
+    if (obDetails && features?.orderBlockConfirmed === 'BEARISH') {
+      candidate = Math.max(candidate, obDetails.top + unit);
+    }
+    if (fvgDetails && features?.fvgPresent === 'BEARISH' && fvgDetails.type !== 'NONE') {
+      candidate = Math.max(candidate, Math.max(fvgDetails.startPrice, fvgDetails.endPrice) + unit);
+    }
+    structureSL = candidate;
+  }
+
+  const atrBasedSL = direction === 'BUY' ? price - atrSLDistance : price + atrSLDistance;
+  const structureDistance = Math.abs(price - structureSL);
+  const atrDistance = Math.abs(price - atrBasedSL);
+  const confidenceBoost = 1 + (regimeConfidence - 0.5) * 0.3;
+
+  let stopLoss: number;
+  if (direction === 'BUY') {
+    stopLoss = structureDistance > atrDistance * 0.5
+      ? Math.min(atrBasedSL, structureSL)
+      : atrBasedSL;
+    stopLoss = stopLoss - unit * (CONFIG.spreadBuffer * (isXAUUSD ? 0.03 : 1));
+  } else {
+    stopLoss = structureDistance > atrDistance * 0.5
+      ? Math.max(atrBasedSL, structureSL)
+      : atrBasedSL;
+    stopLoss = stopLoss + unit * (CONFIG.spreadBuffer * (isXAUUSD ? 0.03 : 1));
+  }
+
+  const rawSLDistance = Math.abs(price - stopLoss);
+  const slDistance = Math.max(rawSLDistance, atr14 * 0.6);
+  const slDistancePips = unit > 0 ? slDistance / unit : slDistance;
+
+  const rr = REGIME_TP_RR[regime] ?? REGIME_TP_RR.HIGH_LIQUIDITY;
+  const tpR1 = rr.tp1 * confidenceBoost;
+  const tpR2 = rr.tp2 * confidenceBoost;
+  const tpR3 = rr.tp3 * confidenceBoost;
+
+  const tp1 = direction === 'BUY' ? price + slDistance * tpR1 : price - slDistance * tpR1;
+  const tp2 = direction === 'BUY' ? price + slDistance * tpR2 : price - slDistance * tpR2;
+  let tp3: number;
+  if (direction === 'BUY') {
+    tp3 = nearestResistanceRaw.length > 0 ? nearestResistance + unit : price + slDistance * tpR3;
+  } else {
+    tp3 = nearestSupportRaw.length > 0 ? nearestSupport - unit : price - slDistance * tpR3;
+  }
+
+  return { stopLoss, tpLevels: [tp1, tp2, tp3], slDistancePips };
+}
+
+export const validateSignal = (
+  payload: MT5Payload,
+  features?: FeatureSet,
+  regime?: MarketRegime,
+  regimeConfidence: number = 0.6
+): TradeSignal | null => {
   const {
     symbol, candles, spread, balance, equity, pipSize, pointSize,
     ema20, ema20Prev, newsFilterActive,
-    openPositionsCount
+    openPositionsCount,
   } = payload;
 
   const N = CONFIG.reversalCandleCount;
   if (candles.length < N + 1) return null;
 
   const atr14 = payload.atr14 !== undefined ? payload.atr14 : calculateATR(candles, 14);
-  const swingHighs = payload.swingHighs !== undefined ? payload.swingHighs : calculateSwingHighs(candles);
-  const swingLows = payload.swingLows !== undefined ? payload.swingLows : calculateSwingLows(candles);
+  const swingHighsPrices = payload.swingHighs !== undefined ? payload.swingHighs : calculateSwingHighs(candles);
+  const swingLowsPrices = payload.swingLows !== undefined ? payload.swingLows : calculateSwingLows(candles);
 
   const currentCandle = candles[candles.length - 1];
   const priorCandle = candles[candles.length - 2];
   const price = currentCandle.close;
   const isXAUUSD = symbol.includes("XAU") || symbol.includes("GOLD");
 
-  // --- SANITY FILTERS (always checked) ---
   const drawdown = balance > 0 ? ((balance - equity) / balance) * 100 : 0;
-  if (drawdown > CONFIG.maxDrawdownPercent) return null;
-
   const maxOpen = isXAUUSD ? 2 : CONFIG.maxOpenTrades;
-  if (openPositionsCount >= maxOpen) return null;
-
-  // EA heartbeat reports spread in points ((ask-bid)/_Point). Compare points→points.
   const maxSpreadPts =
     (payload as MT5Payload & { maxSpreadPoints?: number }).maxSpreadPoints ??
     CONFIG.maxSpreadPoints;
-  if (isXAUUSD) {
-    if (spread > maxSpreadPts) return null;
-  } else {
+  const spreadXAUUSDOk = spread <= maxSpreadPts;
+  const spreadForexOk = (() => {
     const spreadPips = pointSize > 0 ? (spread * pointSize) / pipSize : spread;
-    if (spreadPips > CONFIG.maxSpreadPips) return null;
-  }
-
+    return spreadPips <= CONFIG.maxSpreadPips;
+  })();
   const timezoneTradingEnabled = payload.timezoneTradingEnabled !== false;
   const currentSession = getCurrentSession();
-  if (timezoneTradingEnabled && CONFIG.blockedSessions.includes(currentSession)) return null;
+  const sessionOk = !timezoneTradingEnabled || !CONFIG.blockedSessions.includes(currentSession);
+  const marginOk = payload.marginLevel === undefined || payload.marginLevel >= CONFIG.minMarginLevelPercent;
+  const dailyLossOk = payload.dailyLossPercent === undefined || payload.dailyLossPercent < CONFIG.maxDailyLossPercent;
 
-  if (payload.marginLevel !== undefined && payload.marginLevel < CONFIG.minMarginLevelPercent) {
+  interface GateResult { name: string; passed: boolean; }
+  const hardGates: GateResult[] = [
+    { name: 'drawdown', passed: drawdown <= CONFIG.maxDrawdownPercent },
+    { name: 'maxOpenTrades', passed: openPositionsCount < maxOpen },
+    { name: 'spread', passed: isXAUUSD ? spreadXAUUSDOk : spreadForexOk },
+    { name: 'session', passed: sessionOk },
+    { name: 'marginLevel', passed: marginOk },
+    { name: 'dailyLoss', passed: dailyLossOk },
+    { name: 'newsFilter', passed: !newsFilterActive },
+  ];
+  const hardGatesPassed = hardGates.filter(g => g.passed).length;
+  const hardGateThreshold = 5;
+
+  if (!features) {
     return null;
   }
-
-  if (payload.dailyLossPercent !== undefined && payload.dailyLossPercent >= CONFIG.maxDailyLossPercent) {
-    return null;
-  }
-
-  if (newsFilterActive) return null;
-
-  // --- SMC PRIMARY GATE: requires pre-computed features ---
-  if (!features) return null;
 
   const isBullishStructure = features.trendDirection === 'BULLISH';
   const isBearishStructure = features.trendDirection === 'BEARISH';
+  const trendStrengthOk = features.trendStrength >= 0.35;
+  const structureStrengthOk = (features.structureStrength ?? 0) >= 0.4;
+  const trendConfidenceOk = (trendStrengthOk && (isBullishStructure || isBearishStructure)) || structureStrengthOk;
 
   const hasBullishOB = features.orderBlockConfirmed === 'BULLISH';
   const hasBearishOB = features.orderBlockConfirmed === 'BEARISH';
@@ -164,7 +249,6 @@ export const validateSignal = (payload: MT5Payload, features?: FeatureSet): Trad
   const bullishPatternConfirm = isHammer || isBullishEngulfing || isMarubozu;
   const bearishPatternConfirm = isShootingStar || isBearishEngulfing || (isMarubozu && isBearishStructure);
 
-  // --- FVG / OB proximity to current price ---
   const fvgDetails = features.fvgDetails;
   const obDetails = features.orderBlockDetails;
 
@@ -187,81 +271,96 @@ export const validateSignal = (payload: MT5Payload, features?: FeatureSet): Trad
     obProximityOk = isWithinOB || isNearOB;
   }
 
-  const bullishSMC =
-    (hasBullishOB && obProximityOk) ||
-    (hasBullishFVG && fvgProximityOk);
+  const bullishSMC = (hasBullishOB && obProximityOk) || (hasBullishFVG && fvgProximityOk);
+  const bearishSMC = (hasBearishOB && obProximityOk) || (hasBearishFVG && fvgProximityOk);
 
-  const bearishSMC =
-    (hasBearishOB && obProximityOk) ||
-    (hasBearishFVG && fvgProximityOk);
-
-  // --- Additional basic confirmation (price action from candles) ---
   const isBullish = currentCandle.close > currentCandle.open;
   const isBearish = currentCandle.close < currentCandle.open;
   const avgVolume = candles.length >= 20
     ? candles.slice(-20).reduce((acc, c) => acc + c.volume, 0) / 20
     : currentCandle.volume;
   const isVolumeSpike = currentCandle.volume >= avgVolume * CONFIG.volumeMultiplier;
+  const rsiOk = features.rsiStrength >= 0.25 && features.rsiStrength <= 0.85;
+  const bbOk = features.bbPosition === undefined || (features.bbPosition >= 0.05 && features.bbPosition <= 0.95);
+  const sweepBullish = features.liquiditySweep === 'BULLISH';
+  const sweepBearish = features.liquiditySweep === 'BEARISH';
+
+  const nearestResistanceRaw = swingHighsPrices.filter(h => h >= price);
+  const nearestResistance = nearestResistanceRaw.length > 0 ? Math.min(...nearestResistanceRaw) : price + (isXAUUSD ? pointSize * 100 : pipSize * 50);
+  const nearestSupportRaw = swingLowsPrices.filter(l => l <= price);
+  const nearestSupport = nearestSupportRaw.length > 0 ? Math.max(...nearestSupportRaw) : price - (isXAUUSD ? pointSize * 100 : pipSize * 50);
+
+  const buyStructureOk = isBullishStructure || sweepBullish;
+  const sellStructureOk = isBearishStructure || sweepBearish;
+
+  const buySoftReqs: GateResult[] = [
+    { name: 'bullishSMC', passed: bullishSMC },
+    { name: 'bullishPattern', passed: bullishPatternConfirm },
+    { name: 'buyStructure', passed: buyStructureOk },
+    { name: 'volumeSpike', passed: isVolumeSpike },
+    { name: 'bullishCandle', passed: isBullish },
+    { name: 'trendConfidence', passed: trendConfidenceOk && isBullishStructure },
+    { name: 'obOrFvgProximity', passed: obProximityOk || fvgProximityOk },
+    { name: 'rsiFilter', passed: rsiOk },
+    { name: 'bbFilter', passed: bbOk },
+    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= 15 },
+    { name: 'sweepOrOB', passed: sweepBullish || hasBullishOB || hasBullishFVG },
+    { name: 'similarWinrate', passed: (features.similarSetupWinRate ?? 0.5) >= 0.45 },
+  ];
+  const buySoftPassed = buySoftReqs.filter(g => g.passed).length;
+
+  const sellSoftReqs: GateResult[] = [
+    { name: 'bearishSMC', passed: bearishSMC },
+    { name: 'bearishPattern', passed: bearishPatternConfirm },
+    { name: 'sellStructure', passed: sellStructureOk },
+    { name: 'volumeSpike', passed: isVolumeSpike },
+    { name: 'bearishCandle', passed: isBearish },
+    { name: 'trendConfidence', passed: trendConfidenceOk && isBearishStructure },
+    { name: 'obOrFvgProximity', passed: obProximityOk || fvgProximityOk },
+    { name: 'rsiFilter', passed: rsiOk },
+    { name: 'bbFilter', passed: bbOk },
+    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= 15 },
+    { name: 'sweepOrOB', passed: sweepBearish || hasBearishOB || hasBearishFVG },
+    { name: 'similarWinrate', passed: (features.similarSetupWinRate ?? 0.5) >= 0.45 },
+  ];
+  const sellSoftPassed = sellSoftReqs.filter(g => g.passed).length;
+
+  const softThreshold = 5;
+  const structureOrTrendOk = trendConfidenceOk || sweepBullish || sweepBearish ||
+    (features.structureStrength ?? 0) >= 0.5 || features.trendStrength >= 0.5;
 
   let direction: "BUY" | "SELL" | null = null;
-
-  // --- STRICT SMC BUY GATE ---
-  const nearestResistanceRaw = swingHighs.filter(h => h >= price);
-  const nearestResistance = nearestResistanceRaw.length > 0
-    ? Math.min(...nearestResistanceRaw)
-    : price + (isXAUUSD ? pointSize * 100 : pipSize * 50);
-  const nearestSupportRaw = swingLows.filter(l => l <= price);
-  const nearestSupport = nearestSupportRaw.length > 0
-    ? Math.max(...nearestSupportRaw)
-    : price - (isXAUUSD ? pointSize * 100 : pipSize * 50);
-
-  const buyStructureOk = isBullishStructure || features.liquiditySweep === 'BULLISH';
-  if (
-    isBullish &&
-    bullishSMC &&
-    bullishPatternConfirm &&
-    buyStructureOk &&
-    isVolumeSpike
-  ) {
-    direction = "BUY";
-  }
-
-  // --- STRICT SMC SELL GATE ---
-  const sellStructureOk = isBearishStructure || features.liquiditySweep === 'BEARISH';
-  if (
-    !direction &&
-    isBearish &&
-    bearishSMC &&
-    bearishPatternConfirm &&
-    sellStructureOk &&
-    isVolumeSpike
-  ) {
-    direction = "SELL";
+  if (hardGatesPassed >= hardGateThreshold && structureOrTrendOk) {
+    const buySignal = buySoftPassed >= softThreshold;
+    const sellSignal = sellSoftPassed >= softThreshold;
+    if (buySignal && !sellSignal) {
+      direction = 'BUY';
+    } else if (sellSignal && !buySignal) {
+      direction = 'SELL';
+    } else if (buySignal && sellSignal) {
+      const bsScore = buySoftPassed + (isBullishStructure ? 2 : 0) + (sweepBullish ? 2 : 0);
+      const ssScore = sellSoftPassed + (isBearishStructure ? 2 : 0) + (sweepBearish ? 2 : 0);
+      if (bsScore > ssScore + 1) direction = 'BUY';
+      else if (ssScore > bsScore + 1) direction = 'SELL';
+    }
   }
 
   if (!direction) return null;
 
-  // --- RISK CALCULATION ---
-  let stopLoss: number;
-  if (direction === "BUY") {
-    if (obDetails && hasBullishOB) {
-      stopLoss = Math.min(obDetails.bottom, priorCandle.low) - (CONFIG.spreadBuffer * pipSize);
-    } else if (fvgDetails && hasBullishFVG) {
-      stopLoss = fvgDetails.startPrice - (CONFIG.spreadBuffer * pipSize);
-    } else {
-      stopLoss = priorCandle.low - (CONFIG.spreadBuffer * pipSize);
-    }
-  } else {
-    if (CONFIG.useAtrStop && isXAUUSD) {
-      stopLoss = currentCandle.high + (atr14 * CONFIG.atrMultiplier) + (CONFIG.spreadBuffer * pointSize);
-    } else if (obDetails && hasBearishOB) {
-      stopLoss = Math.max(obDetails.top, priorCandle.high) + (CONFIG.spreadBuffer * pointSize);
-    } else if (fvgDetails && hasBearishFVG) {
-      stopLoss = fvgDetails.startPrice + (CONFIG.spreadBuffer * pointSize);
-    } else {
-      stopLoss = priorCandle.high + (CONFIG.spreadBuffer * pointSize);
-    }
-  }
+  const activeRegime: MarketRegime = regime ?? (
+    features.marketSession === 'ASIA' ? 'LOW_LIQUIDITY'
+    : features.marketSession === 'OVERLAP' ? 'HIGH_LIQUIDITY'
+    : features.volatility === 'EXTREME' ? 'VOLATILE'
+    : features.trendStrength >= 0.6 ? 'TRENDING'
+    : features.trendStrength <= 0.3 ? 'RANGING'
+    : 'HIGH_LIQUIDITY'
+  );
+  const activeConf = Math.max(0.5, regimeConfidence || 0.6);
+
+  const { stopLoss, tpLevels, slDistancePips } = calculateDynamicSLTP(
+    direction, price, atr14, pipSize, pointSize, isXAUUSD,
+    swingHighsPrices, swingLowsPrices, features, activeRegime, activeConf,
+  );
 
   const riskParams: RiskParams = {
     accountBalance: balance,
@@ -275,32 +374,37 @@ export const validateSignal = (payload: MT5Payload, features?: FeatureSet): Trad
     minLotStep: payload.minLotStep,
     priorTarget: direction === "BUY" ? nearestResistance : nearestSupport,
     direction,
-    spread
+    spread,
   };
 
   const risk = calculateRisk(riskParams);
+  const takeProfitLevels: number[] = risk.takeProfitLevels && risk.takeProfitLevels.length >= 3
+    ? risk.takeProfitLevels
+    : tpLevels;
 
-  const tp1 = risk.takeProfitLevels?.[0];
+  const tp1 = takeProfitLevels[0];
   if (tp1 !== undefined) {
     const riskDistance = Math.abs(price - stopLoss);
     const rewardDistance = Math.abs(tp1 - price);
     const rrRatio = riskDistance === 0 ? 0 : rewardDistance / riskDistance;
-    if (rrRatio < CONFIG.minRiskRewardRatio) return null;
+    if (rrRatio < CONFIG.minRiskRewardRatio && slDistancePips > 0) return null;
   }
 
-  // --- Pattern confidence scoring ---
   let confidence = 60;
-  if (bullishPatternConfirm || bearishPatternConfirm) confidence += 10;
-  if (isVolumeSpike) confidence += 5;
-  if (fvgProximityOk || obProximityOk) confidence += 5;
+  confidence += Math.round((hardGatesPassed / hardGates.length) * 10);
+  confidence += Math.round(((direction === 'BUY' ? buySoftPassed : sellSoftPassed) / 12) * 15);
+  if (isVolumeSpike) confidence += 3;
+  if (fvgProximityOk || obProximityOk) confidence += 4;
   if (features.similarSetupWinRate && features.similarSetupWinRate > 0) {
     confidence = Math.min(95, Math.max(60, Math.round(features.similarSetupWinRate * 100)));
   }
-  confidence = Math.min(95, confidence);
+  confidence = Math.round(confidence * (0.6 + activeConf * 0.4));
+  confidence = Math.min(95, Math.max(50, confidence));
 
   return {
     ...risk,
-    takeProfitLevels: risk.takeProfitLevels || [],
+    takeProfitLevels,
+    stopLoss,
     scaleInLevels: (risk.scaleInLevels || []).map(si => ({
       price: si.price,
       lotSize: si.lotSize,

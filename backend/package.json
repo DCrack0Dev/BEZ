@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "backend",
   "version": "1.0.0",
   "description": "",
@@ -10,7 +10,7 @@
     "build": "tsc && node scripts/copy-generated.js",
     "python:deps": "node scripts/install-python-deps.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "prisma generate && npm run build",
+    "postinstall": "prisma generate && node scripts/install-python-deps.js && npm run build",
     "migrate": "prisma migrate deploy",
     "migrate:dev": "prisma migrate dev",
     "simulate": "ts-node src/simulation/runSimulation.ts",

@@ -34,6 +34,9 @@ if (!py) {
   process.exit(0);
 }
 
+const isRenderOrProduction =
+  Boolean(process.env.RENDER || process.env.NODE_ENV === 'production' || process.env.PYTHON_DEPS_REQUIRED);
+
 console.log(`[python-deps] Using ${py}`);
 console.log(`[python-deps] Installing from ${reqFile}`);
 
@@ -54,8 +57,13 @@ const install = spawnSync(
 );
 if (install.status !== 0) {
   console.error('[python-deps] pip install failed — train/backtest will not work');
-  // Fail the Render build so we notice missing numpy instead of runtime ModuleNotFoundError
-  process.exit(install.status || 1);
+  if (isRenderOrProduction) {
+    // Fail the Render build so we notice missing numpy instead of runtime ModuleNotFoundError
+    process.exit(install.status || 1);
+  } else {
+    console.warn('[python-deps] Local dev — continuing without python ML deps (HTTP API still boots)');
+    process.exit(0);
+  }
 }
 
 const check = spawnSync(py, ['-c', 'import numpy, torch; print("numpy", numpy.__version__, "torch", torch.__version__)'], {
@@ -64,7 +72,12 @@ const check = spawnSync(py, ['-c', 'import numpy, torch; print("numpy", numpy.__
 });
 if (check.status !== 0) {
   console.error('[python-deps] import check failed:\n', check.stderr || check.stdout);
-  process.exit(1);
+  if (isRenderOrProduction) {
+    process.exit(1);
+  } else {
+    console.warn('[python-deps] Local dev — import check skipped for train/backtest features');
+    process.exit(0);
+  }
 }
 console.log('[python-deps] OK:', (check.stdout || '').trim());
 process.exit(0);

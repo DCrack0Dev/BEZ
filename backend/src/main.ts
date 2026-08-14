@@ -110,6 +110,21 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
     const data = req.body;
     await tradingEngine.processMT5Update(data);
     monitoring.trackBrokerResponse(true, Date.now() - start, 'EA_UPDATE');
+    try {
+      const state = tradingEngine.getAccountState();
+      io.emit('EA_HEARTBEAT_QUICK', {
+        positions: state.positions,
+        price: state.price,
+        spread: state.spread,
+        balance: state.balance,
+        equity: state.equity,
+        currency: state.currency || 'USD',
+        lastUpdate: state.lastUpdate,
+        ea_connected: state.ea_connected,
+        autoTradingEnabled: state.autoTradingEnabled,
+        serverTs: Date.now(),
+      });
+    } catch (_emitErr) { /* no-op: engine already emits full EA_HEARTBEAT internally */ }
     res.json({ success: true, commands: [] });
   } catch (error) {
     monitoring.trackBrokerResponse(false, Date.now() - start, 'EA_UPDATE_FAIL');
@@ -179,7 +194,14 @@ app.post('/api/ea/execution-report', requireEaKey, eaPollingLimiter, validateBod
 });
 
 app.get('/api/account', requireAuth, (req, res) => res.json(tradingEngine.getAccountState()));
-app.get('/api/orders/closed', requireAuth, (req, res) => res.json(tradingEngine.getClosedTrades()));
+app.get('/api/orders/closed', requireAuth, async (req, res) => {
+  try {
+    const merged = await tradingEngine.getClosedTradesWithJournal();
+    res.json(merged);
+  } catch (e) {
+    res.json(tradingEngine.getClosedTrades());
+  }
+});
 app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema), replayGuard, (req, res) => {
   if (req.body.action === 'RESUME' || req.body.action === 'PAUSE') {
     const state = tradingEngine.getAccountState();

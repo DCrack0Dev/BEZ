@@ -17,6 +17,7 @@ export interface MT5Payload {
   spread: number;
   balance: number;
   equity: number;
+  currency?: string;
   price?: number;
   chart?: Record<string, Candle[]>;
   pipSize: number;

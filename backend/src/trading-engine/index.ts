@@ -55,6 +55,7 @@ export interface AccountState {
   symbol: string;
   price: number;
   spread: number;
+  currency: string;
   chart: Record<string, Candle[]>;
   lastUpdate: number;
   pipSize: number;
@@ -87,6 +88,7 @@ export class TradingEngine {
     symbol: '',
     price: 0,
     spread: 0,
+    currency: 'USD',
     chart: {},
     lastUpdate: 0,
     pipSize: 0.01,
@@ -262,6 +264,52 @@ export class TradingEngine {
   getClosedTrades(): any[] {
     return [...this.closedTrades];
   }
+  async getClosedTradesWithJournal(): Promise<any[]> {
+    const memory = [...this.closedTrades];
+    try {
+      const entries = await journalManager.getAllEntries({ limit: 200 });
+      const byTicket = new Map(entries.map(e => [e.ticket, e]));
+      const merged = new Map<string, any>();
+      for (const t of memory) merged.set(String(t.ticket), { ...t });
+      for (const e of entries) {
+        const ticket = e.ticket;
+        const existing = merged.get(ticket);
+        const outcomeVal = e.outcome === 'WIN' || e.outcome === 'LOSS' || e.outcome === 'BREAKEVEN' ? e.outcome : existing?.outcome;
+        const profitDollars = Number(e.profitDollars ?? 0);
+        const profitPips = Number(e.profitPips ?? 0);
+        const m = existing || {
+          ticket,
+          symbol: e.symbol,
+          type: e.direction,
+          lots: Number(e.lotSize || 0.01),
+          openPrice: Number(e.entryPrice || 0),
+          closePrice: Number(e.executionPrice || e.entryPrice || 0),
+          openTime: e.entryTimestamp ? new Date(e.entryTimestamp).getTime() : null,
+          closeTime: e.closeTimestamp ? new Date(e.closeTimestamp).getTime() : Date.now(),
+          sl: Number(e.sl || 0),
+          tp: Number(e.tp || 0),
+          stopLoss: Number(e.sl || 0),
+          takeProfit: Number(e.tp || 0),
+        };
+        const finalProfit = Number.isFinite(profitDollars) && Math.abs(profitDollars) > 0.0001
+          ? profitDollars
+          : (Number(m?.profit) || Number(m?.pnl) || 0);
+        merged.set(ticket, {
+          ...m,
+          profit: finalProfit,
+          pnl: finalProfit,
+          profitPips: Number.isFinite(profitPips) && Math.abs(profitPips) > 0.0001 ? profitPips : (Number(m?.profitPips) || 0),
+          outcome: outcomeVal || m?.outcome,
+          _fromDb: true,
+        });
+      }
+      const arr = Array.from(merged.values());
+      arr.sort((a, b) => Number(b.closeTime || 0) - Number(a.closeTime || 0));
+      return arr.slice(0, 200);
+    } catch (e) {
+      return memory;
+    }
+  }
   getDna(): TradeDNA[] {
     return this.dnaEngine.getAllDna();
   }
@@ -324,7 +372,7 @@ export class TradingEngine {
           margin: 0,
           floatingPL: payload.positions?.reduce((sum, p) => sum + (p.profit || 0), 0) || 0,
           openPositions: payload.positions?.length || 0,
-          currency: 'USD',
+          currency: payload.currency || 'USD',
         });
       }
 
@@ -475,8 +523,33 @@ export class TradingEngine {
         const liveExcursion = liveTradeObserver.finalize(ticket);
         const closedTrade = (payload.closedTrades || []).find(t => String(t.ticket) === ticket);
         const dna = this.dnaEngine.getDnaByTicket(ticket);
-        const profit = Number(closedTrade?.profit || 0);
-        const closePrice = closedTrade?.closePrice || this.accountState.price;
+        const posState = this.positionStates[ticket];
+        const dnaAny: any = dna || {};
+        const openPx = Number(
+          closedTrade?.openPrice ??
+          dnaAny.entryPrice ??
+          posState?.openPrice ??
+          0
+        );
+        const closePriceRaw = Number(closedTrade?.closePrice ?? this.accountState.price);
+        const lots = Number(
+          closedTrade?.lots ??
+          dnaAny.lotSize ??
+          dnaAny.lots ??
+          0.01
+        );
+        const dirRaw = dna?.direction ?? closedTrade?.type ?? posState?.direction ?? 'BUY';
+        const dir = (dirRaw === 'BUY' || dirRaw === 0 || String(dirRaw).toUpperCase() === 'BUY') ? 'BUY' : 'SELL';
+        const pipVal = Number(this.accountState.pipValue || closedTrade?.pipValue || 1);
+        const pipSz = Number(this.accountState.pipSize || closedTrade?.pipSize || 0.01);
+        const rawDiff = dir === 'BUY' ? (closePriceRaw - openPx) : (openPx - closePriceRaw);
+        const pipsComputed = pipSz > 0 ? rawDiff / pipSz : rawDiff;
+        const computedProfit = pipsComputed * lots * pipVal;
+        const reportedProfit = Number(closedTrade?.profit ?? closedTrade?.pnl ?? NaN);
+        const profit = Number.isFinite(reportedProfit) && Math.abs(reportedProfit) > 0.0001
+          ? reportedProfit
+          : computedProfit;
+        const closePrice = closePriceRaw;
         let finalizedDna: any = null;
 
         if (dna) {
@@ -716,30 +789,40 @@ export class TradingEngine {
         }
 
         monitoring.trackBrokerResponse(true, undefined, 'TRADE_CLOSED');
-        const posState = this.positionStates[ticket];
-        const dnaAny: any = finalizedDna || dna || {};
-        const dnaSl = Number(dnaAny.stopLoss || 0);
-        const dnaTp = Number(dnaAny.takeProfitLevels?.[0] || 0);
+        const posStateClose = this.positionStates[ticket];
+        const dnaAnyClose: any = finalizedDna || dna || {};
+        const dnaSl = Number(dnaAnyClose.stopLoss || 0);
+        const dnaTp = Number(dnaAnyClose.takeProfitLevels?.[0] || 0);
         this.closedTrades.unshift({
           ticket,
           symbol: closedTrade?.symbol || this.accountState.symbol,
-          type: closedTrade?.type || dnaAny.direction || 'BUY',
-          lots: Number(closedTrade?.lots || dnaAny.lots || dnaAny.lotSize || 0),
-          openPrice: Number(closedTrade?.openPrice || dnaAny.entryPrice || 0),
+          type: closedTrade?.type || dnaAnyClose.direction || 'BUY',
+          lots: Number(closedTrade?.lots || dnaAnyClose.lots || dnaAnyClose.lotSize || 0),
+          openPrice: Number(closedTrade?.openPrice || dnaAnyClose.entryPrice || 0),
           closePrice,
           profit,
           pnl: profit,
           profitPips,
           outcome,
-          sl: Number(closedTrade?.sl || posState?.currentSL || dnaSl || 0),
-          tp: Number(closedTrade?.tp || posState?.tpLevels?.[0] || dnaTp || 0),
-          stopLoss: Number(closedTrade?.sl || posState?.currentSL || dnaSl || 0),
-          takeProfit: Number(closedTrade?.tp || posState?.tpLevels?.[0] || dnaTp || 0),
-          openTime: closedTrade?.openTime || dnaAny.entryTime || null,
+          sl: Number(closedTrade?.sl || posStateClose?.currentSL || dnaSl || 0),
+          tp: Number(closedTrade?.tp || posStateClose?.tpLevels?.[0] || dnaTp || 0),
+          stopLoss: Number(closedTrade?.sl || posStateClose?.currentSL || dnaSl || 0),
+          takeProfit: Number(closedTrade?.tp || posStateClose?.tpLevels?.[0] || dnaTp || 0),
+          openTime: closedTrade?.openTime || dnaAnyClose.entryTime || null,
           closeTime: closedTrade?.closeTime || Date.now(),
         });
         if (this.closedTrades.length > 200) this.closedTrades.pop();
         delete this.positionStates[ticket];
+        this.io.emit('TRADE_CLOSED', {
+          ticket,
+          profit,
+          pnl: profit,
+          profitPips,
+          outcome,
+          closePrice,
+          closeTime: Date.now(),
+          serverTs: Date.now(),
+        });
       } catch (error) {
         // Never let one bad position's close-handling abort processing of the
         // rest of processMT5Update. Re-add the ticket so we retry on next tick
@@ -869,6 +952,20 @@ export class TradingEngine {
             ensembleDecision,
             explainability,
           } as any);
+          this.io.emit('TRADE_OPENED', {
+            ticket,
+            symbol: this.accountState.symbol,
+            direction,
+            entryPrice,
+            sl,
+            tp,
+            lotSize,
+            confidence,
+            marketRegime: regime,
+            pattern,
+            openTime: Date.now(),
+            serverTs: Date.now(),
+          });
         } catch (error) {
           monitoring.trackError(`Failed to initialize DNA/journal for ${ticket}: ${error}`, 'ERROR');
           logger.error(`Failed to initialize DNA/journal for ${ticket}`, error);
@@ -1099,7 +1196,12 @@ export class TradingEngine {
     this.accountState.lastSignalReason = setupProgress.summary;
 
     if (this.accountState.autoTradingEnabled) {
-      const signal = validateSignal(signalPayload, features);
+      const signal = validateSignal(
+        signalPayload,
+        features,
+        this.latestRegime?.regime,
+        this.latestRegime?.confidence ?? 0.6
+      );
       const now = Date.now();
       if (signal && now - this.lastTradeTime > 30000 && now > this.cooldowns[signal.direction]) {
         // --- AI GATE — old + new side-by-side, shadow-safe ---
