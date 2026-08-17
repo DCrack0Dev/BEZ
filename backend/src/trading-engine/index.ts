@@ -70,6 +70,7 @@ export interface AccountState {
   atr14: number;
   candles: Candle[];
   autoTradingEnabled: boolean;
+  aiTradingEnabled: boolean;
   /** When true, respect CONFIG.blockedSessions (Asia). When false, trade any time. */
   timezoneTradingEnabled: boolean;
   /** Max allowed spread in points (XAUUSD). Adjustable from app settings. */
@@ -103,6 +104,7 @@ export class TradingEngine {
     atr14: 0,
     candles: [],
     autoTradingEnabled: false,
+    aiTradingEnabled: Boolean(CONFIG.aiTradingEnabled),
     timezoneTradingEnabled: true,
     maxSpreadPoints: CONFIG.maxSpreadPoints,
   };
@@ -154,6 +156,7 @@ export class TradingEngine {
   private dnaEngine = new TradeDnaEngine();
   private experienceEngine = new ExperienceEngine();
   private lastSignal: TradeSignal | null = null;
+  private trailingProfitReentries: Record<string, number> = {};
 
   constructor(private io: Server) {}
 
@@ -239,11 +242,16 @@ export class TradingEngine {
   /** Apply mobile/settings flags without requiring a full EA heartbeat. */
   applyBotConfig(cfg: {
     autoTradingEnabled?: boolean;
+    aiTradingEnabled?: boolean;
     timezoneTradingEnabled?: boolean;
     maxSpreadPoints?: number;
   }) {
     if (cfg.autoTradingEnabled !== undefined) {
       this.accountState.autoTradingEnabled = !!cfg.autoTradingEnabled;
+    }
+    if (cfg.aiTradingEnabled !== undefined) {
+      this.accountState.aiTradingEnabled = !!cfg.aiTradingEnabled;
+      CONFIG.aiTradingEnabled = this.accountState.aiTradingEnabled;
     }
     if (cfg.timezoneTradingEnabled !== undefined) {
       this.accountState.timezoneTradingEnabled = !!cfg.timezoneTradingEnabled;
@@ -253,6 +261,7 @@ export class TradingEngine {
     }
     this.io.emit('BOT_CONFIG', {
       autoTradingEnabled: this.accountState.autoTradingEnabled,
+      aiTradingEnabled: this.accountState.aiTradingEnabled,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
       maxSpreadPoints: this.accountState.maxSpreadPoints,
     });
@@ -673,6 +682,24 @@ export class TradingEngine {
         );
         const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' =
           profitPips > 0.5 ? 'WIN' : profitPips < -0.5 ? 'LOSS' : 'BREAKEVEN';
+
+        // Track trailing-stop profitable closures to limit re-entries (per-symbol)
+        // If a trade closed by trailing stop in profit, grant only 2 re-entries for that symbol.
+        // Reset allowance on loss.
+        try {
+          const reasonStr = String((closedTrade && (closedTrade as any).reason) || '').toUpperCase();
+          const closedByTrailing = reasonStr.includes('TRAIL') || reasonStr.includes('TRAILING') || reasonStr.includes('STOP');
+          const sym = this.accountState.symbol || (closedTrade && (closedTrade as any).symbol) || null;
+          if (sym) {
+            if (outcome === 'WIN' && closedByTrailing) {
+              this.trailingProfitReentries[sym] = 2;
+              tradingLogger.info(`Trailing-stop profit detected for ${sym}; granting 2 re-entries`);
+            } else if (outcome === 'LOSS') {
+              this.trailingProfitReentries[sym] = 0;
+              tradingLogger.info(`Loss detected for ${sym}; clearing trailing re-entry allowance`);
+            }
+          }
+        } catch (e) { /* non-fatal */ }
 
         // Atomically persist DNA + position close + journal update: either all
         // of these DB writes land, or none do (no more "DNA saved but position
@@ -1322,36 +1349,140 @@ export class TradingEngine {
             tradingLogger.info(`Note: ensemble SHADOW_REJECT (shadow-only, not blocking). ${ensemble.explainability.reason}`);
           }
           this.lastSignal = signal;
-          this.pendingCommands.push({
-            action: signal.direction,
-            symbol: signal.symbol,
-            lots: signal.lotSizes.entry1,
-            sl: signal.stopLoss,
-            tp: signal.takeProfitLevels[0] || 0,
-          });
-          this.io.emit('tradeSignal', signal);
-          this.lastTradeTime = now;
-          this.lastSignalConfidence = {
-            direction: signal.direction,
-            finalConfidence: evaluation.finalConfidence,
-            aiConfidence: evaluation.aiConfidence,
-            modelVersion: modelManager.getProductionVersion(),
-            timestamp: now,
-            ensembleScore: ensemble?.finalScore,
-            marketRegime: this.latestRegime?.regime,
-            regimeConfidence: this.latestRegime?.confidence,
-            fnnConfidence: evaluation.aiConfidence,
-            cnnConfidence: ensemble?.perModelFinalScore.CNN ?? null,
-            lstmConfidence: ensemble?.perModelFinalScore.LSTM ?? null,
-            detectedPattern: ensemble?.explainability.patternDetected,
-            patternConfidence: ensemble?.cnn?.patternConfidence,
-            explainability: ensemble?.explainability ?? null,
-            ensembleDecision: ensemble?.decision,
-            fnnOutput: ensemble?.fnn || (aiPrediction ? { bridged: true, ...aiPrediction } : null),
-            cnnOutput: ensemble?.cnn || null,
-            lstmOutput: ensemble?.lstm || null,
-            ensembleOutput: ensemble || null,
-          };
+          // Enforce per-symbol trailing-profit re-entry limit if set.
+          try {
+            const sym = signal.symbol;
+            const remaining = this.trailingProfitReentries?.[sym];
+            if (typeof remaining === 'number') {
+              if (remaining <= 0) {
+                tradingLogger.warn(`Signal suppressed for ${sym}: trailing-profit re-entry limit reached`);
+                // Still emit signal (shadow) for observability but don't send an order command.
+                this.io.emit('tradeSignal', { ...signal, suppressedBy: 'TRAILING_REENTRY_LIMIT' });
+                // record lastSignalConfidence for dashboard comparability
+                this.lastTradeTime = now;
+                this.lastSignalConfidence = {
+                  direction: signal.direction,
+                  finalConfidence: evaluation.finalConfidence,
+                  aiConfidence: evaluation.aiConfidence,
+                  modelVersion: modelManager.getProductionVersion(),
+                  timestamp: now,
+                  ensembleScore: ensemble?.finalScore,
+                  marketRegime: this.latestRegime?.regime,
+                  regimeConfidence: this.latestRegime?.confidence,
+                  fnnConfidence: evaluation.aiConfidence,
+                  cnnConfidence: ensemble?.perModelFinalScore.CNN ?? null,
+                  lstmConfidence: ensemble?.perModelFinalScore.LSTM ?? null,
+                  detectedPattern: ensemble?.explainability.patternDetected,
+                  patternConfidence: ensemble?.cnn?.patternConfidence,
+                  explainability: ensemble?.explainability ?? null,
+                  ensembleDecision: ensemble?.decision,
+                  fnnOutput: ensemble?.fnn || (aiPrediction ? { bridged: true, ...aiPrediction } : null),
+                  cnnOutput: ensemble?.cnn || null,
+                  lstmOutput: ensemble?.lstm || null,
+                  ensembleOutput: ensemble || null,
+                };
+              } else {
+                // Consume one allowance and execute
+                this.trailingProfitReentries[sym] = Math.max(0, remaining - 1);
+                tradingLogger.info(`Consuming 1 trailing re-entry for ${sym}; remaining=${this.trailingProfitReentries[sym]}`);
+                this.pendingCommands.push({
+                  action: signal.direction,
+                  symbol: sym,
+                  lots: signal.lotSizes.entry1,
+                  sl: signal.stopLoss,
+                  tp: signal.takeProfitLevels[0] || 0,
+                });
+                this.io.emit('tradeSignal', signal);
+                this.lastTradeTime = now;
+                this.lastSignalConfidence = {
+                  direction: signal.direction,
+                  finalConfidence: evaluation.finalConfidence,
+                  aiConfidence: evaluation.aiConfidence,
+                  modelVersion: modelManager.getProductionVersion(),
+                  timestamp: now,
+                  ensembleScore: ensemble?.finalScore,
+                  marketRegime: this.latestRegime?.regime,
+                  regimeConfidence: this.latestRegime?.confidence,
+                  fnnConfidence: evaluation.aiConfidence,
+                  cnnConfidence: ensemble?.perModelFinalScore.CNN ?? null,
+                  lstmConfidence: ensemble?.perModelFinalScore.LSTM ?? null,
+                  detectedPattern: ensemble?.explainability.patternDetected,
+                  patternConfidence: ensemble?.cnn?.patternConfidence,
+                  explainability: ensemble?.explainability ?? null,
+                  ensembleDecision: ensemble?.decision,
+                  fnnOutput: ensemble?.fnn || (aiPrediction ? { bridged: true, ...aiPrediction } : null),
+                  cnnOutput: ensemble?.cnn || null,
+                  lstmOutput: ensemble?.lstm || null,
+                  ensembleOutput: ensemble || null,
+                };
+              }
+            } else {
+              // No limit set for this symbol — behave normally
+              this.pendingCommands.push({
+                action: signal.direction,
+                symbol: signal.symbol,
+                lots: signal.lotSizes.entry1,
+                sl: signal.stopLoss,
+                tp: signal.takeProfitLevels[0] || 0,
+              });
+              this.io.emit('tradeSignal', signal);
+              this.lastTradeTime = now;
+              this.lastSignalConfidence = {
+                direction: signal.direction,
+                finalConfidence: evaluation.finalConfidence,
+                aiConfidence: evaluation.aiConfidence,
+                modelVersion: modelManager.getProductionVersion(),
+                timestamp: now,
+                ensembleScore: ensemble?.finalScore,
+                marketRegime: this.latestRegime?.regime,
+                regimeConfidence: this.latestRegime?.confidence,
+                fnnConfidence: evaluation.aiConfidence,
+                cnnConfidence: ensemble?.perModelFinalScore.CNN ?? null,
+                lstmConfidence: ensemble?.perModelFinalScore.LSTM ?? null,
+                detectedPattern: ensemble?.explainability.patternDetected,
+                patternConfidence: ensemble?.cnn?.patternConfidence,
+                explainability: ensemble?.explainability ?? null,
+                ensembleDecision: ensemble?.decision,
+                fnnOutput: ensemble?.fnn || (aiPrediction ? { bridged: true, ...aiPrediction } : null),
+                cnnOutput: ensemble?.cnn || null,
+                lstmOutput: ensemble?.lstm || null,
+                ensembleOutput: ensemble || null,
+              };
+            }
+          } catch (e) {
+            // Failsafe: if the guard code errors, fall back to original behavior
+            tradingLogger.error(`Trailing re-entry guard failed: ${e}`);
+            this.pendingCommands.push({
+              action: signal.direction,
+              symbol: signal.symbol,
+              lots: signal.lotSizes.entry1,
+              sl: signal.stopLoss,
+              tp: signal.takeProfitLevels[0] || 0,
+            });
+            this.io.emit('tradeSignal', signal);
+            this.lastTradeTime = now;
+            this.lastSignalConfidence = {
+              direction: signal.direction,
+              finalConfidence: evaluation.finalConfidence,
+              aiConfidence: evaluation.aiConfidence,
+              modelVersion: modelManager.getProductionVersion(),
+              timestamp: now,
+              ensembleScore: ensemble?.finalScore,
+              marketRegime: this.latestRegime?.regime,
+              regimeConfidence: this.latestRegime?.confidence,
+              fnnConfidence: evaluation.aiConfidence,
+              cnnConfidence: ensemble?.perModelFinalScore.CNN ?? null,
+              lstmConfidence: ensemble?.perModelFinalScore.LSTM ?? null,
+              detectedPattern: ensemble?.explainability.patternDetected,
+              patternConfidence: ensemble?.cnn?.patternConfidence,
+              explainability: ensemble?.explainability ?? null,
+              ensembleDecision: ensemble?.decision,
+              fnnOutput: ensemble?.fnn || (aiPrediction ? { bridged: true, ...aiPrediction } : null),
+              cnnOutput: ensemble?.cnn || null,
+              lstmOutput: ensemble?.lstm || null,
+              ensembleOutput: ensemble || null,
+            };
+          }
         }
       }
     }
