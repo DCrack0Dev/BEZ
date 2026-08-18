@@ -61,6 +61,7 @@ export interface AccountData {
   setupProgress?: SetupProgress | null;
   timezoneTradingEnabled?: boolean;
   autoTradingEnabled?: boolean;
+  aiTradingEnabled?: boolean;
 }
 
 interface TradeState {

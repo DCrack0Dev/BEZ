@@ -37,7 +37,7 @@ def main():
 
     data_path = sys.argv[1]
     version = None
-    epochs = 80
+    epochs = 20
 
     args = sys.argv[2:]
     i = 0

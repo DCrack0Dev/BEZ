@@ -27,6 +27,7 @@ export const usePolling = () => {
 
   const socketRef = useRef<Socket | null>(null);
   const prevAutoTrading = useRef<boolean>(botSettings.autoTradingEnabled);
+  const prevAiTrading = useRef<boolean>(botSettings.aiTradingEnabled);
   const prevTimezone = useRef<boolean>(botSettings.timezoneTradingEnabled !== false);
   const prevMaxSpread = useRef<number>(botSettings.maxSpreadPoints ?? 800);
   const lastSetupLog = useRef<string>('');
@@ -56,6 +57,7 @@ export const usePolling = () => {
         setupProgress: data.setupProgress || null,
         timezoneTradingEnabled: data.timezoneTradingEnabled,
         autoTradingEnabled: data.autoTradingEnabled,
+        aiTradingEnabled: data.aiTradingEnabled,
       });
 
       if (data.setupProgress) {
@@ -118,6 +120,61 @@ export const usePolling = () => {
         updateBotSettings({ autoTradingEnabled: data.autoTradingEnabled });
         prevAutoTrading.current = data.autoTradingEnabled;
       }
+      if (typeof data.aiTradingEnabled === 'boolean') {
+        updateBotSettings({ aiTradingEnabled: data.aiTradingEnabled });
+        prevAiTrading.current = data.aiTradingEnabled;
+      }
+    });
+
+    socketRef.current.on('EA_HEARTBEAT_QUICK', (data: any) => {
+      if (data?.price != null) setAccountPrice(Number(data.price));
+      if (data?.positions) {
+        const openPositions = (data.positions || []).map((p: any) => ({
+          ticket: String(p.ticket),
+          symbol: p.symbol,
+          type: p.type,
+          lots: p.volume || p.lots || 0,
+          openPrice: p.openPrice || p.price || 0,
+          currentPrice: data.price || p.price || 0,
+          profit: Number(p.profit || p.pnl || 0),
+          pnl: Number(p.profit || p.pnl || 0),
+          openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
+        }));
+        setOpenPositions(openPositions);
+      }
+      if (data?.equity != null || data?.balance != null) {
+        setAccount(prev => ({
+          ...prev,
+          equity: data.equity != null ? Number(data.equity) : prev.equity,
+          balance: data.balance != null ? Number(data.balance) : prev.balance,
+          spread: data.spread != null ? Number(data.spread) : prev.spread,
+          eaConnected: data.ea_connected != null ? data.ea_connected : prev.eaConnected,
+          autoTradingEnabled: data.autoTradingEnabled != null ? data.autoTradingEnabled : prev.autoTradingEnabled,
+          aiTradingEnabled: data.aiTradingEnabled != null ? data.aiTradingEnabled : prev.aiTradingEnabled,
+        }));
+      }
+    });
+
+    socketRef.current.on('TRADE_OPENED', (data: any) => {
+      addLog({
+        component: 'MT5',
+        level: 'success',
+        message: `OPENED #${data?.ticket ?? '?'} · ${data?.direction ?? '?'} ${data?.symbol ?? 'XAUUSD'} @ ${data?.entryPrice ?? '?'}`,
+        details: data?.confidence != null
+          ? `SL ${data?.sl ?? '?'} · TP ${data?.tp ?? '?'} · ${(Number(data.confidence) * 100).toFixed(0)}% conf`
+          : undefined,
+      } as any);
+      refresh(false);
+    });
+
+    socketRef.current.on('TRADE_CLOSED', (data: any) => {
+      const pnl = Number(data?.profit ?? data?.pnl ?? 0);
+      addLog({
+        component: 'MT5',
+        level: pnl >= 0 ? 'success' : 'warning',
+        message: `CLOSED #${data?.ticket ?? '?'} · ${pnl >= 0 ? 'WIN' : 'LOSS'} ${pnl.toFixed(2)}`,
+      } as any);
+      refresh(false);
     });
 
     return () => {
@@ -132,6 +189,7 @@ export const usePolling = () => {
     setSetupProgress,
     addLog,
     updateBotSettings,
+    refresh,
   ]);
 
   const refresh = useCallback(
@@ -157,6 +215,7 @@ export const usePolling = () => {
           setupProgress: accountData.setupProgress || null,
           timezoneTradingEnabled: accountData.timezoneTradingEnabled,
           autoTradingEnabled: accountData.autoTradingEnabled,
+          aiTradingEnabled: accountData.aiTradingEnabled,
         });
 
         if (accountData.setupProgress) {
@@ -188,21 +247,24 @@ export const usePolling = () => {
         if (
           accountData.ea_connected &&
           (prevAutoTrading.current !== botSettings.autoTradingEnabled ||
+            prevAiTrading.current !== botSettings.aiTradingEnabled ||
             prevTimezone.current !== tzEnabled ||
             prevMaxSpread.current !== maxSpread)
         ) {
           prevAutoTrading.current = botSettings.autoTradingEnabled;
+          prevAiTrading.current = botSettings.aiTradingEnabled;
           prevTimezone.current = tzEnabled;
           prevMaxSpread.current = maxSpread;
           await setBotConfig({
             autoTradingEnabled: botSettings.autoTradingEnabled,
+            aiTradingEnabled: botSettings.aiTradingEnabled,
             timezoneTradingEnabled: tzEnabled,
             maxSpreadPoints: maxSpread,
           });
           addLog({
             component: 'App',
             level: 'info',
-            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'} · maxSpread=${maxSpread}pts`,
+            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · ai=${botSettings.aiTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'} · maxSpread=${maxSpread}pts`,
           } as any);
         }
 
@@ -230,7 +292,7 @@ export const usePolling = () => {
     refresh(true);
     const interval = setInterval(() => {
       refresh(false);
-    }, 5000);
+    }, 2500);
     return () => clearInterval(interval);
   }, [refresh]);
 

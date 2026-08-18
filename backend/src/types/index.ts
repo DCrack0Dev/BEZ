@@ -41,6 +41,7 @@ export interface MT5Payload {
   openPositions?: any[];
   closedTrades?: any[];
   autoTradingEnabled?: boolean;
+  aiTradingEnabled?: boolean;
   /** When false, skip blocked session filter (trade any time). Default true. */
   timezoneTradingEnabled?: boolean;
   /** Max allowed spread in points (XAUUSD). From app settings / bot config. */

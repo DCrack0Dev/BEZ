@@ -13,6 +13,7 @@ interface BotSettings {
   sessionFilterEnabled?: boolean;
   playbookTimeFilter: boolean;
   autoTradingEnabled: boolean;
+  aiTradingEnabled: boolean;
   executionMode: 'app' | 'backend';
   /** Max allowed spread in points (XAUUSD). Synced to backend. */
   maxSpreadPoints: number;
@@ -48,6 +49,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   timezoneTradingEnabled: true,
   playbookTimeFilter: false,
   autoTradingEnabled: false,
+  aiTradingEnabled: false,
   executionMode: 'app',
   maxSpreadPoints: 800,
 };

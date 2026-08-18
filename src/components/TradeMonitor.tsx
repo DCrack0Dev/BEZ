@@ -5,62 +5,70 @@ import { TYPOGRAPHY } from '../theme/typography';
 import { SPACING } from '../theme/spacing';
 import { useTradeStore } from '../store/useTradeStore';
 
-/**
- * TradeMonitor.tsx
- * Live position tracker showing trail progress and phase status.
- */
-
 const TradeMonitor: React.FC = () => {
-  const { positions } = useTradeStore();
+  const { openPositions, account } = useTradeStore();
+  const currency = account?.currency || 'USD';
+  const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
+  const positions = (openPositions as any[]) || [];
 
   return (
     <View style={styles.container}>
       <Text style={[TYPOGRAPHY.h2, { marginBottom: SPACING.m }]}>Active Positions</Text>
       <ScrollView showsVerticalScrollIndicator={false}>
-        {positions.map((pos: any) => (
-          <View key={pos.ticket} style={styles.monitorCard}>
-            <View style={styles.row}>
-              <View style={[styles.badge, { backgroundColor: pos.direction === 'BUY' ? COLORS.buy : COLORS.sell }]}>
-                <Text style={styles.badgeText}>{pos.direction}</Text>
-              </View>
-              <Text style={TYPOGRAPHY.h3}>{pos.symbol}</Text>
-              <Text style={[TYPOGRAPHY.mono, styles.pnl, { color: pos.profit >= 0 ? COLORS.buy : COLORS.sell }]}>
-                {pos.profit >= 0 ? '+$' : '-$'}{Math.abs(pos.profit).toFixed(2)}
-              </Text>
-            </View>
-
-            <View style={styles.details}>
-              <View style={styles.detailRow}>
-                <Text style={TYPOGRAPHY.bodySecondary}>Entry: {pos.entryPrice}</Text>
-                <Text style={TYPOGRAPHY.bodySecondary}>Current: {pos.currentPrice}</Text>
-              </View>
-              
-              <View style={styles.stopSection}>
-                <Text style={TYPOGRAPHY.caption}>Stop Loss Progress</Text>
-                <View style={styles.progressBar}>
-                  <View style={[styles.progressFill, { width: `${(pos.phase / 5) * 100}%`, backgroundColor: pos.direction === 'BUY' ? COLORS.buy : COLORS.sell }]} />
+        {positions.map((pos: any) => {
+          const dir = pos.direction || pos.type || 'BUY';
+          const profit = Number(pos.profit ?? pos.pnl ?? 0);
+          const phase = Number(pos.phase ?? 0);
+          const isBuy = dir === 'BUY';
+          const currentSL = pos.currentSL ?? pos.sl ?? '-';
+          const currentPrice = pos.currentPrice ?? pos.price ?? '-';
+          const entryPrice = pos.entryPrice ?? pos.openPrice ?? '-';
+          const isRiskFree = Boolean(pos.isRiskFree);
+          return (
+            <View key={pos.ticket} style={styles.monitorCard}>
+              <View style={styles.row}>
+                <View style={[styles.badge, { backgroundColor: isBuy ? COLORS.buy : COLORS.sell }]}>
+                  <Text style={styles.badgeText}>{dir}</Text>
                 </View>
+                <Text style={TYPOGRAPHY.h3}>{pos.symbol}</Text>
+                <Text style={[TYPOGRAPHY.mono, styles.pnl, { color: profit >= 0 ? COLORS.buy : COLORS.sell }]}>
+                  {profit >= 0 ? '+' : '-'}{symbol}{Math.abs(profit).toFixed(2)}
+                </Text>
+              </View>
+
+              <View style={styles.details}>
                 <View style={styles.detailRow}>
-                  <Text style={TYPOGRAPHY.mono}>{pos.currentSL}</Text>
-                  {pos.isRiskFree && (
-                    <View style={styles.riskFreeBadge}>
-                      <Text style={styles.riskFreeText}>RISK FREE ✓</Text>
-                    </View>
-                  )}
+                  <Text style={TYPOGRAPHY.bodySecondary}>Entry: {entryPrice}</Text>
+                  <Text style={TYPOGRAPHY.bodySecondary}>Current: {currentPrice}</Text>
                 </View>
-              </View>
 
-              <View style={styles.phaseRow}>
-                <Text style={TYPOGRAPHY.caption}>Phase {pos.phase} of 5</Text>
-                <View style={styles.dots}>
-                  {[1, 2, 3, 4, 5].map(p => (
-                    <View key={p} style={[styles.dot, { backgroundColor: p <= pos.phase ? (pos.direction === 'BUY' ? COLORS.buy : COLORS.sell) : COLORS.border }]} />
-                  ))}
+                <View style={styles.stopSection}>
+                  <Text style={TYPOGRAPHY.caption}>Stop Loss Progress</Text>
+                  <View style={styles.progressBar}>
+                    <View style={[styles.progressFill, { width: `${Math.min(100, (phase / 5) * 100)}%`, backgroundColor: isBuy ? COLORS.buy : COLORS.sell }]} />
+                  </View>
+                  <View style={styles.detailRow}>
+                    <Text style={TYPOGRAPHY.mono}>{currentSL}</Text>
+                    {isRiskFree && (
+                      <View style={styles.riskFreeBadge}>
+                        <Text style={styles.riskFreeText}>RISK FREE ✓</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.phaseRow}>
+                  <Text style={TYPOGRAPHY.caption}>Phase {phase} of 5</Text>
+                  <View style={styles.dots}>
+                    {[1, 2, 3, 4, 5].map(p => (
+                      <View key={p} style={[styles.dot, { backgroundColor: p <= phase ? (isBuy ? COLORS.buy : COLORS.sell) : COLORS.border }]} />
+                    ))}
+                  </View>
                 </View>
               </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
         {positions.length === 0 && (
           <Text style={[TYPOGRAPHY.bodySecondary, { textAlign: 'center', marginTop: SPACING.xl }]}>
             No active positions

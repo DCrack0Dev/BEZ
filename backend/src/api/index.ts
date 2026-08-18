@@ -158,7 +158,9 @@ router.post('/ai/train', requireAuth, userActionLimiter, async (req, res) => {
     }
 
     // Async job — return 202 immediately so Render/mobile do not hit gateway timeouts.
-    const kickoff = modelManager.enqueueTraining({ dataPath, version, epochs: epochs ?? 40 });
+    const requestedEpochs = Number(epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 20);
+    const safeEpochs = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 30) : 20;
+    const kickoff = modelManager.enqueueTraining({ dataPath, version, epochs: safeEpochs });
     if (!kickoff.accepted) {
       return res.status(409).json({
         success: false,

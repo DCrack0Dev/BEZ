@@ -47,7 +47,11 @@ export class BacktestEngine {
     dataPath?: string;
     modelVersion?: string;
   } = {}): Promise<any> {
-    const dataPath = options.dataPath || DEFAULT_DATA;
+    const sourcePath = options.dataPath || DEFAULT_DATA;
+    const dataPath = fs.existsSync(sourcePath) && fs.statSync(sourcePath).size <= 8 * 1024 * 1024
+      ? sourcePath
+      : DEFAULT_DATA;
+
     if (!fs.existsSync(dataPath)) {
       return { success: false, error: `Data file not found: ${dataPath}` };
     }

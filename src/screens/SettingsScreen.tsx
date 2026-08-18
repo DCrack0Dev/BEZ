@@ -85,6 +85,20 @@ const SettingsScreen = () => {
               thumbColor={botSettings.autoTradingEnabled ? COLORS.primary : COLORS.textSecondary}
             />
           </View>
+          <View style={styles.toggleRow}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={TYPOGRAPHY.body}>AI Trading Enabled</Text>
+              <Text style={[TYPOGRAPHY.caption, { marginTop: 2, opacity: 0.7 }]}>
+                Turn on the model as the main decision layer for live entries.
+              </Text>
+            </View>
+            <Switch
+              value={botSettings.aiTradingEnabled}
+              onValueChange={(val) => updateBotSettings({ aiTradingEnabled: val })}
+              trackColor={{ false: COLORS.border, true: COLORS.primary + '50' }}
+              thumbColor={botSettings.aiTradingEnabled ? COLORS.primary : COLORS.textSecondary}
+            />
+          </View>
           <View style={styles.modeRow}>
             <Text style={TYPOGRAPHY.body}>Execution Mode</Text>
             <View style={styles.modeButtons}>

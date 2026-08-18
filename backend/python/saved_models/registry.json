@@ -168,6 +168,54 @@
       "deployment_recommendation": "NO",
       "recommendation_reason": "Candidate only beats production on 1/5 core metrics \u2014 do not deploy",
       "is_production": false
+    },
+    "v1.4": {
+      "version": "v1.4",
+      "status": "CANDIDATE",
+      "path": "C:\\Users\\Thiza\\Documents\\trae_projects\\LiquiBot\\backend\\python\\saved_models\\model_v1.4",
+      "registered_at": "2026-08-16T12:04:14.324876+00:00",
+      "metrics": {
+        "training_loss": 0.9360129833221436,
+        "validation_loss": 1.2041945457458496,
+        "accuracy": 0.3333333333333333,
+        "precision": 0.1111111111111111,
+        "recall": 0.3333333333333333,
+        "f1": 0.16666666666666666,
+        "profit_factor": 99.0,
+        "sharpe_ratio": 1.0,
+        "max_drawdown": 0.0,
+        "win_rate": 1.0,
+        "average_rr": 0.0,
+        "stability": 0.0,
+        "trade_frequency": 16.0
+      },
+      "deployment_recommendation": "NO",
+      "recommendation_reason": "Candidate only beats production on 3/5 core metrics \u2014 do not deploy",
+      "is_production": false
+    },
+    "v1.5": {
+      "version": "v1.5",
+      "status": "CANDIDATE",
+      "path": "C:\\Users\\Thiza\\Documents\\trae_projects\\LiquiBot\\backend\\python\\saved_models\\model_v1.5",
+      "registered_at": "2026-08-16T15:28:57.531444+00:00",
+      "metrics": {
+        "training_loss": 1.098254144191742,
+        "validation_loss": 1.2169976234436035,
+        "accuracy": 0.3333333333333333,
+        "precision": 0.2222222222222222,
+        "recall": 0.3611111111111111,
+        "f1": 0.26495726495726496,
+        "profit_factor": 2.429349941611522,
+        "sharpe_ratio": 0.6698483081543797,
+        "max_drawdown": 0.002569000000000051,
+        "win_rate": 0.6666666666666666,
+        "average_rr": 1.214674970805761,
+        "stability": 0.0,
+        "trade_frequency": 16.0
+      },
+      "deployment_recommendation": "NO",
+      "recommendation_reason": "Candidate only beats production on 3/5 core metrics \u2014 do not deploy",
+      "is_production": false
     }
   },
   "training_runs": [
@@ -185,7 +233,37 @@
       },
       "version": "v1.3",
       "timestamp": "2026-07-19T12:07:56.136444+00:00"
+    },
+    {
+      "status": "COMPLETED",
+      "epochs": 5,
+      "hidden_size": 256,
+      "train_samples": 52,
+      "val_samples": 12,
+      "holdout_samples": 16,
+      "history_summary": {
+        "final_train_loss": 0.9360129833221436,
+        "final_val_loss": 1.2041945457458496,
+        "final_f1": 0.16666666666666666
+      },
+      "version": "v1.4",
+      "timestamp": "2026-08-16T12:04:14.324904+00:00"
+    },
+    {
+      "status": "COMPLETED",
+      "epochs": 5,
+      "hidden_size": 256,
+      "train_samples": 52,
+      "val_samples": 12,
+      "holdout_samples": 16,
+      "history_summary": {
+        "final_train_loss": 1.098254144191742,
+        "final_val_loss": 1.2169976234436035,
+        "final_f1": 0.26495726495726496
+      },
+      "version": "v1.5",
+      "timestamp": "2026-08-16T15:28:57.531470+00:00"
     }
   ],
-  "updated_at": "2026-07-19T12:07:56.136444+00:00"
+  "updated_at": "2026-08-16T15:28:57.531479+00:00"
 }

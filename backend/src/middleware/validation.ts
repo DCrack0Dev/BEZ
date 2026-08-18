@@ -96,6 +96,7 @@ export const orderSchema = z
 export const botConfigSchema = z
   .object({
     autoTradingEnabled: z.boolean().optional(),
+    aiTradingEnabled: z.boolean().optional(),
     timezoneTradingEnabled: z.boolean().optional(),
     maxSpreadPoints: z.number().positive().optional(),
     timestamp: z.number().optional(),
