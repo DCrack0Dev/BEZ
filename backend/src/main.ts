@@ -122,6 +122,7 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
         lastUpdate: state.lastUpdate,
         ea_connected: state.ea_connected,
         autoTradingEnabled: state.autoTradingEnabled,
+        aiTradingEnabled: state.aiTradingEnabled,
         serverTs: Date.now(),
       });
     } catch (_emitErr) { /* no-op: engine already emits full EA_HEARTBEAT internally */ }
@@ -244,6 +245,7 @@ app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema)
 app.post('/api/bot/config', requireAuth, userActionLimiter, validateBody(botConfigSchema), replayGuard, (req, res) => {
   tradingEngine.applyBotConfig({
     autoTradingEnabled: req.body.autoTradingEnabled,
+    aiTradingEnabled: req.body.aiTradingEnabled,
     timezoneTradingEnabled: req.body.timezoneTradingEnabled,
     maxSpreadPoints: req.body.maxSpreadPoints,
   });
@@ -251,6 +253,7 @@ app.post('/api/bot/config', requireAuth, userActionLimiter, validateBody(botConf
   res.json({
     success: true,
     autoTradingEnabled: tradingEngine.getAccountState().autoTradingEnabled,
+    aiTradingEnabled: tradingEngine.getAccountState().aiTradingEnabled,
     timezoneTradingEnabled: tradingEngine.getAccountState().timezoneTradingEnabled,
     maxSpreadPoints: tradingEngine.getAccountState().maxSpreadPoints,
   });
@@ -272,6 +275,17 @@ app.get('/api/ai/dashboard', requireAuth, async (req, res) => {
   try {
     const { modelManager } = await import('./model-management');
     res.json({ success: true, data: await modelManager.getDashboard() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// Diagnostic endpoint: returns training/backtest diagnostics and a lightweight Python deps check.
+app.get('/api/ai/diagnostics', requireAuth, async (_req, res) => {
+  try {
+    const { modelManager } = await import('./model-management');
+    // modelManager.getDiagnostics returns training status, last result (trimmed), data source and pythonCheck
+    res.json({ success: true, data: modelManager.getDiagnostics() });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }

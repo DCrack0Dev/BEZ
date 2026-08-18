@@ -3,7 +3,7 @@
  * Production model is NEVER replaced automatically.
  */
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { prisma } from '../database';
@@ -50,9 +50,17 @@ let trainingKickoffPromise: Promise<any> | null = null;
 
 /** Prefer live cloud learning dataset; fall back to bundled example samples. */
 export function resolveTrainingDataPath(explicit?: string): string {
-  if (explicit && fs.existsSync(explicit)) return explicit;
+  if (explicit && fs.existsSync(explicit)) {
+    const size = fs.statSync(explicit).size;
+    if (size <= 8 * 1024 * 1024) return explicit;
+  }
+
   if (fs.existsSync(LEARNING_DATASET)) {
     try {
+      const stat = fs.statSync(LEARNING_DATASET);
+      if (stat.size > 8 * 1024 * 1024) {
+        return EXAMPLE_DATASET;
+      }
       const raw = JSON.parse(fs.readFileSync(LEARNING_DATASET, 'utf-8'));
       const samples = Array.isArray(raw) ? raw : raw?.samples;
       if (Array.isArray(samples) && samples.length >= 5) return LEARNING_DATASET;
@@ -154,7 +162,8 @@ export class ModelManager {
     const dataPath = resolveTrainingDataPath(options.dataPath);
     lastTrainingDataSource = dataPath;
     const version = options.version;
-    const epochs = options.epochs ?? 40;
+    const requestedEpochs = Number(options.epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 20);
+    const epochs = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 30) : 20;
 
     trainingStatus = 'RUNNING';
     currentTrainingVersion = version || 'pending';
@@ -436,6 +445,46 @@ export class ModelManager {
           }
         : null,
       readOnlyProduction: true as const,
+    };
+  }
+
+  /**
+   * Diagnostics helper used by the API to return clearer training/backtest failure reasons.
+   * Does not expose secrets. Runs a lightweight python import check when available.
+   */
+  getDiagnostics() {
+    let pythonCheck = { available: false, version: null as string | null, depsOk: false, out: null as string | null };
+    try {
+      const python = process.env.PYTHON_PATH || 'python3';
+      const spawnArgs = [
+        '-c',
+        'import sys, json\n\ntry:\n import numpy, torch\n print(json.dumps({"ok": True, "numpy": numpy.__version__, "torch": torch.__version__}))\nexcept Exception as e:\n print(json.dumps({"ok": False, "err": str(e)}))',
+      ];
+      const r = spawnSync(python, spawnArgs, { encoding: 'utf8' });
+      if (r.status === 0 && r.stdout) {
+        pythonCheck.available = true;
+        pythonCheck.version = (r.stdout || '').split('\n')[0] || null;
+        try {
+          const j = JSON.parse((r.stdout || '').trim().split(/\r?\n/).slice(-1)[0]);
+          pythonCheck.depsOk = !!j.ok;
+          pythonCheck.out = JSON.stringify(j);
+        } catch (e) {
+          pythonCheck.out = (r.stdout || r.stderr || '').slice(0, 1000);
+        }
+      } else {
+        pythonCheck.available = false;
+        pythonCheck.out = (r.stderr || r.stdout || '').slice(0, 1000);
+      }
+    } catch (e) {
+      pythonCheck.out = String(e).slice(0, 1000);
+    }
+
+    return {
+      trainingStatus,
+      lastTrainingResult: lastTrainingResult ? { success: !!lastTrainingResult.success, error: lastTrainingResult.error || null, message: lastTrainingResult.message || null } : null,
+      lastTrainingDataSource,
+      pythonCheck,
+      cloudMode: process.env.NODE_ENV === 'production',
     };
   }
 
