@@ -137,18 +137,58 @@ export class JournalManager {
    * Update a journal entry (usually when a trade closes)
    */
   async updateEntry(ticket: string, params: UpdateJournalEntryParams, db: DbClient = prisma): Promise<AdvancedTradeJournal | null> {
+    // Normalize numeric fields to avoid NULL/undefined being written
+    const safeParams: any = { ...params };
+    if (params.profitPips !== undefined) safeParams.profitPips = Number(params.profitPips);
+    if (params.profitPercent !== undefined) safeParams.profitPercent = Number(params.profitPercent);
+    if (params.profitDollars !== undefined) safeParams.profitDollars = Number(params.profitDollars);
+
     const updatedEntry = await db.advancedTradeJournal.updateMany({
       where: { ticket },
       data: {
-        ...params,
+        ...safeParams,
         durationMinutes: params.durationMinutes,
         updatedAt: new Date(),
       },
     });
 
     if (updatedEntry.count > 0) {
-      console.log(`📓 Journal entry updated for ticket ${ticket}`);
+      console.log(`📓 Journal entry updated for ticket ${ticket} (profitDollars=${safeParams.profitDollars ?? 'N/A'})`);
       return await db.advancedTradeJournal.findUnique({ where: { ticket } });
+    }
+
+    // If no row was updated, create one as a best-effort fallback so the UI has a record.
+    try {
+      const created = await db.advancedTradeJournal.create({
+        data: {
+          ticket,
+          symbol: (safeParams as any).symbol || 'UNKNOWN',
+          direction: (safeParams as any).direction || 'BUY',
+          marketSnapshot: (safeParams as any).marketSnapshot || {},
+          marketSession: (safeParams as any).marketSession || 'UNKNOWN',
+          indicators: (safeParams as any).indicators || {},
+          featureSet: (safeParams as any).featureSet || {},
+          entryPrice: Number((safeParams as any).entryPrice || 0),
+          executionPrice: Number((safeParams as any).executionPrice || 0),
+          slippage: Number((safeParams as any).slippage || 0),
+          spreadAtEntry: Number((safeParams as any).spreadAtEntry || 0),
+          sl: Number((safeParams as any).sl || 0),
+          tp: Number((safeParams as any).tp || 0),
+          lotSize: Number((safeParams as any).lotSize || 0),
+          riskPercent: Number((safeParams as any).riskPercent || 0),
+          outcome: (safeParams as any).outcome || 'OPEN',
+          profitPips: safeParams.profitPips ?? 0,
+          profitPercent: safeParams.profitPercent ?? 0,
+          profitDollars: safeParams.profitDollars ?? 0,
+          entryTimestamp: (safeParams as any).entryTimestamp || new Date(),
+          closeTimestamp: (safeParams as any).closeTimestamp || new Date(),
+          durationMinutes: safeParams.durationMinutes,
+        },
+      });
+      console.warn(`📓 Journal entry missing for ticket ${ticket}; created fallback entry (profitDollars=${created.profitDollars})`);
+      return created;
+    } catch (e) {
+      console.error(`Failed to create fallback journal entry for ${ticket}:`, e);
     }
 
     return null;
