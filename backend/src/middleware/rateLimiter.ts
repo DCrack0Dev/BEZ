@@ -30,7 +30,9 @@ export const userActionLimiter = rateLimit({
 // Lenient: legitimate EA polling endpoints hit frequently by design.
 export const eaPollingLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 120,
+  // Increased to accommodate legitimate EA polling bursts from deployed EAs.
+  // Original: 120/min (~2/sec). Raised to 600/min (~10/sec). Monitor for abuse.
+  limit: 600,
   standardHeaders: true,
   legacyHeaders: false,
   handler: jsonRateLimitHandler,
