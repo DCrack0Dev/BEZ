@@ -120,6 +120,199 @@ export async function saveCandle(data: {
   }
 }
 
+// --- CANDLE INDICATORS ---
+
+export async function saveCandleIndicators(data: {
+  candleId: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  atr: number;
+  rsi: number;
+  macd?: number;
+  macdSignal?: number;
+  macdHistogram?: number;
+  ema20: number;
+  ema50: number;
+  ema100?: number;
+  vwap: number;
+  adx: number;
+  bbUpper: number;
+  bbMiddle: number;
+  bbLower: number;
+  trendStrength: number;
+  trendDirection: string;
+  momentumStrength: number;
+  momentumDirection: string;
+  atrRatio: number;
+  volatilityLevel: string;
+  bbBandwidth?: number;
+  bbPosition?: number;
+  liquiditySweep: string;
+  liquidityLevel?: number;
+  swingHigh?: number;
+  swingLow?: number;
+  swingStructure?: string;
+  bullishOrderBlockPresent: boolean;
+  bearishOrderBlockPresent: boolean;
+  orderBlockZoneStart?: number;
+  orderBlockZoneEnd?: number;
+  bullishFvgPresent: boolean;
+  bearishFvgPresent: boolean;
+  fvgStart?: number;
+  fvgEnd?: number;
+  fvgFilledPercent?: number;
+  nearestSupport?: number;
+  nearestResistance?: number;
+  distanceToSupport?: number;
+  distanceToResistance?: number;
+  marketSession: string;
+  prevCandleBullish: boolean;
+  prevCandleBearish: boolean;
+  prevCandleSizeRatio?: number;
+  gapUp: boolean;
+  gapDown: boolean;
+  threeCandlePattern?: string;
+  normalizedClose?: number;
+  normalizedHigh?: number;
+  normalizedLow?: number;
+  normalizedOpen?: number;
+  normalizedVolume?: number;
+}) {
+  try {
+    const dec = (n: number | undefined | null) =>
+      n === undefined || n === null ? null : new Decimal(Number(n).toString());
+
+    return await (prisma as any).candleIndicator.upsert({
+      where: {
+        candleId: data.candleId,
+      },
+      update: {
+        open: new Decimal(Number(data.open).toString()),
+        high: new Decimal(Number(data.high).toString()),
+        low: new Decimal(Number(data.low).toString()),
+        close: new Decimal(Number(data.close).toString()),
+        volume: new Decimal(Number(data.volume).toString()),
+        atr: new Decimal(Number(data.atr).toString()),
+        rsi: new Decimal(Number(data.rsi).toString()),
+        macd: dec(data.macd),
+        macdSignal: dec(data.macdSignal),
+        macdHistogram: dec(data.macdHistogram),
+        ema20: new Decimal(Number(data.ema20).toString()),
+        ema50: new Decimal(Number(data.ema50).toString()),
+        ema100: dec(data.ema100),
+        vwap: new Decimal(Number(data.vwap).toString()),
+        adx: new Decimal(Number(data.adx).toString()),
+        bbUpper: new Decimal(Number(data.bbUpper).toString()),
+        bbMiddle: new Decimal(Number(data.bbMiddle).toString()),
+        bbLower: new Decimal(Number(data.bbLower).toString()),
+        trendStrength: new Decimal(Number(data.trendStrength).toString()),
+        trendDirection: data.trendDirection,
+        momentumStrength: new Decimal(Number(data.momentumStrength).toString()),
+        momentumDirection: data.momentumDirection,
+        atrRatio: new Decimal(Number(data.atrRatio).toString()),
+        volatilityLevel: data.volatilityLevel,
+        bbBandwidth: dec(data.bbBandwidth),
+        bbPosition: dec(data.bbPosition),
+        liquiditySweep: data.liquiditySweep,
+        liquidityLevel: dec(data.liquidityLevel),
+        swingHigh: dec(data.swingHigh),
+        swingLow: dec(data.swingLow),
+        swingStructure: data.swingStructure || null,
+        bullishOrderBlockPresent: data.bullishOrderBlockPresent,
+        bearishOrderBlockPresent: data.bearishOrderBlockPresent,
+        orderBlockZoneStart: dec(data.orderBlockZoneStart),
+        orderBlockZoneEnd: dec(data.orderBlockZoneEnd),
+        bullishFvgPresent: data.bullishFvgPresent,
+        bearishFvgPresent: data.bearishFvgPresent,
+        fvgStart: dec(data.fvgStart),
+        fvgEnd: dec(data.fvgEnd),
+        fvgFilledPercent: dec(data.fvgFilledPercent),
+        nearestSupport: dec(data.nearestSupport),
+        nearestResistance: dec(data.nearestResistance),
+        distanceToSupport: dec(data.distanceToSupport),
+        distanceToResistance: dec(data.distanceToResistance),
+        marketSession: data.marketSession,
+        prevCandleBullish: data.prevCandleBullish,
+        prevCandleBearish: data.prevCandleBearish,
+        prevCandleSizeRatio: dec(data.prevCandleSizeRatio),
+        gapUp: data.gapUp,
+        gapDown: data.gapDown,
+        threeCandlePattern: data.threeCandlePattern || null,
+        normalizedClose: dec(data.normalizedClose),
+        normalizedHigh: dec(data.normalizedHigh),
+        normalizedLow: dec(data.normalizedLow),
+        normalizedOpen: dec(data.normalizedOpen),
+        normalizedVolume: dec(data.normalizedVolume),
+      },
+      create: {
+        candleId: data.candleId,
+        open: new Decimal(Number(data.open).toString()),
+        high: new Decimal(Number(data.high).toString()),
+        low: new Decimal(Number(data.low).toString()),
+        close: new Decimal(Number(data.close).toString()),
+        volume: new Decimal(Number(data.volume).toString()),
+        atr: new Decimal(Number(data.atr).toString()),
+        rsi: new Decimal(Number(data.rsi).toString()),
+        macd: dec(data.macd),
+        macdSignal: dec(data.macdSignal),
+        macdHistogram: dec(data.macdHistogram),
+        ema20: new Decimal(Number(data.ema20).toString()),
+        ema50: new Decimal(Number(data.ema50).toString()),
+        ema100: dec(data.ema100),
+        vwap: new Decimal(Number(data.vwap).toString()),
+        adx: new Decimal(Number(data.adx).toString()),
+        bbUpper: new Decimal(Number(data.bbUpper).toString()),
+        bbMiddle: new Decimal(Number(data.bbMiddle).toString()),
+        bbLower: new Decimal(Number(data.bbLower).toString()),
+        trendStrength: new Decimal(Number(data.trendStrength).toString()),
+        trendDirection: data.trendDirection,
+        momentumStrength: new Decimal(Number(data.momentumStrength).toString()),
+        momentumDirection: data.momentumDirection,
+        atrRatio: new Decimal(Number(data.atrRatio).toString()),
+        volatilityLevel: data.volatilityLevel,
+        bbBandwidth: dec(data.bbBandwidth),
+        bbPosition: dec(data.bbPosition),
+        liquiditySweep: data.liquiditySweep,
+        liquidityLevel: dec(data.liquidityLevel),
+        swingHigh: dec(data.swingHigh),
+        swingLow: dec(data.swingLow),
+        swingStructure: data.swingStructure || null,
+        bullishOrderBlockPresent: data.bullishOrderBlockPresent,
+        bearishOrderBlockPresent: data.bearishOrderBlockPresent,
+        orderBlockZoneStart: dec(data.orderBlockZoneStart),
+        orderBlockZoneEnd: dec(data.orderBlockZoneEnd),
+        bullishFvgPresent: data.bullishFvgPresent,
+        bearishFvgPresent: data.bearishFvgPresent,
+        fvgStart: dec(data.fvgStart),
+        fvgEnd: dec(data.fvgEnd),
+        fvgFilledPercent: dec(data.fvgFilledPercent),
+        nearestSupport: dec(data.nearestSupport),
+        nearestResistance: dec(data.nearestResistance),
+        distanceToSupport: dec(data.distanceToSupport),
+        distanceToResistance: dec(data.distanceToResistance),
+        marketSession: data.marketSession,
+        prevCandleBullish: data.prevCandleBullish,
+        prevCandleBearish: data.prevCandleBearish,
+        prevCandleSizeRatio: dec(data.prevCandleSizeRatio),
+        gapUp: data.gapUp,
+        gapDown: data.gapDown,
+        threeCandlePattern: data.threeCandlePattern || null,
+        normalizedClose: dec(data.normalizedClose),
+        normalizedHigh: dec(data.normalizedHigh),
+        normalizedLow: dec(data.normalizedLow),
+        normalizedOpen: dec(data.normalizedOpen),
+        normalizedVolume: dec(data.normalizedVolume),
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to save candle indicators', error);
+    return null;
+  }
+}
+
 // --- ACCOUNT SNAPSHOTS ---
 
 export async function saveAccountSnapshot(data: {

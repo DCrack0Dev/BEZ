@@ -45,19 +45,86 @@ model Candle {
 model CandleIndicator {
   id             String  @id @default(cuid())
   candleId       String  @unique
-  atr            Decimal
+
+  // Price Data
+  open           Decimal
+  high           Decimal
+  low            Decimal
+  close          Decimal
+  volume         Decimal
+
+  // Trend
+  trendStrength  Decimal
+  trendDirection String
+  ema20          Decimal
+  ema50          Decimal
+  ema100         Decimal?
+  adx            Decimal
+
+  // Momentum
   rsi            Decimal
   macd           Decimal?
   macdSignal     Decimal?
   macdHistogram  Decimal?
-  ema20          Decimal
-  ema50          Decimal
-  ema100         Decimal?
-  vwap           Decimal
-  adx            Decimal
+  momentumStrength  Decimal
+  momentumDirection String
+
+  // Volatility
+  atr            Decimal
+  atrRatio       Decimal
+  volatilityLevel String
   bbUpper        Decimal
   bbMiddle       Decimal
   bbLower        Decimal
+  bbBandwidth    Decimal?
+  bbPosition     Decimal?
+
+  // Liquidity
+  liquiditySweep String
+  liquidityLevel Decimal?
+
+  // Price Structure
+  swingHigh      Decimal?
+  swingLow       Decimal?
+  swingStructure String?
+
+  // Order Blocks
+  bullishOrderBlockPresent Boolean
+  bearishOrderBlockPresent Boolean
+  orderBlockZoneStart Decimal?
+  orderBlockZoneEnd   Decimal?
+
+  // Fair Value Gaps
+  bullishFvgPresent Boolean
+  bearishFvgPresent Boolean
+  fvgStart          Decimal?
+  fvgEnd            Decimal?
+  fvgFilledPercent  Decimal?
+
+  // Support & Resistance
+  nearestSupport    Decimal?
+  nearestResistance Decimal?
+  distanceToSupport Decimal?
+  distanceToResistance Decimal?
+
+  // Market Session
+  marketSession String
+
+  // Previous Candle Relationships
+  prevCandleBullish Boolean
+  prevCandleBearish Boolean
+  prevCandleSizeRatio Decimal?
+  gapUp   Boolean
+  gapDown Boolean
+  threeCandlePattern String?
+
+  // Normalized Features (0-1 for AI)
+  normalizedClose  Decimal?
+  normalizedHigh   Decimal?
+  normalizedLow    Decimal?
+  normalizedOpen   Decimal?
+  normalizedVolume Decimal?
+
   createdAt      DateTime @default(now())
 
   candle     Candle  @relation(fields: [candleId], references: [id], onDelete: Cascade)
