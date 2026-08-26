@@ -255,7 +255,7 @@ export class FeatureEngineeringEngine {
   }
 
   private detectFVG(candles: Candle[], pipSize: number): { type: FVG; details: FVGDetails; bullishPresent: boolean; bearishPresent: boolean; filledPercent: number; fvgStart: number; fvgEnd: number } {
-    const fallback = { type: 'NONE' as FVG, details: { type: 'NONE', startPrice: 0, endPrice: 0, sizePips: 0, filledPercent: 0 }, bullishPresent: false, bearishPresent: false, filledPercent: 0, fvgStart: 0, fvgEnd: 0 };
+    const fallback: ReturnType<FeatureEngineeringEngine['detectFVG']> = { type: 'NONE', details: { type: 'NONE', startPrice: 0, endPrice: 0, sizePips: 0, filledPercent: 0 }, bullishPresent: false, bearishPresent: false, filledPercent: 0, fvgStart: 0, fvgEnd: 0 };
     if (candles.length < 5) return fallback;
     const current = candles[candles.length - 1];
     const prev2 = candles[candles.length - 3];
@@ -268,14 +268,14 @@ export class FeatureEngineeringEngine {
       const filled = size > 0 ? Math.max(0, Math.min(size, current.close - gapStart)) : 0;
       const filledPct = size > 0 ? filled / size : 0;
       return {
-        type: 'BULLISH',
+        type: 'BULLISH' as FVG,
         bullishPresent: true,
         bearishPresent: false,
         fvgStart: gapStart,
         fvgEnd: gapEnd,
         filledPercent: filledPct,
         details: {
-          type: 'BULLISH',
+          type: 'BULLISH' as const,
           startPrice: gapStart,
           endPrice: gapEnd,
           sizePips: pipSize > 0 ? size / pipSize : 0,
@@ -289,14 +289,14 @@ export class FeatureEngineeringEngine {
       const filled = size > 0 ? Math.max(0, Math.min(size, gapEnd - current.close)) : 0;
       const filledPct = size > 0 ? filled / size : 0;
       return {
-        type: 'BEARISH',
+        type: 'BEARISH' as FVG,
         bullishPresent: false,
         bearishPresent: true,
         fvgStart: gapStart,
         fvgEnd: gapEnd,
         filledPercent: filledPct,
         details: {
-          type: 'BEARISH',
+          type: 'BEARISH' as const,
           startPrice: gapStart,
           endPrice: gapEnd,
           sizePips: pipSize > 0 ? size / pipSize : 0,
@@ -307,7 +307,7 @@ export class FeatureEngineeringEngine {
     return fallback;
   }
 
-  private detectOrderBlocks(candles: Candle[], pipSize: number): {
+  private detectOrderBlocks(candles: Candle[], _pipSize: number): {
     type: OrderBlock;
     details: OrderBlockDetails;
     bullishPresent: boolean;
@@ -315,8 +315,8 @@ export class FeatureEngineeringEngine {
     zoneStart: number;
     zoneEnd: number;
   } {
-    const fallback = {
-      type: 'NONE' as OrderBlock,
+    const fallback: ReturnType<FeatureEngineeringEngine['detectOrderBlocks']> = {
+      type: 'NONE',
       details: { type: 'NONE', top: 0, bottom: 0, displacementStrength: 0 },
       bullishPresent: false,
       bearishPresent: false,
@@ -326,17 +326,17 @@ export class FeatureEngineeringEngine {
     if (candles.length < 10) return fallback;
     const recent = candles.slice(-15);
 
-    let bestOB = { type: 'NONE' as OrderBlock, top: 0, bottom: 0, strength: 0 };
+    let bestOB: { type: OrderBlock; top: number; bottom: number; strength: number } = { type: 'NONE', top: 0, bottom: 0, strength: 0 };
     for (let i = recent.length - 2; i >= 2; i--) {
       const c = recent[i];
       const bodySize = Math.abs(c.close - c.open);
       const range = Math.max(0.00001, c.high - c.low);
       const bodyRatio = bodySize / range;
       if (bodyRatio > 0.55) {
-        if (c.close > c.open && !bestOB.bullishPresent) {
+        if (c.close > c.open && bestOB.type !== 'BULLISH') {
           bestOB = { type: 'BULLISH', top: c.high, bottom: c.low, strength: bodyRatio };
           break;
-        } else if (c.close < c.open && !bestOB.bearishPresent) {
+        } else if (c.close < c.open && bestOB.type !== 'BEARISH') {
           bestOB = { type: 'BEARISH', top: c.high, bottom: c.low, strength: bodyRatio };
           break;
         }
@@ -410,7 +410,7 @@ export class FeatureEngineeringEngine {
     const gapUp = curr.open > prev.high + (pipSize > 0 ? pipSize * 0.5 : 0);
     const gapDown = curr.open < prev.low - (pipSize > 0 ? pipSize * 0.5 : 0);
 
-    let pattern: typeof fallback.threeCandlePattern = null;
+    let pattern: ReturnType<FeatureEngineeringEngine['detectPrevCandleRelationships']>['threeCandlePattern'] = null;
     if (candles.length >= 3) {
       const p3 = candles[candles.length - 3];
       const body = Math.abs(prev.close - prev.open) / prevRange;
