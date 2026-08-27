@@ -836,4 +836,72 @@ export async function rejectProposal(id: string, reviewedBy: string = 'USER', co
   }
 }
 
+// --- TRADE JOURNAL (AdvancedTradeJournal real MT5 P&L source-of-truth)
+export async function getAdvancedJournalClosedTrades(opts: {
+  range?: 'today' | 'week' | 'month' | 'all';
+  limit?: number;
+} = {}): Promise<any[]> {
+  try {
+    const client: any = prisma;
+    const where: any = {
+      AND: [
+        { outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] } },
+        { closeTimestamp: { not: null } },
+      ],
+    };
+    const now = new Date();
+    const startOf = (unit: 'day' | 'week' | 'month'): Date => {
+      const d = new Date(now);
+      if (unit === 'day') {
+        d.setHours(0, 0, 0, 0);
+      } else if (unit === 'week') {
+        // Start of week (Monday 00:00:00 local)
+        const day = d.getDay() || 7; // 1=Monday, 7=Sunday
+        d.setDate(d.getDate() - (day - 1));
+        d.setHours(0, 0, 0, 0);
+      } else {
+        d.setDate(1);
+        d.setHours(0, 0, 0, 0);
+      }
+      return d;
+    };
+    if (opts.range && opts.range !== 'all') {
+      const from = startOf(opts.range === 'today' ? 'day' : opts.range === 'week' ? 'week' : 'month');
+      where.AND.push({ closeTimestamp: { gte: from } });
+    }
+    const rows = await client.advancedTradeJournal.findMany({
+      where,
+      orderBy: [{ closeTimestamp: 'desc' }],
+      take: opts.limit ?? 200,
+    });
+    return rows.map((r: any) => {
+      const closeTs = r.closeTimestamp ? new Date(r.closeTimestamp).getTime() : null;
+      const openTs = r.entryTimestamp ? new Date(r.entryTimestamp).getTime() : null;
+      return {
+        ticket: String(r.ticket),
+        symbol: r.symbol,
+        type: String(r.direction || 'BUY').toUpperCase(),
+        lots: Number(r.lotSize || 0.01),
+        openPrice: Number(r.entryPrice || 0),
+        closePrice: Number(r.executionPrice || r.entryPrice || 0),
+        profit: Number(r.profitDollars ?? 0),
+        pnl: Number(r.profitDollars ?? 0),
+        profitPips: Number(r.profitPips ?? 0),
+        outcome: String(r.outcome),
+        sl: Number(r.sl || 0),
+        tp: Number(r.tp || 0),
+        stopLoss: Number(r.sl || 0),
+        takeProfit: Number(r.tp || 0),
+        openTime: openTs,
+        closeTime: closeTs,
+        _fromAdvancedJournal: true,
+        modelVersion: r.modelVersion,
+      };
+    });
+  } catch (e) {
+    logger.warn('getAdvancedJournalClosedTrades failed (pending migration?): returning empty', e);
+    return [];
+  }
+}
+
 export { prisma };

@@ -21,14 +21,16 @@ import { ExperienceEngine } from '../analytics/experienceEngine';
 import { liveTradeObserver } from '../analytics/tradeObserver';
 import {
   initDb,
-  prisma,
   saveTick,
   saveCandle,
+  saveCandleIndicators,
   saveAccountSnapshot,
   savePosition,
   saveTradeDna,
   savePostTradeAnalysis,
   saveEnsemblePrediction,
+  getAdvancedJournalClosedTrades,
+  prisma,
 } from '../database';
 import { ensembleDecisionEngine } from '../ensemble';
 import { marketRegimeDetector } from '../regime-detector';
@@ -280,20 +282,35 @@ export class TradingEngine {
   getClosedTrades(): any[] {
     return [...this.closedTrades];
   }
-  async getClosedTradesWithJournal(): Promise<any[]> {
+  async getClosedTradesWithJournal(range: 'today' | 'week' | 'month' | 'all' = 'all'): Promise<any[]> {
     const memory = [...this.closedTrades];
     try {
+      // Step 1: REAL MT5 JOURNAL as #1 source of truth (AdvancedTradeJournal table)
+      // This table carries the EXACT P&L that MT5 reports (profitDollars / profitPips / outcome)
+      const dbJournal = await getAdvancedJournalClosedTrades({ range, limit: 200 });
+
+      // Step 2: secondary — journalManager (PostgreSQL or JSONL fallback)
       const entries = await journalManager.getAllEntries({ limit: 200 });
-      const byTicket = new Map(entries.map(e => [e.ticket, e]));
+      const byTicket = new Map(entries.map(e => [String(e.ticket), e]));
       const merged = new Map<string, any>();
-      for (const t of memory) merged.set(String(t.ticket), { ...t });
+
+      // Merge memory first
+      for (const t of memory) {
+        const ticket = String(t.ticket);
+        merged.set(ticket, { ...t, _source: 'memory' });
+      }
+      // Merge DB AdvancedJournal ON TOP (highest priority — real MT5 profit!)
+      for (const j of dbJournal) {
+        merged.set(String(j.ticket), { ...(merged.get(String(j.ticket)) || {}), ...j, _source: 'advancedJournal' });
+      }
+      // Merge journalManager last (lowest priority, but preserve outcome)
       for (const e of entries) {
-        const ticket = e.ticket;
+        const ticket = String(e.ticket);
         const existing = merged.get(ticket);
         const outcomeVal = e.outcome === 'WIN' || e.outcome === 'LOSS' || e.outcome === 'BREAKEVEN' ? e.outcome : existing?.outcome;
         const rawDollars = (e.profitDollars !== undefined && e.profitDollars !== null) ? Number(e.profitDollars) : NaN;
         const rawPips = (e.profitPips !== undefined && e.profitPips !== null) ? Number(e.profitPips) : NaN;
-        const m = existing || {
+        const m: any = existing || {
           ticket,
           symbol: e.symbol,
           type: e.direction,
@@ -306,17 +323,27 @@ export class TradingEngine {
           tp: Number(e.tp || 0),
           stopLoss: Number(e.sl || 0),
           takeProfit: Number(e.tp || 0),
+          _source: 'journalManager',
         };
-        const finalProfit = Number.isFinite(rawDollars) && Math.abs(rawDollars) > 0.0001
-          ? rawDollars
-          : (Number(m?.profit) ?? Number(m?.pnl) ?? (Number.isFinite(rawDollars) ? rawDollars : 0));
+        const existingProfit = Number(existing?.profit ?? existing?.pnl ?? NaN);
+        const memoryHasProfit = Number.isFinite(existingProfit) && Math.abs(existingProfit) > 0.0001;
+        const journalProfitFinite = Number.isFinite(rawDollars) && Math.abs(rawDollars) > 0.0001;
+        const finalProfit = memoryHasProfit && !existing?._fromAdvancedJournal
+          ? existingProfit
+          : (existing?._fromAdvancedJournal && Number.isFinite(Number(existing?.profit ?? NaN))
+              ? Number(existing.profit)
+              : (journalProfitFinite
+                  ? rawDollars
+                  : (existingProfit || rawDollars || 0)));
+        const finalPips = Number.isFinite(rawPips) && Math.abs(rawPips) > 0.0001
+          ? rawPips
+          : (Number(existing?.profitPips) ?? (Number.isFinite(rawPips) ? rawPips : 0));
         merged.set(ticket, {
           ...m,
           profit: finalProfit,
           pnl: finalProfit,
-          profitPips: Number.isFinite(rawPips) && Math.abs(rawPips) > 0.0001 ? rawPips : (Number(m?.profitPips) ?? (Number.isFinite(rawPips) ? rawPips : 0)),
-          outcome: outcomeVal || m?.outcome,
-          _fromDb: true,
+          profitPips: finalPips,
+          outcome: outcomeVal || m?.outcome || existing?.outcome,
         });
       }
       const arr = Array.from(merged.values());
@@ -714,7 +741,7 @@ export class TradingEngine {
         await monitoring.timeAsync(
           'database',
           () =>
-            prisma.$transaction(async (tx) => {
+            prisma.$transaction(async (tx: any) => {
               if (finalizedDna) {
                 await saveTradeDna(finalizedDna as any, tx);
               }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
 import { getClosedOrders } from '../api/orders';
 import SkeletonLoader from '../components/SkeletonLoader';
@@ -34,6 +34,9 @@ const JournalScreen = () => {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState({ total: 0, winRate: 0, pnl: 0 });
   const [flippedTradeId, setFlippedTradeId] = useState<string | null>(null);
+  const fetchInFlight = useRef(false);
+  const pendingFilter = useRef<'today' | 'week' | 'month' | null>(null);
+  const lastFilterTap = useRef<number>(0);
 
   const currency = account?.currency || 'USD';
   const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
@@ -91,12 +94,17 @@ const JournalScreen = () => {
     return 'Market Exit';
   };
 
-  const fetchTrades = async () => {
+  const fetchTrades = useCallback(async () => {
+    // Debounce + re-entry guard: prevent spam from rapid filter taps
+    if (fetchInFlight.current) {
+      pendingFilter.current = filter;
+      return;
+    }
+    fetchInFlight.current = true;
     setLoading(true);
     try {
       const data = await getClosedOrders(filter);
       
-      // Transform backend data if needed, or use directly
       const formattedTrades: JournalTrade[] = data.map((t: any) => {
         const oTime = toDate(t.openTime, t.open_time, t.openedAt, t.timeOpen, t.time_open, t.entryTime, t.date);
         const cTime = toDate(t.closeTime, t.close_time, t.closedAt, t.timeClose, t.time_close, t.exitTime, t.date);
@@ -143,13 +151,21 @@ const JournalScreen = () => {
     } catch (error) {
       console.error('Failed to fetch trades');
     } finally {
+      fetchInFlight.current = false;
       setLoading(false);
+      // Re-run if filter changed while we were fetching
+      if (pendingFilter.current && pendingFilter.current !== filter) {
+        pendingFilter.current = null;
+        setImmediate(() => fetchTrades());
+      } else {
+        pendingFilter.current = null;
+      }
     }
-  };
+  }, [filter, account?.eaSymbol]);
 
   useEffect(() => {
     fetchTrades();
-  }, [filter]);
+  }, [fetchTrades]);
 
   return (
     <View style={styles.container}>

@@ -23,6 +23,8 @@ const DashboardScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [pendingOrder, setPendingOrder] = useState<{ type: 'BUY' | 'SELL', symbol: string } | null>(null);
+  const [placingOrder, setPlacingOrder] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
 
   const selectedSymbol = account && account.eaSymbol ? account.eaSymbol : 'XAUUSD';
   const currency = account?.currency || 'USD';
@@ -50,12 +52,14 @@ const DashboardScreen = () => {
   };
 
   const handleTradePress = (type: 'BUY' | 'SELL') => {
+    if (placingOrder) return;
     setPendingOrder({ type, symbol: selectedSymbol });
     setConfirmVisible(true);
   };
 
   const handleConfirmOrder = async () => {
-    if (!pendingOrder) return;
+    if (!pendingOrder || placingOrder) return;
+    setPlacingOrder(true);
     setConfirmVisible(false);
 
     const point = Number(account?.pointSize) || 0.01;
@@ -66,6 +70,7 @@ const DashboardScreen = () => {
 
     if (!price || price <= 0) {
       Alert.alert('Error', 'No live price from EA yet — wait for heartbeat.');
+      setPlacingOrder(false);
       return;
     }
 
@@ -97,10 +102,15 @@ const DashboardScreen = () => {
         String(error);
       logApp(`Order failed`, 'error', msg);
       Alert.alert('Error', msg || 'Failed to place order');
+    } finally {
+      setPendingOrder(null);
+      setPlacingOrder(false);
     }
   };
 
   const handleCloseAllTrades = async () => {
+    if (closingAll) return;
+    setClosingAll(true);
     logApp('Closing all trades', 'info', `Symbol: ${selectedSymbol}`);
     
     try {
@@ -118,6 +128,8 @@ const DashboardScreen = () => {
     } catch (error) {
       logApp('Close all failed', 'error', error as string);
       Alert.alert('Error', 'Failed to close all trades');
+    } finally {
+      setClosingAll(false);
     }
   };
 
@@ -158,13 +170,13 @@ const DashboardScreen = () => {
                   title="BUY" 
                   type="BUY" 
                   onPress={() => handleTradePress('BUY')}
-                  disabled={!account.eaConnected}
+                  disabled={!account.eaConnected || placingOrder || closingAll}
                 />
                 <TradeButton 
                   title="SELL" 
                   type="SELL" 
                   onPress={() => handleTradePress('SELL')}
-                  disabled={!account.eaConnected}
+                  disabled={!account.eaConnected || placingOrder || closingAll}
                 />
               </View>
               <View style={styles.tradeInfo}>
@@ -210,7 +222,7 @@ const DashboardScreen = () => {
                 title="CLOSE ALL TRADES"
                 type="SELL"
                 onPress={handleCloseAllTrades}
-                disabled={!account.eaConnected}
+                disabled={!account.eaConnected || placingOrder || closingAll}
               />
               <View style={styles.closeAllSpacer} />
               {openPositions.map((pos) => (

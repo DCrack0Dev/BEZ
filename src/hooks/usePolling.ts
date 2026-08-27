@@ -6,10 +6,13 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
 import { useAuthStore } from '../store/useAuthStore';
 
-/**
- * usePolling.ts (UI Only)
- * Mobile app hook to update UI based on backend WebSocket heartbeats.
- */
+function shallowJsonEqual<T>(a: T, b: T): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
 
 export const usePolling = () => {
   const {
@@ -31,17 +34,32 @@ export const usePolling = () => {
   const prevTimezone = useRef<boolean>(botSettings.timezoneTradingEnabled !== false);
   const prevMaxSpread = useRef<number>(botSettings.maxSpreadPoints ?? 800);
   const lastSetupLog = useRef<string>('');
+  // Shallow-compare refs to avoid duplicate setState and laggy re-renders
+  const prevAccountSnapshot = useRef<any>(null);
+  const prevPositionsSnapshot = useRef<any[] | null>(null);
+  const lastRefreshAt = useRef<number>(0);
 
   useEffect(() => {
     const url = serverUrl || 'https://liquibot-back.onrender.com';
-    socketRef.current = io(url);
+    // Force WebSocket first + upgrades disabled for zero-latency.
+    // (No long-polling handshake, which was adding 300-800ms RTT delays.)
+    socketRef.current = io(url, {
+      transports: ['websocket'],
+      upgrade: false,
+      perMessageDeflate: { threshold: 128 },
+      reconnection: true,
+      reconnectionDelay: 400,
+      reconnectionDelayMax: 3000,
+      randomizationFactor: 0.25,
+      timeout: 8000,
+    });
 
     socketRef.current.on('EA_HEARTBEAT', (data) => {
       if (data.price) {
         setAccountPrice(Number(data.price));
       }
 
-      setAccount({
+      const accountSnapshot = {
         ...data,
         eaConnected: data.ea_connected,
         eaSymbol: data.symbol || 'XAUUSD',
@@ -58,7 +76,11 @@ export const usePolling = () => {
         timezoneTradingEnabled: data.timezoneTradingEnabled,
         autoTradingEnabled: data.autoTradingEnabled,
         aiTradingEnabled: data.aiTradingEnabled,
-      });
+      };
+      if (!shallowJsonEqual(prevAccountSnapshot.current, accountSnapshot)) {
+        prevAccountSnapshot.current = accountSnapshot;
+        setAccount(accountSnapshot);
+      }
 
       if (data.setupProgress) {
         setSetupProgress(data.setupProgress);
@@ -75,7 +97,10 @@ export const usePolling = () => {
         pnl: Number(p.profit || p.pnl || 0),
         openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
       }));
-      setOpenPositions(openPositions);
+      if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+        prevPositionsSnapshot.current = openPositions;
+        setOpenPositions(openPositions);
+      }
 
       if (data.lastSignalReason) {
         setLastSignalReason(data.lastSignalReason);
@@ -127,8 +152,11 @@ export const usePolling = () => {
     });
 
     socketRef.current.on('EA_HEARTBEAT_QUICK', (data: any) => {
+      // Price updates every tick — cheap, always allowed
       if (data?.price != null) setAccountPrice(Number(data.price));
-      if (data?.positions) {
+
+      // Position updates: only commit to state if positions array content changed
+      if (data?.positions && Array.isArray(data.positions)) {
         const openPositions = (data.positions || []).map((p: any) => ({
           ticket: String(p.ticket),
           symbol: p.symbol,
@@ -140,18 +168,43 @@ export const usePolling = () => {
           pnl: Number(p.profit || p.pnl || 0),
           openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
         }));
-        setOpenPositions(openPositions);
+        if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+          prevPositionsSnapshot.current = openPositions;
+          setOpenPositions(openPositions);
+        }
       }
-      if (data?.equity != null || data?.balance != null) {
-        setAccount(prev => ({
-          ...prev,
-          equity: data.equity != null ? Number(data.equity) : prev.equity,
-          balance: data.balance != null ? Number(data.balance) : prev.balance,
-          spread: data.spread != null ? Number(data.spread) : prev.spread,
-          eaConnected: data.ea_connected != null ? data.ea_connected : prev.eaConnected,
-          autoTradingEnabled: data.autoTradingEnabled != null ? data.autoTradingEnabled : prev.autoTradingEnabled,
-          aiTradingEnabled: data.aiTradingEnabled != null ? data.aiTradingEnabled : prev.aiTradingEnabled,
-        }));
+
+      // Account fields: batch equity/balance/spread — only set if any meaningful number changed
+      if (data?.equity != null || data?.balance != null || data?.spread != null || data?.autoTradingEnabled != null) {
+        setAccount(prev => {
+          const next: any = { ...prev };
+          let changed = false;
+          if (data.equity != null) {
+            const num = Number(data.equity);
+            if (Math.abs((prev.equity || 0) - num) >= 0.01) { next.equity = num; changed = true; }
+          }
+          if (data.balance != null) {
+            const num = Number(data.balance);
+            if (Math.abs((prev.balance || 0) - num) >= 0.01) { next.balance = num; changed = true; }
+          }
+          if (data.spread != null) {
+            const num = Number(data.spread);
+            if (Math.abs((prev.spread || 0) - num) >= 0.5) { next.spread = num; changed = true; }
+          }
+          if (data.ea_connected != null && prev.eaConnected !== !!data.ea_connected) {
+            next.eaConnected = !!data.ea_connected;
+            changed = true;
+          }
+          if (data.autoTradingEnabled != null && prev.autoTradingEnabled !== !!data.autoTradingEnabled) {
+            next.autoTradingEnabled = !!data.autoTradingEnabled;
+            changed = true;
+          }
+          if (data.aiTradingEnabled != null && prev.aiTradingEnabled !== !!data.aiTradingEnabled) {
+            next.aiTradingEnabled = !!data.aiTradingEnabled;
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
       }
     });
 
@@ -194,12 +247,18 @@ export const usePolling = () => {
 
   const refresh = useCallback(
     async (showLoading = false) => {
+      // Throttle: don't allow more than one refresh every 1200ms
+      const now = Date.now();
+      if (!showLoading && now - lastRefreshAt.current < 1200) {
+        return;
+      }
+      lastRefreshAt.current = now;
       if (showLoading) setLoading(true);
       try {
         const accountData = await getAccountData();
         if (!accountData) return;
 
-        setAccount({
+        const accountSnapshot = {
           ...accountData,
           eaConnected: accountData.ea_connected,
           eaSymbol: accountData.symbol || 'XAUUSD',
@@ -216,7 +275,11 @@ export const usePolling = () => {
           timezoneTradingEnabled: accountData.timezoneTradingEnabled,
           autoTradingEnabled: accountData.autoTradingEnabled,
           aiTradingEnabled: accountData.aiTradingEnabled,
-        });
+        };
+        if (!shallowJsonEqual(prevAccountSnapshot.current, accountSnapshot)) {
+          prevAccountSnapshot.current = accountSnapshot;
+          setAccount(accountSnapshot);
+        }
 
         if (accountData.setupProgress) {
           setSetupProgress(accountData.setupProgress);
@@ -240,7 +303,10 @@ export const usePolling = () => {
             ? new Date(Number(p.time) * 1000).toISOString()
             : new Date().toISOString(),
         }));
-        setOpenPositions(openPositions);
+        if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+          prevPositionsSnapshot.current = openPositions;
+          setOpenPositions(openPositions);
+        }
 
         const tzEnabled = botSettings.timezoneTradingEnabled !== false;
         const maxSpread = botSettings.maxSpreadPoints ?? 800;
@@ -289,11 +355,11 @@ export const usePolling = () => {
   );
 
   useEffect(() => {
+    // Initial load only — after that we rely 100% on realtime WebSocket
+    // EA_HEARTBEAT_QUICK + EA_HEARTBEAT events for perfect sync.
+    // No more stale 2/6-second HTTP polling gaps where MT5 equity moves
+    // before the app refreshes!
     refresh(true);
-    const interval = setInterval(() => {
-      refresh(false);
-    }, 2500);
-    return () => clearInterval(interval);
   }, [refresh]);
 
   const setTimezoneTrading = useCallback(

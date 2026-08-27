@@ -21,6 +21,7 @@ import { backtestEngine } from '../backtesting';
 import { monitoring } from '../monitoring';
 import { logger, aiLogger } from '../logging';
 import { liveTradeObserver } from '../analytics/tradeObserver';
+import { persistFile } from '../storage/cloudPersistence';
 
 const DATA_DIR = path.join(__dirname, '../../data/learning');
 const DATASET_PATH = path.join(DATA_DIR, 'continuous_dataset.json');
@@ -198,12 +199,14 @@ function loadState(): LearningState {
 function saveState(state: LearningState) {
   ensureDir();
   fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  setImmediate(() => persistFile(STATE_PATH).catch(() => {}));
 }
 
 function loadDataset(): any[] {
   ensureDir();
   if (!fs.existsSync(DATASET_PATH)) {
     fs.writeFileSync(DATASET_PATH, JSON.stringify([], null, 2));
+    setImmediate(() => persistFile(DATASET_PATH).catch(() => {}));
     return [];
   }
   try {
@@ -217,6 +220,7 @@ function loadDataset(): any[] {
 function saveDataset(samples: any[]) {
   ensureDir();
   fs.writeFileSync(DATASET_PATH, JSON.stringify(samples, null, 2));
+  setImmediate(() => persistFile(DATASET_PATH).catch(() => {}));
 }
 
 export function featureVector(features: any): number[] {
@@ -754,6 +758,7 @@ export class ContinuousLearningPipeline {
 
     // 1 + 2: store analysis
     fs.appendFileSync(ANALYSES_PATH, JSON.stringify(analysis) + '\n');
+    setImmediate(() => persistFile(ANALYSES_PATH).catch(() => {}));
 
     // 3: labeled dataset
     const dataset = loadDataset();

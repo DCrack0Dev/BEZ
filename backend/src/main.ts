@@ -37,7 +37,19 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Initialize Socket.IO with an explicit CORS allowlist (see middleware/corsConfig.ts)
-const io = new Server(server, { cors: { origin: corsOriginCheck, credentials: true } });
+// Enable per-message deflate + low threshold for small tick heartbeats too.
+const io = new Server(server, {
+  cors: { origin: corsOriginCheck, credentials: true },
+  perMessageDeflate: {
+    zlibDeflateOptions: { level: 3, memLevel: 7 },
+    zlibInflateOptions: { windowBits: 14 },
+    threshold: 128,
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+  },
+  pingInterval: 18000,
+  pingTimeout: 9000,
+});
 const tradingEngine = new TradingEngine(io);
 
 // Gate Socket.IO connections behind a valid access JWT, passed via handshake auth
@@ -107,8 +119,47 @@ app.post('/api/auth/refresh', (req, res) => {
 
 app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdateSchema), replayGuard, async (req, res) => {
   const start = Date.now();
+  const data = req.body;
+  // INSTANT RACE-FREE SYNC: broadcast hot fields DIRECTLY from EA payload BEFORE
+  // running processMT5Update (which can take 10-50ms running signal validators).
+  // This guarantees the mobile app sees the EA's latest equity/price/tick within
+  // one single network hop (EA → backend → app Socket) with no processing delay.
   try {
-    const data = req.body;
+    const quickPrice = Number(data.price ?? data.lastPrice ?? data.bid ?? 0);
+    const quickSpread = Number(data.spread ?? 0);
+    const quickBalance = Number(data.balance ?? data.account_balance ?? 0);
+    const quickEquity = Number(data.equity ?? data.account_equity ?? 0);
+    const quickPositions = Array.isArray(data.positions)
+      ? data.positions.map((p: any) => ({
+          ticket: String(p.ticket ?? p.id),
+          symbol: p.symbol,
+          type: p.type,
+          volume: Number(p.volume ?? p.lots ?? 0),
+          lots: Number(p.volume ?? p.lots ?? 0),
+          openPrice: Number(p.openPrice ?? p.price ?? 0),
+          price: Number(p.openPrice ?? p.price ?? 0),
+          profit: Number(p.profit ?? p.pnl ?? 0),
+          pnl: Number(p.profit ?? p.pnl ?? 0),
+          time: p.time ?? null,
+        }))
+      : undefined;
+    io.emit('EA_HEARTBEAT_QUICK', {
+      positions: quickPositions,
+      price: quickPrice || undefined,
+      spread: quickSpread || undefined,
+      balance: quickBalance || undefined,
+      equity: quickEquity || undefined,
+      currency: data.currency || 'USD',
+      lastUpdate: Date.now(),
+      ea_connected: true,
+      autoTradingEnabled: typeof data.autoTradingEnabled === 'boolean' ? data.autoTradingEnabled : undefined,
+      aiTradingEnabled: typeof data.aiTradingEnabled === 'boolean' ? data.aiTradingEnabled : undefined,
+      serverTs: Date.now(),
+      fastPath: true,
+    });
+  } catch (_emitErr) { /* no-op: engine emits full copy below */ }
+
+  try {
     await tradingEngine.processMT5Update(data);
     monitoring.trackBrokerResponse(true, Date.now() - start, 'EA_UPDATE');
     try {
@@ -126,7 +177,7 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
         aiTradingEnabled: state.aiTradingEnabled,
         serverTs: Date.now(),
       });
-    } catch (_emitErr) { /* no-op: engine already emits full EA_HEARTBEAT internally */ }
+    } catch (_emitErr2) { /* engine already emits full EA_HEARTBEAT internally */ }
     res.json({ success: true, commands: [] });
   } catch (error) {
     monitoring.trackBrokerResponse(false, Date.now() - start, 'EA_UPDATE_FAIL');
@@ -198,10 +249,25 @@ app.post('/api/ea/execution-report', requireEaKey, eaPollingLimiter, validateBod
 app.get('/api/account', requireAuth, (req, res) => res.json(tradingEngine.getAccountState()));
 app.get('/api/orders/closed', requireAuth, async (req, res) => {
   try {
-    const merged = await tradingEngine.getClosedTradesWithJournal();
+    const raw = String(req.query.filter || 'all').toLowerCase();
+    const range: 'today' | 'week' | 'month' | 'all' =
+      raw === 'today' || raw === 'week' || raw === 'month' ? raw : 'all';
+    const merged = await tradingEngine.getClosedTradesWithJournal(range);
     res.json(merged);
   } catch (e) {
-    res.json(tradingEngine.getClosedTrades());
+    const memory = tradingEngine.getClosedTrades();
+    const raw = String(req.query.filter || 'all').toLowerCase();
+    if (raw === 'today' || raw === 'week' || raw === 'month') {
+      const now = Date.now();
+      const ms =
+        raw === 'today' ? 24 * 3600 * 1000
+        : raw === 'week' ? 7 * 24 * 3600 * 1000
+        : 31 * 24 * 3600 * 1000;
+      const since = now - ms;
+      res.json(memory.filter((c: any) => Number(c.closeTime || since) >= since));
+      return;
+    }
+    res.json(memory);
   }
 });
 app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema), replayGuard, (req, res) => {
