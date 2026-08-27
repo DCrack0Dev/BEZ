@@ -172,7 +172,81 @@ export class TradingEngine {
       logger.warn('gateConfig.init failed (safe fallbacks active)', e);
     }
     await this.rehydrateOpenPositions();
+    await this.reconcileStaleOpenJournals().catch((e) => logger.warn('Stale journal reconcile skipped', e));
     logger.success('Trading Engine initialized with PostgreSQL');
+  }
+
+  /**
+   * Best-effort boot-time reconciler. If a Position is already marked closed
+   * but the matching AdvancedTradeJournal row is still OPEN (the common cause
+   * of "AI Lab still shows open after MT5 close"), close it now using the
+   * last written position profit so UI history is correct without waiting
+   * for the next trade close or manual edit.
+   */
+  private async reconcileStaleOpenJournals() {
+    try {
+      const stalePositions = await prisma.position.findMany({
+        where: { isOpen: false },
+        select: {
+          ticket: true,
+          symbol: true,
+          direction: true,
+          openPrice: true,
+          currentPrice: true,
+          profit: true,
+          closeTimestamp: true,
+          updatedAt: true,
+          lotSize: true,
+          sl: true,
+          tp: true,
+        },
+        take: 500,
+      });
+      if (!stalePositions.length) return;
+      const tickets = stalePositions.map((p) => String(p.ticket));
+      const openJournals = await prisma.advancedTradeJournal.findMany({
+        where: { ticket: { in: tickets }, outcome: 'OPEN' },
+        select: { ticket: true, entryPrice: true, closeTimestamp: true, entryTimestamp: true },
+      });
+      if (!openJournals.length) return;
+      const journalsByTicket = new Map(openJournals.map((j) => [String(j.ticket), j]));
+      const updates = stalePositions
+        .filter((p) => journalsByTicket.has(String(p.ticket)))
+        .map((p) => {
+          const profit = Number(p.profit ?? 0);
+          const profitPips = Number(p.currentPrice) && Number(p.openPrice)
+            ? (p.direction === 'BUY'
+              ? (Number(p.currentPrice) - Number(p.openPrice))
+              : (Number(p.openPrice) - Number(p.currentPrice))) / (this.accountState.pipSize || 0.01)
+            : 0;
+          const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' =
+            profit > 0.0001 ? 'WIN' : profit < -0.0001 ? 'LOSS' : 'BREAKEVEN';
+          const jEntry = journalsByTicket.get(String(p.ticket));
+          return prisma.advancedTradeJournal.updateMany({
+            where: { ticket: String(p.ticket), outcome: 'OPEN' },
+            data: {
+              outcome,
+              profitDollars: profit,
+              profitPips,
+              closeTimestamp: p.closeTimestamp || p.updatedAt || new Date(),
+              durationMinutes: p.closeTimestamp && jEntry?.entryTimestamp
+                ? Math.max(0, Math.round((new Date(p.closeTimestamp).getTime() - new Date(jEntry.entryTimestamp as any).getTime()) / 60000))
+                : undefined,
+              updatedAt: new Date(),
+              reasonForExit: 'CLOSED_BY_RECONCILE',
+            },
+          });
+        });
+      if (updates.length) {
+        const result = await prisma.$transaction(updates as any);
+        const changed = (result as any[]).reduce((sum: number, r: any) => sum + (r?.count || 0), 0);
+        if (changed > 0) {
+          logger.success(`[Reconcile] Auto-closed ${changed} stale OPEN journal rows (positions already closed)`);
+        }
+      }
+    } catch (e) {
+      logger.warn('Stale OPEN journal reconciler failed (non-fatal)', e);
+    }
   }
 
   /**
@@ -749,21 +823,38 @@ export class TradingEngine {
                 where: { ticket },
                 data: { isOpen: false, closeTimestamp: new Date() },
               });
-              if (finalizedDna) {
-                await journalManager.updateEntry(
-                  ticket,
-                  {
-                    outcome,
-                    profitPips,
-                    profitPercent: Number(finalizedDna.profitPercent) || 0,
-                    profitDollars: profit,
-                    closeTimestamp: new Date(),
-                    durationMinutes: finalizedDna.durationMinutes,
-                    reasonForExit: closedTrade?.reason || 'CLOSED_BY_BROKER',
-                  },
-                  tx
-                );
-              }
+              // Always close the AdvancedTradeJournal row — DNA may be missing
+              // for trades opened before DNA pipeline, manually closed, or older
+              // rows rehydrated after restart, but we still know outcome/profit
+              // from closedTrade payload or computed values. If no row exists,
+              // journalManager.updateEntry creates a fallback so the UI never
+              // sees "OPEN" after a real MT5 close.
+              await journalManager.updateEntry(
+                ticket,
+                {
+                  outcome,
+                  profitPips,
+                  profitPercent: Number(finalizedDna?.profitPercent) || 0,
+                  profitDollars: profit,
+                  closeTimestamp: new Date(),
+                  durationMinutes: finalizedDna?.durationMinutes,
+                  reasonForExit: closedTrade?.reason || 'CLOSED_BY_BROKER',
+                  ...({
+                    symbol: this.accountState.symbol,
+                    direction,
+                    entryPrice: finalizedDna?.entryPrice || closedTrade?.openPrice || openPx,
+                    executionPrice: closePrice,
+                    sl: finalizedDna?.stopLoss,
+                    tp: finalizedDna?.takeProfit,
+                    lotSize: lots,
+                    riskPercent: Number(finalizedDna?.riskPercent ?? 1),
+                    entryTimestamp: finalizedDna?.entryTimestamp,
+                    slippage: Number((closedTrade as any)?.slippagePips || 0),
+                    spreadAtEntry: Number(this.accountState.spread || 0),
+                  } as any),
+                },
+                tx
+              );
             }),
           'closeTradeTransaction'
         );

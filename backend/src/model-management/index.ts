@@ -48,6 +48,10 @@ let latestConfidence: number | null = null;
 let lastTrainingDataSource: string | null = null;
 let trainingKickoffPromise: Promise<any> | null = null;
 
+let pythonCheckCache: any = null;
+let pythonCheckCheckedAt = 0;
+const PYTHON_CHECK_CACHE_MS = 10 * 60 * 1000; // avoid re-running blocking import checks on every poll
+
 /** Prefer live cloud learning dataset; fall back to bundled example samples. */
 export function resolveTrainingDataPath(explicit?: string): string {
   if (explicit && fs.existsSync(explicit)) {
@@ -61,7 +65,7 @@ export function resolveTrainingDataPath(explicit?: string): string {
       if (stat.size > 8 * 1024 * 1024) {
         return EXAMPLE_DATASET;
       }
-      const raw = JSON.parse(fs.readFileSync(LEARNING_DATASET, 'utf-8'));
+      const raw = JSON.parse(fs.readFileSync(LEARNING_DATASET, 'utf8'));
       const samples = Array.isArray(raw) ? raw : raw?.samples;
       if (Array.isArray(samples) && samples.length >= 5) return LEARNING_DATASET;
     } catch {
@@ -69,6 +73,38 @@ export function resolveTrainingDataPath(explicit?: string): string {
     }
   }
   return EXAMPLE_DATASET;
+}
+
+const fsPromises = fs.promises;
+let trainingDataPathCache: string | null = null;
+let trainingDataPathCheckedAt = 0;
+const TRAINING_DATA_CACHE_MS = 30 * 1000;
+
+/** Non-blocking async counterpart — use this in HTTP handlers to avoid stalling the event loop. */
+export async function resolveTrainingDataPathAsync(explicit?: string): Promise<string> {
+  const now = Date.now();
+  if (!explicit && trainingDataPathCache && now - trainingDataPathCheckedAt < TRAINING_DATA_CACHE_MS) {
+    return trainingDataPathCache;
+  }
+  if (explicit) {
+    try {
+      const stat = await fsPromises.stat(explicit);
+      if (stat.size <= 8 * 1024 * 1024) return explicit;
+    } catch { /* fall through */ }
+  }
+  let result = EXAMPLE_DATASET;
+  try {
+    const stat = await fsPromises.stat(LEARNING_DATASET);
+    if (stat.size <= 8 * 1024 * 1024) {
+      const raw = await fsPromises.readFile(LEARNING_DATASET, 'utf8');
+      const parsed = JSON.parse(raw);
+      const samples = Array.isArray(parsed) ? parsed : parsed?.samples;
+      if (Array.isArray(samples) && samples.length >= 5) result = LEARNING_DATASET;
+    }
+  } catch { /* fall through to bundled example */ }
+  trainingDataPathCache = result;
+  trainingDataPathCheckedAt = now;
+  return result;
 }
 
 function runPython(args: string[], timeoutMs = 600000): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -236,6 +272,12 @@ export class ModelManager {
   /**
    * Cloud/mobile-safe entry: accept the job and run training in the background.
    * Clients poll GET /ai/training/status until COMPLETED/FAILED.
+   *
+   * This MUST never block the event loop or wait on any I/O before returning
+   * to the HTTP handler. Sync FS/Python work at enqueue-time was starving
+   * socket.io ping/pongs on Render, so the app would see every concurrent
+   * request (heartbeats, dashboard loads, orders) fail with a network error
+   * the moment Train on Cloud was tapped.
    */
   enqueueTraining(options: {
     dataPath?: string;
@@ -245,17 +287,33 @@ export class ModelManager {
     if (trainingStatus === 'RUNNING') {
       return { accepted: false, status: trainingStatus, error: 'Training already in progress' };
     }
-    const dataSource = resolveTrainingDataPath(options.dataPath);
-    trainingKickoffPromise = this.startTraining({ ...options, dataPath: dataSource }).catch((e) => {
-      trainingStatus = 'FAILED';
-      lastTrainingResult = { success: false, error: String(e), auto_promoted: false };
-      logger.error('Background training failed', e);
-      return lastTrainingResult;
+    trainingStatus = 'RUNNING';
+    currentTrainingVersion = options.version || 'pending';
+    const acceptedAt = Date.now();
+    setImmediate(() => {
+      resolveTrainingDataPathAsync(options.dataPath)
+        .then((dataSource) => {
+          lastTrainingDataSource = dataSource;
+          trainingKickoffPromise = this.startTraining({
+            ...options,
+            dataPath: dataSource,
+          }).catch((e) => {
+            trainingStatus = 'FAILED';
+            lastTrainingResult = { success: false, error: String(e), auto_promoted: false };
+            logger.error('Background training failed', e);
+            return lastTrainingResult;
+          });
+        })
+        .catch((e) => {
+          trainingStatus = 'FAILED';
+          lastTrainingResult = { success: false, error: `Resolve data path failed: ${e}`, auto_promoted: false };
+          logger.error('Background training data-path resolve failed', e);
+        });
     });
     return {
       accepted: true,
       status: 'RUNNING',
-      dataSource,
+      dataSource: lastTrainingDataSource || LEARNING_DATASET,
     };
   }
 
@@ -449,35 +507,77 @@ export class ModelManager {
   }
 
   /**
+   * Async non-blocking python check. Runs once, caches for 10 minutes. If stale
+   * cache is available, it returns stale immediately and refreshes in the
+   * background. Never blocks the event loop with sync spawnSync.
+   */
+  async getPythonCheckAsync(): Promise<{
+    available: boolean; version: string | null; depsOk: boolean; out: string | null;
+  }> {
+    const now = Date.now();
+    if (pythonCheckCache && now - pythonCheckCheckedAt < PYTHON_CHECK_CACHE_MS) {
+      return pythonCheckCache;
+    }
+    const cachedForReturn = pythonCheckCache;
+    const run = async () => {
+      const python = process.env.PYTHON_PATH || 'python3';
+      try {
+        const { stdout, stderr, code } = await runPython([
+          '-c',
+          'import sys, json\ntry:\n import numpy, torch\n print(json.dumps({"ok": True, "numpy": numpy.__version__, "torch": torch.__version__}))\nexcept Exception as e:\n print(json.dumps({"ok": False, "err": str(e)}))',
+        ], 15000);
+        let out: string | null = null;
+        let available = false;
+        let version: string | null = null;
+        let depsOk = false;
+        if (code === 0 && stdout) {
+          available = true;
+          version = (stdout || '').split('\n')[0] || null;
+          try {
+            const j = JSON.parse((stdout || '').trim().split(/\r?\n/).slice(-1)[0]);
+            depsOk = !!j.ok;
+            out = JSON.stringify(j);
+          } catch (_e) {
+            out = (stdout || stderr || '').slice(0, 1000);
+          }
+        } else {
+          out = (stderr || stdout || '').slice(0, 1000);
+        }
+        return { available, version, depsOk, out };
+      } catch (e: any) {
+        return { available: false, version: null, depsOk: false, out: String(e).slice(0, 1000) };
+      }
+    };
+    const refresh = run().then((r) => {
+      pythonCheckCache = r;
+      pythonCheckCheckedAt = Date.now();
+      return r;
+    }).catch(() => {
+      pythonCheckCache = cachedForReturn || { available: false, version: null, depsOk: false, out: null };
+      pythonCheckCheckedAt = Date.now();
+      return pythonCheckCache;
+    });
+    if (cachedForReturn) return cachedForReturn;
+    return refresh;
+  }
+
+  /**
    * Diagnostics helper used by the API to return clearer training/backtest failure reasons.
-   * Does not expose secrets. Runs a lightweight python import check when available.
+   * Does not expose secrets. Python check is cached and non-blocking; sync callers
+   * get the cached version and the check refreshes in the background when stale.
    */
   getDiagnostics() {
-    let pythonCheck = { available: false, version: null as string | null, depsOk: false, out: null as string | null };
-    try {
-      const python = process.env.PYTHON_PATH || 'python3';
-      const spawnArgs = [
-        '-c',
-        'import sys, json\n\ntry:\n import numpy, torch\n print(json.dumps({"ok": True, "numpy": numpy.__version__, "torch": torch.__version__}))\nexcept Exception as e:\n print(json.dumps({"ok": False, "err": str(e)}))',
-      ];
-      const r = spawnSync(python, spawnArgs, { encoding: 'utf8' });
-      if (r.status === 0 && r.stdout) {
-        pythonCheck.available = true;
-        pythonCheck.version = (r.stdout || '').split('\n')[0] || null;
-        try {
-          const j = JSON.parse((r.stdout || '').trim().split(/\r?\n/).slice(-1)[0]);
-          pythonCheck.depsOk = !!j.ok;
-          pythonCheck.out = JSON.stringify(j);
-        } catch (e) {
-          pythonCheck.out = (r.stdout || r.stderr || '').slice(0, 1000);
-        }
-      } else {
-        pythonCheck.available = false;
-        pythonCheck.out = (r.stderr || r.stdout || '').slice(0, 1000);
-      }
-    } catch (e) {
-      pythonCheck.out = String(e).slice(0, 1000);
+    // Kick off non-blocking refresh when stale so next poll has fresh data.
+    const now = Date.now();
+    if (!pythonCheckCache || now - pythonCheckCheckedAt >= PYTHON_CHECK_CACHE_MS) {
+      this.getPythonCheckAsync().catch(() => {});
     }
+    const pythonCheck = pythonCheckCache || {
+      available: false,
+      version: null as string | null,
+      depsOk: false,
+      out: null as string | null,
+    };
 
     return {
       trainingStatus,
@@ -494,8 +594,13 @@ export class ModelManager {
     let predictionHistory: any[] = [];
 
     try {
+      // Trade History in AI Lab is a closed-trade view. OPEN rows belong only
+      // to the live watch / continuous learning sections. This prevents a
+      // still-open journal row (or pre-close DNA-missing row) from leaking
+      // into the "Trade History" card as if it's already completed.
       tradeHistory = await prisma.advancedTradeJournal.findMany({
-        orderBy: { entryTimestamp: 'desc' },
+        where: { outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] } },
+        orderBy: [{ closeTimestamp: 'desc' }, { updatedAt: 'desc' }],
         take: 100,
       });
     } catch {

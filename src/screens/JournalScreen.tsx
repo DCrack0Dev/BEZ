@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, InteractionManager } from 'react-native';
 import { getClosedOrders } from '../api/orders';
 import SkeletonLoader from '../components/SkeletonLoader';
 import { COLORS } from '../theme/colors';
@@ -30,13 +30,13 @@ type JournalTrade = {
 const JournalScreen = () => {
   const { account } = useTradeStore();
   const [filter, setFilter] = useState<'today' | 'week' | 'month'>('today');
-  const [trades, setTrades] = useState<JournalTrade[]>([]);
+  const [rawResponse, setRawResponse] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [summary, setSummary] = useState({ total: 0, winRate: 0, pnl: 0 });
   const [flippedTradeId, setFlippedTradeId] = useState<string | null>(null);
   const fetchInFlight = useRef(false);
   const pendingFilter = useRef<'today' | 'week' | 'month' | null>(null);
   const lastFilterTap = useRef<number>(0);
+  const filterDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currency = account?.currency || 'USD';
   const symbol = currency === 'USD' ? '$' : (currency === 'ZAR' ? 'R' : (currency === 'GBP' ? '£' : (currency === 'EUR' ? '€' : currency)));
@@ -94,78 +94,90 @@ const JournalScreen = () => {
     return 'Market Exit';
   };
 
-  const fetchTrades = useCallback(async () => {
-    // Debounce + re-entry guard: prevent spam from rapid filter taps
+  const fetchTrades = useCallback(async (rangeOverride?: 'today' | 'week' | 'month') => {
+    const range = rangeOverride || filter;
     if (fetchInFlight.current) {
-      pendingFilter.current = filter;
+      pendingFilter.current = range;
       return;
     }
     fetchInFlight.current = true;
     setLoading(true);
     try {
-      const data = await getClosedOrders(filter);
-      
-      const formattedTrades: JournalTrade[] = data.map((t: any) => {
-        const oTime = toDate(t.openTime, t.open_time, t.openedAt, t.timeOpen, t.time_open, t.entryTime, t.date);
-        const cTime = toDate(t.closeTime, t.close_time, t.closedAt, t.timeClose, t.time_close, t.exitTime, t.date);
-        const durationStr = formatDuration(oTime, cTime);
-
-        const tradeType: 'BUY' | 'SELL' = String(t.type || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
-        const openPrice = toNumber(t.openPrice, t.priceOpen, t.entryPrice, t.open_price, t.price_open, t.price);
-        const closePrice = toNumber(t.closePrice, t.priceClose, t.exitPrice, t.close_price, t.price_close, t.close_price);
-        const sl = toNumber(t.sl, t.stopLoss, t.stop_loss, t.StopLoss);
-        const tp = toNumber(t.tp, t.takeProfit, t.take_profit, t.TakeProfit, t.tp1);
-        const lots = toNumber(t.lots, t.volume, t.lotSize, t.size, t.volume);
-        const pnl = toNumber(t.profit, t.pnl);
-
-        return {
-          id: String(t.id || t.ticket || Math.random()),
-          ticket: String(t.ticket || t.id || '-'),
-          symbol: t.symbol || account?.eaSymbol || 'N/A',
-          type: tradeType,
-          lots,
-          pnl,
-          openPrice,
-          closePrice,
-          sl,
-          tp,
-          closeReason: inferCloseReason(t, closePrice, sl, tp, tradeType),
-          openTime: oTime ? oTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
-          closeTime: cTime ? cTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
-          openDateTime: oTime ? oTime.toLocaleString() : '-',
-          closeDateTime: cTime ? cTime.toLocaleString() : '-',
-          duration: durationStr,
-        };
-      });
-      
-      setTrades(formattedTrades);
-      
-      const totalPnl = formattedTrades.reduce((acc: number, curr: any) => acc + curr.pnl, 0);
-      const wins = formattedTrades.filter((t: any) => t.pnl > 0).length;
-      
-      setSummary({
-        total: formattedTrades.length,
-        winRate: formattedTrades.length > 0 ? Math.round((wins / formattedTrades.length) * 100) : 0,
-        pnl: totalPnl
-      });
+      const data = await getClosedOrders(range);
+      setRawResponse(data);
     } catch (error) {
       console.error('Failed to fetch trades');
     } finally {
       fetchInFlight.current = false;
       setLoading(false);
-      // Re-run if filter changed while we were fetching
-      if (pendingFilter.current && pendingFilter.current !== filter) {
+      if (pendingFilter.current && pendingFilter.current !== range) {
+        const next = pendingFilter.current;
         pendingFilter.current = null;
-        setImmediate(() => fetchTrades());
+        InteractionManager.runAfterInteractions(() => fetchTrades(next));
       } else {
         pendingFilter.current = null;
       }
     }
-  }, [filter, account?.eaSymbol]);
+  }, [filter]);
 
   useEffect(() => {
-    fetchTrades();
-  }, [fetchTrades]);
+    fetchTrades(filter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter]);
+
+  const { trades, summary } = useMemo(() => {
+    const eaSymbol = account?.eaSymbol || 'XAUUSD';
+    const formatted: JournalTrade[] = rawResponse.map((t: any) => {
+      const oTime = toDate(t.openTime, t.open_time, t.openedAt, t.timeOpen, t.time_open, t.entryTime, t.date);
+      const cTime = toDate(t.closeTime, t.close_time, t.closedAt, t.timeClose, t.time_close, t.exitTime, t.date);
+      const durationStr = formatDuration(oTime, cTime);
+      const tradeType: 'BUY' | 'SELL' = String(t.type || t.direction || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+      const openPrice = toNumber(t.openPrice, t.priceOpen, t.entryPrice, t.open_price, t.price_open, t.price);
+      const closePrice = toNumber(t.closePrice, t.priceClose, t.exitPrice, t.close_price, t.price_close);
+      const sl = toNumber(t.sl, t.stopLoss, t.stop_loss, t.StopLoss);
+      const tp = toNumber(t.tp, t.takeProfit, t.take_profit, t.TakeProfit, t.tp1);
+      const lots = toNumber(t.lots, t.volume, t.lotSize, t.size);
+      const pnl = toNumber(t.profitDollars, t.profit, t.pnl, t.pnlFinal);
+      return {
+        id: String(t.id || t.ticket || String(Math.random())),
+        ticket: String(t.ticket || t.id || '-'),
+        symbol: t.symbol || eaSymbol,
+        type: tradeType,
+        lots,
+        pnl,
+        openPrice,
+        closePrice,
+        sl,
+        tp,
+        closeReason: inferCloseReason(t, closePrice, sl, tp, tradeType),
+        openTime: oTime ? oTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+        closeTime: cTime ? cTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+        openDateTime: oTime ? oTime.toLocaleString() : '-',
+        closeDateTime: cTime ? cTime.toLocaleString() : '-',
+        duration: durationStr,
+      };
+    });
+    const totalPnl = formatted.reduce((acc: number, curr) => acc + curr.pnl, 0);
+    const wins = formatted.filter((t) => t.pnl > 0.00001).length;
+    return {
+      trades: formatted,
+      summary: {
+        total: formatted.length,
+        winRate: formatted.length > 0 ? Math.round((wins / formatted.length) * 100) : 0,
+        pnl: totalPnl,
+      },
+    };
+  }, [rawResponse, account?.eaSymbol]);
+
+  const changeFilter = (next: 'today' | 'week' | 'month') => {
+    const now = Date.now();
+    if (now - lastFilterTap.current < 250) return;
+    lastFilterTap.current = now;
+    if (filterDebounceTimer.current) clearTimeout(filterDebounceTimer.current);
+    filterDebounceTimer.current = setTimeout(() => {
+      setFilter(next);
+    }, 120);
+  };
 
   return (
     <View style={styles.container}>
@@ -174,7 +186,9 @@ const JournalScreen = () => {
           <TouchableOpacity
             key={f}
             style={[styles.filterButton, filter === f && styles.filterButtonActive]}
-            onPress={() => setFilter(f)}
+            onPress={() => changeFilter(f)}
+            disabled={loading}
+            activeOpacity={0.8}
           >
             <Text style={[styles.filterText, filter === f && styles.filterTextActive]}>
               {f.charAt(0).toUpperCase() + f.slice(1)}
@@ -185,7 +199,7 @@ const JournalScreen = () => {
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={fetchTrades} tintColor={COLORS.primary} />}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={() => fetchTrades()} tintColor={COLORS.primary} />}
       >
         {loading && trades.length === 0 ? (
           <View>

@@ -351,8 +351,16 @@ app.get('/api/ai/dashboard', requireAuth, async (req, res) => {
 app.get('/api/ai/diagnostics', requireAuth, async (_req, res) => {
   try {
     const { modelManager } = await import('./model-management');
-    // modelManager.getDiagnostics returns training status, last result (trimmed), data source and pythonCheck
-    res.json({ success: true, data: modelManager.getDiagnostics() });
+    // modelManager.getDiagnostics never blocks (returns cached sync copy). If
+    // the python check is stale, getDiagnostics fires a non-blocking refresh.
+    const sync = modelManager.getDiagnostics();
+    // Also await the current async python check so the very first poll still
+    // gets a populated result, but never for more than 2s (fall back to sync).
+    const withPython = await Promise.race([
+      modelManager.getPythonCheckAsync().then((pythonCheck) => ({ ...sync, pythonCheck })),
+      new Promise<typeof sync>((resolve) => setTimeout(() => resolve(sync), 2000)),
+    ]);
+    res.json({ success: true, data: withPython });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }

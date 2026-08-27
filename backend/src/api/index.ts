@@ -28,6 +28,34 @@ router.get('/test', (req, res) => {
   res.status(200).send('OK');
 });
 
+// Root health check — keeps Render / Reverse Proxy probes from logging 404,
+// and prevents "warning HTTP 404 /" spamming when the app opens AI Lab on
+// a fresh base URL navigation.
+router.get('/', (_req, res) => {
+  res.status(200).json({
+    success: true,
+    service: 'LiquiBot Backend',
+    status: 'UP',
+    version: '4.0.0',
+    time: new Date().toISOString(),
+  });
+});
+router.get('/health', (_req, res) => {
+  res.status(200).json({
+    success: true,
+    service: 'LiquiBot Backend',
+    status: 'UP',
+    version: '4.0.0',
+    time: new Date().toISOString(),
+  });
+});
+router.head('/', (_req, res) => {
+  res.status(200).end();
+});
+router.head('/health', (_req, res) => {
+  res.status(200).end();
+});
+
 // --- Advanced Trade Journal API ---
 router.get('/journal', async (req, res) => {
   try {
