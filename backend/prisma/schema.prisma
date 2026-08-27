@@ -659,3 +659,72 @@ model ModelArtifact {
   @@index([type])
   @@index([version])
 }
+
+// ============================================================
+//  HUMAN-IN-THE-LOOP: Gate / Requirement Overrides
+//  Live source of truth for thresholds the signal validator uses.
+//  Only modified when user EXPLICITLY approves a proposal —
+//  AI NEVER writes to this table directly.
+// ============================================================
+model GateOverride {
+  id            String   @id @default(cuid())
+  gateKey       String   @unique // e.g. "hardGateThreshold", "softThreshold", "rsi.min", "adxTrend.min", "spread.maxPips", "session.enabled", "rr.min"
+  gateType      String   // "HARD_GATE" | "SOFT_REQ" | "FILTER" | "THRESHOLD" | "ENABLE"
+  label         String   // human friendly name (e.g. "Soft Requirement Threshold")
+  currentValue  Decimal  // current effective numeric value; booleans stored as 0/1
+  defaultValue  Decimal  // original value from tradingConfig.ts (for rollback)
+  enabled       Boolean  @default(true) // when false, ignore this row & fall back to default
+  modifiedBy    String?  // "USER" | "APPROVED_AI_PROPOSAL"
+  modifiedAt    DateTime @updatedAt
+  note          String?  // free text reason for override (shown in UI)
+  proposalId    String?  // optional FK back to the proposal that originated this change
+
+  createdAt DateTime @default(now())
+}
+
+// ============================================================
+//  AI / Model PROPOSED Gate Adjustments
+//  EVERY proposed gate change MUST sit here as PENDING_APPROVAL.
+//  No proposal is ever applied unless the user hits APPROVE via
+//  the API — that action writes a GateOverride row and flips
+//  status → APPLIED. Rejected proposals are status=REJECTED.
+// ============================================================
+model ModelGateProposal {
+  id                  String   @id @default(cuid())
+
+  // --- Classification ---
+  targetGateKey       String   // matches GateOverride.gateKey
+  targetGateType      String   // HARD_GATE | SOFT_REQ | ...
+  proposedAction      String   // "ADD" | "REMOVE" | "MODIFY" | "ENABLE" | "DISABLE"
+
+  // --- Values ---
+  currentValue        Decimal  // what it was at proposal time
+  proposedValue       Decimal  // what we're suggesting to change it to
+
+  // --- Why (Explainability + CAUTION) ---
+  rationale           String   // plain-English explanation: what triggered, what data supports, WHY cautious/small step
+  expectedImpact      String   // "Expected: ~+3% win rate / ~-2% avg loss" or similar
+  confidence          Decimal  // 0..1 — model confidence that this change improves things (very cautious required to even propose)
+  sampleSize          Int      // how many closed trades / how many backtest samples was this based on
+
+  // --- Safety & Auditing ---
+  riskLevel           String   // "LOW" | "MEDIUM" | "HIGH" — user must explicitly approve HARD removals etc
+  requiresPermission  Boolean  @default(true) // ALWAYS true (enforced on write)
+  autoApplyOnApproval Boolean  @default(true) // create GateOverride row immediately on user approval
+
+  // --- Approval Status Flow ---
+  status              String   // "PENDING_APPROVAL" | "APPLIED" | "REJECTED" | "SUPERSEDED" | "EXPIRED"
+  reviewedBy          String?  // USER or ADMIN who decided
+  reviewedAt          DateTime?
+  reviewComment       String?  // user supplied note when approving/rejecting
+
+  appliedGateOverrideId String? // only populated when status=APPLIED
+
+  trainingRunId       String?  // (optional) TrainingRun FK that produced this proposal
+  modelVersion        String?  // (optional) model version that suggested it
+  symbol              String?  // (optional) symbol the proposal was generated for / applies to
+  timeframe           String?  // (optional) timeframe
+
+  createdAt           DateTime @default(now())
+  expiresAt           DateTime // proposal expires after some safety window (e.g. 7 days) so stale proposals can't be approved
+}

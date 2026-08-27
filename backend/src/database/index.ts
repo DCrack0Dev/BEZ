@@ -654,4 +654,186 @@ export async function saveEnsemblePrediction(data: {
   }
 }
 
+// --- GATE OVERRIDES (approved overrides only!) ---
+export async function getAllGateOverrides(): Promise<any[]> {
+  try {
+    const client: any = prisma;
+    return await client.gateOverride.findMany({ where: { enabled: true } });
+  } catch (e) {
+    logger.warn('GateOverride table not ready yet (pending migration?) — using defaults only', e);
+    return [];
+  }
+}
+
+export async function upsertGateOverride(data: {
+  gateKey: string;
+  gateType: string;
+  label: string;
+  currentValue: number;
+  defaultValue: number;
+  modifiedBy: 'USER' | 'APPROVED_AI_PROPOSAL';
+  note?: string;
+  proposalId?: string;
+  enabled?: boolean;
+}) {
+  try {
+    const client: any = prisma;
+    const dec = (n: number) => new Decimal(Number(n).toString());
+    return await client.gateOverride.upsert({
+      where: { gateKey: data.gateKey },
+      create: {
+        gateKey: data.gateKey,
+        gateType: data.gateType,
+        label: data.label,
+        currentValue: dec(data.currentValue),
+        defaultValue: dec(data.defaultValue),
+        modifiedBy: data.modifiedBy,
+        note: data.note || null,
+        proposalId: data.proposalId || null,
+        enabled: data.enabled !== false,
+      },
+      update: {
+        gateType: data.gateType,
+        label: data.label,
+        currentValue: dec(data.currentValue),
+        modifiedBy: data.modifiedBy,
+        note: data.note || undefined,
+        proposalId: data.proposalId || undefined,
+        enabled: data.enabled !== false,
+      },
+    });
+  } catch (e) {
+    logger.error('Failed to write GateOverride', e);
+    return null;
+  }
+}
+
+// --- AI PROPOSALS (every proposed gate change; PENDING_APPROVAL until user clicks!) ---
+export async function createGateProposal(data: {
+  targetGateKey: string;
+  targetGateType: string;
+  proposedAction: 'ADD' | 'REMOVE' | 'MODIFY' | 'ENABLE' | 'DISABLE';
+  currentValue: number;
+  proposedValue: number;
+  rationale: string;
+  expectedImpact: string;
+  confidence: number;
+  sampleSize: number;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  symbol?: string;
+  timeframe?: string;
+  modelVersion?: string;
+  expiresInDays?: number;
+}): Promise<any> {
+  try {
+    const client: any = prisma;
+    const dec = (n: number) => new Decimal(Number(n).toString());
+    const expiresAt = new Date(Date.now() + (data.expiresInDays ?? 7) * 24 * 3600 * 1000);
+    return await client.modelGateProposal.create({
+      data: {
+        targetGateKey: data.targetGateKey,
+        targetGateType: data.targetGateType,
+        proposedAction: data.proposedAction,
+        currentValue: dec(data.currentValue),
+        proposedValue: dec(data.proposedValue),
+        rationale: data.rationale,
+        expectedImpact: data.expectedImpact,
+        confidence: dec(Math.max(0, Math.min(1, data.confidence))),
+        sampleSize: data.sampleSize,
+        riskLevel: data.riskLevel,
+        requiresPermission: true, // HARD ENFORCED: ALWAYS require user permission
+        autoApplyOnApproval: true,
+        status: 'PENDING_APPROVAL',
+        symbol: data.symbol || null,
+        timeframe: data.timeframe || null,
+        modelVersion: data.modelVersion || null,
+        expiresAt,
+      },
+    });
+  } catch (e) {
+    logger.error('Failed to create GateProposal (NEVER auto-applies; safe)', e);
+    return null;
+  }
+}
+
+export async function listGateProposals(opts: { status?: string; limit?: number } = {}): Promise<any[]> {
+  try {
+    const client: any = prisma;
+    const where: any = {};
+    if (opts.status) where.status = opts.status;
+    return await client.modelGateProposal.findMany({
+      where,
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+      take: opts.limit ?? 100,
+    });
+  } catch (e) {
+    logger.warn('ModelGateProposal table not ready (migration?)');
+    return [];
+  }
+}
+
+export async function approveProposal(id: string, reviewedBy: string = 'USER', comment?: string): Promise<{ proposal: any; override: any } | null> {
+  try {
+    const client: any = prisma;
+    const proposal = await client.modelGateProposal.findUnique({ where: { id } });
+    if (!proposal) return null;
+    if (proposal.status !== 'PENDING_APPROVAL') throw new Error(`Proposal ${id} is not pending (status=${proposal.status})`);
+    if (proposal.requiresPermission !== true) throw new Error('Proposal missing requiresPermission=true (safety violation)');
+
+    const proposedVal = Number(proposal.proposedValue);
+    let gateType = proposal.targetGateType || 'THRESHOLD';
+    if (proposal.proposedAction === 'REMOVE' || proposal.proposedAction === 'DISABLE') {
+      gateType = proposal.proposedAction === 'REMOVE' ? 'FILTER' : gateType;
+    }
+    const override = proposal.autoApplyOnApproval
+      ? await upsertGateOverride({
+          gateKey: proposal.targetGateKey,
+          gateType,
+          label: `${proposal.targetGateKey} (approved proposal ${id.slice(0, 7)})`,
+          currentValue: proposedVal,
+          defaultValue: Number(proposal.currentValue),
+          modifiedBy: 'APPROVED_AI_PROPOSAL',
+          note: comment || `Approved proposal ${id} — ${proposal.rationale?.slice(0, 100) || ''}`,
+          proposalId: id,
+          enabled: !(proposal.proposedAction === 'DISABLE' || proposal.proposedAction === 'REMOVE'),
+        })
+      : null;
+
+    const updated = await client.modelGateProposal.update({
+      where: { id },
+      data: {
+        status: 'APPLIED',
+        reviewedBy,
+        reviewedAt: new Date(),
+        reviewComment: comment || null,
+        appliedGateOverrideId: override?.id || null,
+      },
+    });
+    return { proposal: updated, override };
+  } catch (e) {
+    logger.error(`Failed to approve proposal ${id}`, e);
+    return null;
+  }
+}
+
+export async function rejectProposal(id: string, reviewedBy: string = 'USER', comment?: string): Promise<any | null> {
+  try {
+    const client: any = prisma;
+    const proposal = await client.modelGateProposal.findUnique({ where: { id } });
+    if (!proposal) return null;
+    return await client.modelGateProposal.update({
+      where: { id },
+      data: {
+        status: 'REJECTED',
+        reviewedBy,
+        reviewedAt: new Date(),
+        reviewComment: comment || null,
+      },
+    });
+  } catch (e) {
+    logger.error(`Failed to reject proposal ${id}`, e);
+    return null;
+  }
+}
+
 export { prisma };

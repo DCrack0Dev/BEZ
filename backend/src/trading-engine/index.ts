@@ -46,6 +46,8 @@ import { monitoring } from '../monitoring';
 import { modelManager } from '../model-management';
 import { confidenceEngine } from '../confidence-engine';
 import { TradingPrediction } from '../ai/tradingModel';
+import { gateConfig } from '../gate-config/gateConfig';
+import { proposalEngine } from '../gate-config/proposalEngine';
 
 export interface AccountState {
   balance: number;
@@ -162,6 +164,11 @@ export class TradingEngine {
 
   async init() {
     await initDb();
+    try {
+      await gateConfig.init();
+    } catch (e) {
+      logger.warn('gateConfig.init failed (safe fallbacks active)', e);
+    }
     await this.rehydrateOpenPositions();
     logger.success('Trading Engine initialized with PostgreSQL');
   }
@@ -839,6 +846,48 @@ export class TradingEngine {
           closeTime: closedTrade?.closeTime || Date.now(),
         });
         if (this.closedTrades.length > 200) this.closedTrades.pop();
+
+        // --- HUMAN-IN-THE-LOOP: proposal engine generates CAUTIOUS suggestions. ---
+        // NEVER auto-applies; every proposed gate/requirement change ALWAYS has
+        // status=PENDING_APPROVAL and waits for the user to click APPROVE via API.
+        try {
+          const lastN = this.closedTrades.slice(0, 100);
+          const wins = lastN.filter(t => Number(t.profit || t.pnl || 0) > 0);
+          const losses = lastN.filter(t => Number(t.profit || t.pnl || 0) < 0);
+          const winRate = lastN.length > 0 ? wins.length / lastN.length : 0;
+          const grossWins = wins.reduce((s, t) => s + Math.max(0, Number(t.profit || t.pnl || 0)), 0);
+          const grossLosses = Math.max(0.01, Math.abs(losses.reduce((s, t) => s + Math.min(0, Number(t.profit || t.pnl || 0)), 0)));
+          const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 5 : 0);
+          const avgPnl = lastN.length > 0 ? lastN.reduce((a, t) => a + Number(t.profit || t.pnl || 0), 0) / lastN.length : 0;
+          const balance = Number(this.accountState.balance || 0);
+          const equity = Number(this.accountState.equity || balance);
+          const avgDrawdownPct = balance > 0 ? Math.max(0, (balance - equity) / balance) * 100 : 0;
+
+          const dirStats: any = { BUY: { trades: 0, wins: 0 }, SELL: { trades: 0, wins: 0 } };
+          for (const t of lastN) {
+            const d = String(t.type || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+            dirStats[d].trades += 1;
+            if (Number(t.profit || t.pnl || 0) > 0) dirStats[d].wins += 1;
+          }
+          const perDirection = {
+            BUY: { trades: dirStats.BUY.trades, winRate: dirStats.BUY.trades > 0 ? dirStats.BUY.wins / dirStats.BUY.trades : 0 },
+            SELL: { trades: dirStats.SELL.trades, winRate: dirStats.SELL.trades > 0 ? dirStats.SELL.wins / dirStats.SELL.trades : 0 },
+          };
+
+          const perfSample = {
+            totalTrades: lastN.length,
+            winRate,
+            avgPnl,
+            profitFactor,
+            avgDrawdownPct,
+            perDirection,
+            signalCounts: undefined,
+          };
+          await proposalEngine.maybeGenerateProposals(perfSample);
+        } catch (pe) {
+          monitoring.trackError(`ProposalEngine check failed (safe; no gates changed): ${pe}`, 'ERROR');
+        }
+
         delete this.positionStates[ticket];
         this.io.emit('TRADE_CLOSED', {
           ticket,

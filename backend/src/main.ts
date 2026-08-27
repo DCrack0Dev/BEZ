@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import { logger } from './logging';
 import { TradingEngine } from './trading-engine';
 import { attachAPI } from './api';
-import { prisma, getCandles } from './database';
+import { prisma, getCandles, listGateProposals, approveProposal, rejectProposal } from './database';
 import { monitoring } from './monitoring';
 import { continuousLearning } from './continuous-learning';
 import {
@@ -23,6 +23,7 @@ import { validateBody, eaUpdateSchema, orderSchema, botConfigSchema, eaValidateS
 import { replayGuard } from './middleware/replayGuard';
 import { corsOriginCheck } from './middleware/corsConfig';
 import { restoreFromDbIfCold, snapshotAllToDb, persistTrainingArtifacts } from './storage/cloudPersistence';
+import { gateConfig, GATE_DEFAULTS } from './gate-config/gateConfig';
 
 dotenv.config();
 
@@ -404,6 +405,90 @@ app.get('/api/candles', requireAuth, async (req, res) => {
   } catch (error) {
     logger.error('Failed to fetch candles', error);
     res.status(500).json({ success: false, error: 'Failed to fetch candles' });
+  }
+});
+
+// ============================================================
+//  HUMAN-IN-THE-LOOP AI: Proposed Gate Adjustments API
+//  Every proposed ADD / REMOVE / MODIFY is ALWAYS
+//  PENDING_APPROVAL until the user calls /approve below.
+// ============================================================
+app.get('/api/ai/gates', requireAuth, async (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: gateConfig.allEntries(),
+      _defaults: Object.fromEntries(
+        Object.entries(GATE_DEFAULTS).map(([k, v]) => [k, { defaultValue: v.defaultValue, type: v.type, label: v.label, min: v.min, max: v.max }])
+      ),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+app.post('/api/ai/gates/:key', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const key = String(req.params.key);
+    const body: any = req.body || {};
+    const desired = body.value;
+    const comment = body.comment || undefined;
+    if (desired === undefined || desired === null) {
+      return res.status(400).json({ success: false, error: 'Missing required `value`' });
+    }
+    const ok = await gateConfig.setManualOverride(key, Number(desired), 'USER', comment);
+    if (!ok) return res.status(404).json({ success: false, error: `Unknown gate key: ${key}` });
+    res.json({ success: true, data: gateConfig.allEntries() });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+app.get('/api/ai/proposals', requireAuth, async (req, res) => {
+  try {
+    const status = req.query.status as string | undefined;
+    const data = await listGateProposals({ status });
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// --- USER EXPLICITLY APPROVES A PROPOSAL (the ONLY place where a proposal becomes effective!) ---
+app.post('/api/ai/proposals/:id/approve', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const body: any = req.body || {};
+    const reviewer = body.reviewedBy || 'USER';
+    const comment = body.comment || undefined;
+    const result = await approveProposal(id, reviewer, comment);
+    if (!result) return res.status(404).json({ success: false, error: `Proposal not found or not applicable` });
+    if (result.override) {
+      // Push the newly applied override into the running GateConfig singleton
+      // so the next signal immediately uses it (no restart needed).
+      gateConfig._applyApprovedProposal(
+        String((result.proposal as any).targetGateKey),
+        Number((result.proposal as any).proposedValue),
+        comment,
+      );
+    }
+    res.json({ success: true, data: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+app.post('/api/ai/proposals/:id/reject', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const body: any = req.body || {};
+    const reviewer = body.reviewedBy || 'USER';
+    const comment = body.comment || undefined;
+    const result = await rejectProposal(id, reviewer, comment);
+    if (!result) return res.status(404).json({ success: false, error: `Proposal not found` });
+    res.json({ success: true, data: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
   }
 });
 

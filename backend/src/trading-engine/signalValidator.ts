@@ -2,6 +2,7 @@ import { CONFIG } from '../config/tradingConfig';
 import { calculateRisk, RiskParams } from '../risk-manager/riskEngine';
 import { TradeSignal, FeatureSet, Candle, MT5Payload, MarketRegime } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { gateConfig } from '../gate-config/gateConfig';
 
 export const calculateATR = (candles: Candle[], period: number = 14): number => {
   if (candles.length < period + 1) return 0;
@@ -205,22 +206,25 @@ export const validateSignal = (
   })();
   const timezoneTradingEnabled = payload.timezoneTradingEnabled !== false;
   const currentSession = getCurrentSession();
-  const sessionOk = true; // USER REQUEST: removed session filter entirely; allow any session
+  const sessionFilterEnabled = gateConfig.getBool('filter.session.enabled') && timezoneTradingEnabled;
+  const sessionOk = !sessionFilterEnabled || !CONFIG.blockedSessions.includes(currentSession);
   const marginOk = payload.marginLevel === undefined || payload.marginLevel >= CONFIG.minMarginLevelPercent;
   const dailyLossOk = payload.dailyLossPercent === undefined || payload.dailyLossPercent < CONFIG.maxDailyLossPercent;
+
+  const spreadFilterEnabled = gateConfig.getBool('filter.spread.enabled');
 
   interface GateResult { name: string; passed: boolean; }
   const hardGates: GateResult[] = [
     { name: 'drawdown', passed: drawdown <= CONFIG.maxDrawdownPercent },
     { name: 'maxOpenTrades', passed: openPositionsCount < maxOpen },
-    { name: 'spread', passed: true }, // USER REQUEST: removed spread limit entirely
+    { name: 'spread', passed: spreadFilterEnabled ? (isXAUUSD ? spreadXAUUSDOk : spreadForexOk) : true },
     { name: 'session', passed: sessionOk },
     { name: 'marginLevel', passed: marginOk },
     { name: 'dailyLoss', passed: dailyLossOk },
     { name: 'newsFilter', passed: !newsFilterActive },
   ];
   const hardGatesPassed = hardGates.filter(g => g.passed).length;
-  const hardGateThreshold = 3; // USER REQUEST: much lower threshold (only critical gates: drawdown/maxOpen/margin/dailyLoss count)
+  const hardGateThreshold = Math.max(1, Math.min(7, Math.round(gateConfig.getNum('hardGateThreshold'))));
 
   if (!features) {
     return null;
@@ -252,20 +256,52 @@ export const validateSignal = (
   const fvgDetails = features.fvgDetails;
   const obDetails = features.orderBlockDetails;
 
-  let fvgProximityOk = true; // USER REQUEST: not strict — price doesn't have to be exactly at FVG
-  let obProximityOk = true;  // USER REQUEST: not strict — price doesn't have to be exactly at OB
+  const requireSmcProximity = gateConfig.getBool('structure.smcProximity.enabled');
+  let fvgProximityOk = !requireSmcProximity;
+  let obProximityOk = !requireSmcProximity;
+  if (requireSmcProximity) {
+    if (fvgDetails && fvgDetails.type !== 'NONE') {
+      const midpoint = (fvgDetails.startPrice + fvgDetails.endPrice) / 2;
+      const gapSize = Math.abs(fvgDetails.endPrice - fvgDetails.startPrice);
+      const tolerance = Math.max(gapSize, pipSize * 5);
+      fvgProximityOk = Math.abs(price - midpoint) <= tolerance;
+    } else {
+      fvgProximityOk = true; // no FVG present → treat as passed
+    }
+    if (obDetails && obDetails.type !== 'NONE') {
+      const obTop = obDetails.top;
+      const obBottom = obDetails.bottom;
+      const isWithinOB = price >= Math.min(obTop, obBottom) && price <= Math.max(obTop, obBottom);
+      const obSize = Math.abs(obTop - obBottom);
+      const tolerance = Math.max(obSize, pipSize * 3);
+      const isNearOB = price >= Math.min(obTop, obBottom) - tolerance && price <= Math.max(obTop, obBottom) + tolerance;
+      obProximityOk = isWithinOB || isNearOB;
+    } else {
+      obProximityOk = true;
+    }
+  }
 
-  const bullishSMC = hasBullishOB || hasBullishFVG; // USER REQUEST: proximity no longer required
-  const bearishSMC = hasBearishOB || hasBearishFVG; // USER REQUEST: proximity no longer required
+  const bullishSMC = requireSmcProximity
+    ? ((hasBullishOB && obProximityOk) || (hasBullishFVG && fvgProximityOk))
+    : (hasBullishOB || hasBullishFVG);
+  const bearishSMC = requireSmcProximity
+    ? ((hasBearishOB && obProximityOk) || (hasBearishFVG && fvgProximityOk))
+    : (hasBearishOB || hasBearishFVG);
 
   const isBullish = currentCandle.close > currentCandle.open;
   const isBearish = currentCandle.close < currentCandle.open;
   const avgVolume = candles.length >= 20
     ? candles.slice(-20).reduce((acc, c) => acc + c.volume, 0) / 20
     : currentCandle.volume;
-  const isVolumeSpike = currentCandle.volume >= avgVolume * Math.max(1, CONFIG.volumeMultiplier * 0.5); // USER REQUEST: relaxed from strict multiplier
-  const rsiOk = features.rsiStrength >= 0.15 && features.rsiStrength <= 0.92; // USER REQUEST: less strict RSI
-  const bbOk = true; // USER REQUEST: no longer strict BB filter
+  const volMultiplier = Math.max(0.1, 1 + gateConfig.getNum('filter.volume.multiplier'));
+  const isVolumeSpike = currentCandle.volume >= avgVolume * volMultiplier;
+  const rsiMin = gateConfig.getNum('filter.rsi.min');
+  const rsiMax = gateConfig.getNum('filter.rsi.max');
+  const rsiOk = features.rsiStrength >= rsiMin && features.rsiStrength <= rsiMax;
+  const bbEnabled = gateConfig.getBool('filter.bb.enabled');
+  const bbOk = bbEnabled
+    ? (features.bbPosition === undefined || (features.bbPosition >= 0.05 && features.bbPosition <= 0.95))
+    : true;
   const sweepBullish = features.liquiditySweep === 'BULLISH';
   const sweepBearish = features.liquiditySweep === 'BEARISH';
 
@@ -276,6 +312,11 @@ export const validateSignal = (
 
   const buyStructureOk = isBullishStructure || sweepBullish;
   const sellStructureOk = isBearishStructure || sweepBearish;
+  const winrateEnabled = gateConfig.getBool('filter.winrateSimilar.enabled');
+  const adxMin = gateConfig.getNum('filter.adxTrend.min');
+  const structureMinStrength = gateConfig.getNum('structure.minStrength');
+  const trendMinStrength = gateConfig.getNum('trend.minStrength');
+  const similarWinrate = (features.similarSetupWinRate ?? 0.5);
 
   const buySoftReqs: GateResult[] = [
     { name: 'bullishSMC', passed: bullishSMC },
@@ -287,9 +328,9 @@ export const validateSignal = (
     { name: 'obOrFvgProximity', passed: obProximityOk || fvgProximityOk },
     { name: 'rsiFilter', passed: rsiOk },
     { name: 'bbFilter', passed: bbOk },
-    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= 10 }, // USER REQUEST: ATR/ADX less strict (was >=15)
+    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= adxMin },
     { name: 'sweepOrOB', passed: sweepBullish || hasBullishOB || hasBullishFVG || buyStructureOk },
-    { name: 'similarWinrate', passed: true }, // USER REQUEST: removed strict winrate gate
+    { name: 'similarWinrate', passed: winrateEnabled ? similarWinrate >= 0.45 : true },
   ];
   const buySoftPassed = buySoftReqs.filter(g => g.passed).length;
 
@@ -303,20 +344,23 @@ export const validateSignal = (
     { name: 'obOrFvgProximity', passed: obProximityOk || fvgProximityOk },
     { name: 'rsiFilter', passed: rsiOk },
     { name: 'bbFilter', passed: bbOk },
-    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= 10 }, // USER REQUEST: ATR/ADX less strict
+    { name: 'adxTrend', passed: (features.adxValue ?? 0) >= adxMin },
     { name: 'sweepOrOB', passed: sweepBearish || hasBearishOB || hasBearishFVG || sellStructureOk },
-    { name: 'similarWinrate', passed: true }, // USER REQUEST: removed strict winrate gate
+    { name: 'similarWinrate', passed: winrateEnabled ? similarWinrate >= 0.45 : true },
   ];
   const sellSoftPassed = sellSoftReqs.filter(g => g.passed).length;
 
-  const softThreshold = 2; // USER REQUEST: drastically lowered (was 5) so bot enters more often
+  const softBuyThreshold = Math.max(1, Math.min(12, Math.round(gateConfig.getNum('softThreshold.buy'))));
+  const softSellThreshold = Math.max(1, Math.min(12, Math.round(gateConfig.getNum('softThreshold.sell'))));
   const structureOrTrendOk = trendConfidenceOk || sweepBullish || sweepBearish ||
-    (features.structureStrength ?? 0) >= 0.25 || features.trendStrength >= 0.25 || buyStructureOk || sellStructureOk;
+    (features.structureStrength ?? 0) >= structureMinStrength ||
+    features.trendStrength >= trendMinStrength ||
+    buyStructureOk || sellStructureOk;
 
   let direction: "BUY" | "SELL" | null = null;
   if (hardGatesPassed >= hardGateThreshold && structureOrTrendOk) {
-    const buySignal = buySoftPassed >= softThreshold;
-    const sellSignal = sellSoftPassed >= softThreshold;
+    const buySignal = buySoftPassed >= softBuyThreshold;
+    const sellSignal = sellSoftPassed >= softSellThreshold;
     if (buySignal && !sellSignal) {
       direction = 'BUY';
     } else if (sellSignal && !buySignal) {
@@ -367,7 +411,14 @@ export const validateSignal = (
     : tpLevels;
 
   const tp1 = takeProfitLevels[0];
-  // USER REQUEST: Removed minRiskRewardRatio gate entirely — no forced RR requirement
+  const rrEnabled = gateConfig.getBool('filter.rr.enabled');
+  const rrMin = Math.max(0.1, gateConfig.getNum('filter.rr.min'));
+  if (rrEnabled && tp1 !== undefined && slDistancePips > 0) {
+    const riskDistance = Math.abs(price - stopLoss);
+    const rewardDistance = Math.abs(tp1 - price);
+    const rrRatio = riskDistance === 0 ? 0 : rewardDistance / riskDistance;
+    if (rrRatio < rrMin) return null;
+  }
 
   let confidence = 60;
   confidence += Math.round((hardGatesPassed / hardGates.length) * 10);
