@@ -284,8 +284,8 @@ export class TradingEngine {
         const ticket = e.ticket;
         const existing = merged.get(ticket);
         const outcomeVal = e.outcome === 'WIN' || e.outcome === 'LOSS' || e.outcome === 'BREAKEVEN' ? e.outcome : existing?.outcome;
-        const profitDollars = Number(e.profitDollars ?? 0);
-        const profitPips = Number(e.profitPips ?? 0);
+        const rawDollars = (e.profitDollars !== undefined && e.profitDollars !== null) ? Number(e.profitDollars) : NaN;
+        const rawPips = (e.profitPips !== undefined && e.profitPips !== null) ? Number(e.profitPips) : NaN;
         const m = existing || {
           ticket,
           symbol: e.symbol,
@@ -300,14 +300,14 @@ export class TradingEngine {
           stopLoss: Number(e.sl || 0),
           takeProfit: Number(e.tp || 0),
         };
-        const finalProfit = Number.isFinite(profitDollars) && Math.abs(profitDollars) > 0.0001
-          ? profitDollars
-          : (Number(m?.profit) || Number(m?.pnl) || 0);
+        const finalProfit = Number.isFinite(rawDollars) && Math.abs(rawDollars) > 0.0001
+          ? rawDollars
+          : (Number(m?.profit) ?? Number(m?.pnl) ?? (Number.isFinite(rawDollars) ? rawDollars : 0));
         merged.set(ticket, {
           ...m,
           profit: finalProfit,
           pnl: finalProfit,
-          profitPips: Number.isFinite(profitPips) && Math.abs(profitPips) > 0.0001 ? profitPips : (Number(m?.profitPips) || 0),
+          profitPips: Number.isFinite(rawPips) && Math.abs(rawPips) > 0.0001 ? rawPips : (Number(m?.profitPips) ?? (Number.isFinite(rawPips) ? rawPips : 0)),
           outcome: outcomeVal || m?.outcome,
           _fromDb: true,
         });
