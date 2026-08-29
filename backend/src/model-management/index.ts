@@ -18,7 +18,38 @@ const MODELS_DIR = path.join(PYTHON_DIR, 'saved_models');
 const REGISTRY_PATH = path.join(MODELS_DIR, 'registry.json');
 const LEARNING_DATASET = path.join(__dirname, '../../data/learning/continuous_dataset.json');
 const EXAMPLE_DATASET = path.join(PYTHON_DIR, 'example_training_data.json');
-const PYTHON_PATH = process.env.PYTHON_PATH || 'python';
+
+/**
+ * Single authoritative python binary resolver. Tries (in order):
+ *   1. process.env.PYTHON_PATH (user override)
+ *   2. "python3" (Linux/Render default)
+ *   3. "python"  (Windows / user PATH)
+ * Install script + spawnSync + spawn + python checks MUST all use this to
+ * avoid "works in import check, fails on spawn" mismatches that look like
+ * "Train on Cloud doesn't work at all" to the user.
+ */
+function resolvePythonBinary(): string {
+  const { spawnSync } = require('child_process');
+  const candidates: string[] = [];
+  if (process.env.PYTHON_PATH) candidates.push(process.env.PYTHON_PATH);
+  candidates.push('python3', 'python');
+  for (const bin of candidates) {
+    try {
+      const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 3000 });
+      if (r.status === 0) return bin;
+    } catch { /* try next */ }
+  }
+  return process.env.PYTHON_PATH || 'python3';
+}
+let __PYTHON_BIN: string | null = null;
+const PYTHON_PATH: string = (() => {
+  try {
+    __PYTHON_BIN = resolvePythonBinary();
+  } catch {
+    __PYTHON_BIN = process.env.PYTHON_PATH || 'python3';
+  }
+  return __PYTHON_BIN;
+})();
 
 export type TrainingStatus = 'IDLE' | 'RUNNING' | 'COMPLETED' | 'FAILED';
 
@@ -195,11 +226,19 @@ export class ModelManager {
       return { success: false, error: 'Training already in progress', status: trainingStatus };
     }
 
-    const dataPath = resolveTrainingDataPath(options.dataPath);
+    // If caller already resolved dataPath (via enqueueTraining's non-blocking
+    // resolveTrainingDataPathAsync), trust it. Otherwise resolve locally.
+    // Avoids double-JSON-parse of the continuous dataset file on every train.
+    const dataPath = options.dataPath && fs.existsSync(options.dataPath)
+      ? options.dataPath
+      : resolveTrainingDataPath(options.dataPath);
     lastTrainingDataSource = dataPath;
     const version = options.version;
-    const requestedEpochs = Number(options.epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 20);
-    const epochs = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 30) : 20;
+    const requestedEpochs = Number(options.epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 40);
+    // Frontend default is 40 epochs; allow a sensible hard upper bound of 200
+    // (CPU train on Render: ~1-3min per epoch depending on dataset size, so
+    // ~200 keeps us safely under 900s timeout).
+    const epochs = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 200) : 40;
 
     trainingStatus = 'RUNNING';
     currentTrainingVersion = version || 'pending';
@@ -289,24 +328,33 @@ export class ModelManager {
     }
     trainingStatus = 'RUNNING';
     currentTrainingVersion = options.version || 'pending';
-    const acceptedAt = Date.now();
+    // Capture self-reference so nested setImmediate / Promise callbacks never
+    // lose the ModelManager instance if Promise executor is rebound later or
+    // called in a context where `this` would otherwise be undefined.
+    const self = this;
     setImmediate(() => {
       resolveTrainingDataPathAsync(options.dataPath)
         .then((dataSource) => {
           lastTrainingDataSource = dataSource;
-          trainingKickoffPromise = this.startTraining({
-            ...options,
-            dataPath: dataSource,
-          }).catch((e) => {
-            trainingStatus = 'FAILED';
-            lastTrainingResult = { success: false, error: String(e), auto_promoted: false };
-            logger.error('Background training failed', e);
-            return lastTrainingResult;
-          });
+          trainingKickoffPromise = self
+            .startTraining({
+              ...options,
+              dataPath: dataSource,
+            })
+            .catch((e) => {
+              trainingStatus = 'FAILED';
+              lastTrainingResult = { success: false, error: String(e), auto_promoted: false };
+              logger.error('Background training failed', e);
+              return lastTrainingResult;
+            });
         })
         .catch((e) => {
           trainingStatus = 'FAILED';
-          lastTrainingResult = { success: false, error: `Resolve data path failed: ${e}`, auto_promoted: false };
+          lastTrainingResult = {
+            success: false,
+            error: `Resolve data path failed: ${e}`,
+            auto_promoted: false,
+          };
           logger.error('Background training data-path resolve failed', e);
         });
     });
@@ -520,7 +568,6 @@ export class ModelManager {
     }
     const cachedForReturn = pythonCheckCache;
     const run = async () => {
-      const python = process.env.PYTHON_PATH || 'python3';
       try {
         const { stdout, stderr, code } = await runPython([
           '-c',
@@ -594,10 +641,6 @@ export class ModelManager {
     let predictionHistory: any[] = [];
 
     try {
-      // Trade History in AI Lab is a closed-trade view. OPEN rows belong only
-      // to the live watch / continuous learning sections. This prevents a
-      // still-open journal row (or pre-close DNA-missing row) from leaking
-      // into the "Trade History" card as if it's already completed.
       tradeHistory = await prisma.advancedTradeJournal.findMany({
         where: { outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] } },
         orderBy: [{ closeTimestamp: 'desc' }, { updatedAt: 'desc' }],
@@ -626,9 +669,17 @@ export class ModelManager {
       }))
     );
 
-    const openRisk = tradeHistory
-      .filter((t) => t.outcome === 'OPEN')
-      .reduce((s, t) => s + Number(t.riskPercent ?? 0), 0);
+    let learningDatasetSamples = 0;
+    try {
+      const dsPath = lastTrainingDataSource && fs.existsSync(lastTrainingDataSource)
+        ? lastTrainingDataSource
+        : LEARNING_DATASET;
+      if (fs.existsSync(dsPath)) {
+        const raw = JSON.parse(fs.readFileSync(dsPath, 'utf8'));
+        const samples = Array.isArray(raw) ? raw : raw?.samples;
+        learningDatasetSamples = Array.isArray(samples) ? samples.length : 0;
+      }
+    } catch { /* fallback to zero */ }
 
     const analytics = computeTradeAnalytics(tradeHistory);
     const prod = reg.production_version;
@@ -636,7 +687,6 @@ export class ModelManager {
     const models = Object.values(reg.candidates || {}).map((m: any) => ({
       ...m,
       is_production: m.version === prod,
-      // View-only flag for production in UI
       editable: m.version !== prod,
     }));
 
@@ -660,7 +710,10 @@ export class ModelManager {
       })),
       equityCurve,
       drawdown,
-      riskExposure: openRisk,
+      // NOTE: Trade-history above intentionally excludes OPEN, so there is no
+      // "open risk" from the trade-history set. If live open-position watches
+      // exist we surface that separately through learning.liveWatch.openTrades.
+      riskExposure: 0,
       predictionHistory: predictionHistory.map((p) => ({
         id: p.id,
         modelVersion: p.modelVersion,
@@ -672,7 +725,12 @@ export class ModelManager {
         holdProbability: Number(p.holdProbability),
         createdAt: p.createdAt,
       })),
-      tradeAnalytics: analytics,
+      tradeAnalytics: {
+        ...analytics,
+        // Extra: surface dataset sample count to AI Lab. User taps Train on Cloud and
+        // sees "0 samples → need more trades" instantly instead of waiting for fail.
+        learningDatasetSamples,
+      },
       modelPerformance: {
         production: prodEntry?.metrics || null,
         candidates: models.filter((m: any) => !m.is_production).slice(0, 5),
