@@ -6,12 +6,60 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { useLogStore } from '../store/useLogStore';
 import { useAuthStore } from '../store/useAuthStore';
 
-function shallowJsonEqual<T>(a: T, b: T): boolean {
-  try {
-    return JSON.stringify(a) === JSON.stringify(b);
-  } catch {
-    return false;
+function setupProgressEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.overallProgress !== b.overallProgress) return false;
+  if (a.session !== b.session) return false;
+  if (a.summary !== b.summary) return false;
+  if (a.tradeType !== b.tradeType) return false;
+  if (a.bias !== b.bias) return false;
+  if (a.blockers?.length !== b.blockers?.length) return false;
+  if (a.hardGates?.length !== b.hardGates?.length) return false;
+  if (a.buyGates?.length !== b.buyGates?.length) return false;
+  if (a.sellGates?.length !== b.sellGates?.length) return false;
+  return true;
+}
+
+function accountsShallowEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    const va = a[k];
+    const vb = b[k];
+    if (k === 'setupProgress') {
+      if (!setupProgressEqual(va, vb)) return false;
+      continue;
+    }
+    if (typeof va === 'number' && typeof vb === 'number') {
+      if (Math.abs(va - vb) >= 0.0001 && Object.is(va, vb) === false) return false;
+      if (k === 'spread' ? Math.abs(va - vb) >= 0.5 : Math.abs(va - vb) >= 0.01) return false;
+      continue;
+    }
+    if (va !== vb) return false;
   }
+  return true;
+}
+
+function positionsShallowEqual(a: any[], b: any[] | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const pa = a[i];
+    const pb = b[i];
+    if (pa.ticket !== pb.ticket) return false;
+    if (pa.type !== pb.type) return false;
+    if (pa.symbol !== pb.symbol) return false;
+    if (Math.abs(Number(pa.lots || 0) - Number(pb.lots || 0)) > 0.0001) return false;
+    if (Math.abs(Number(pa.openPrice || 0) - Number(pb.openPrice || 0)) > 0.0001) return false;
+    if (Math.abs(Number(pa.currentPrice || 0) - Number(pb.currentPrice || 0)) > 0.01) return false;
+    if (Math.abs(Number(pa.profit || 0) - Number(pb.profit || 0)) > 0.01) return false;
+  }
+  return true;
 }
 
 export const usePolling = () => {
@@ -34,15 +82,26 @@ export const usePolling = () => {
   const prevTimezone = useRef<boolean>(botSettings.timezoneTradingEnabled !== false);
   const prevMaxSpread = useRef<number>(botSettings.maxSpreadPoints ?? 800);
   const lastSetupLog = useRef<string>('');
-  // Shallow-compare refs to avoid duplicate setState and laggy re-renders
   const prevAccountSnapshot = useRef<any>(null);
+  const prevSetupSnapshot = useRef<any>(null);
+  const prevSignalReason = useRef<string>('');
   const prevPositionsSnapshot = useRef<any[] | null>(null);
   const lastRefreshAt = useRef<number>(0);
+  const lastAccountPriceAt = useRef<{ price: number; t: number }>({ price: 0, t: 0 });
+  const lastConfigSyncAt = useRef<number>(0);
+
+  // Stable refs for refresh + settings so socket never teardowns on identity change.
+  // This is the #1 cause of "lag" — every botSettings mutation used to change refresh
+  // identity which caused socket useEffect to teardown + reconnect (800ms RTT on reconnect
+  // plus 2+ seconds of stale data, repeated every time user toggled auto/ai/timezone).
+  const refreshRef = useRef<(showLoading?: boolean) => Promise<void>>(async () => {});
+  const botSettingsRef = useRef(botSettings);
+  useEffect(() => {
+    botSettingsRef.current = botSettings;
+  }, [botSettings]);
 
   useEffect(() => {
     const url = serverUrl || 'https://liquibot-back.onrender.com';
-    // Force WebSocket first + upgrades disabled for zero-latency.
-    // (No long-polling handshake, which was adding 300-800ms RTT delays.)
     socketRef.current = io(url, {
       transports: ['websocket'],
       upgrade: false,
@@ -55,8 +114,18 @@ export const usePolling = () => {
     });
 
     socketRef.current.on('EA_HEARTBEAT', (data) => {
-      if (data.price) {
-        setAccountPrice(Number(data.price));
+      if (data.price != null) {
+        const prev = lastAccountPriceAt.current;
+        const price = Number(data.price || 0);
+        const now = Date.now();
+        const meaningfulDelta = data.symbol === 'XAUUSD' || !data.symbol
+          ? Math.abs(prev.price - price) >= 0.05
+          : Math.abs(prev.price - price) >= 0.00005;
+        const stale = now - prev.t >= 250;
+        if (meaningfulDelta || stale) {
+          lastAccountPriceAt.current = { price, t: now };
+          setAccountPrice(price);
+        }
       }
 
       const accountSnapshot = {
@@ -77,12 +146,13 @@ export const usePolling = () => {
         autoTradingEnabled: data.autoTradingEnabled,
         aiTradingEnabled: data.aiTradingEnabled,
       };
-      if (!shallowJsonEqual(prevAccountSnapshot.current, accountSnapshot)) {
+      if (!accountsShallowEqual(prevAccountSnapshot.current, accountSnapshot)) {
         prevAccountSnapshot.current = accountSnapshot;
         setAccount(accountSnapshot);
       }
 
-      if (data.setupProgress) {
+      if (data.setupProgress && !setupProgressEqual(prevSetupSnapshot.current, data.setupProgress)) {
+        prevSetupSnapshot.current = data.setupProgress;
         setSetupProgress(data.setupProgress);
       }
 
@@ -97,14 +167,16 @@ export const usePolling = () => {
         pnl: Number(p.profit || p.pnl || 0),
         openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
       }));
-      if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+      if (!positionsShallowEqual(prevPositionsSnapshot.current, openPositions)) {
         prevPositionsSnapshot.current = openPositions;
         setOpenPositions(openPositions);
       }
 
       if (data.lastSignalReason) {
-        setLastSignalReason(data.lastSignalReason);
-        // Throttle terminal spam: log when summary changes (heartbeat = setup update)
+        if (prevSignalReason.current !== data.lastSignalReason) {
+          prevSignalReason.current = data.lastSignalReason;
+          setLastSignalReason(data.lastSignalReason);
+        }
         if (data.lastSignalReason !== lastSetupLog.current) {
           lastSetupLog.current = data.lastSignalReason;
           const ready = data.setupProgress?.overallProgress >= 100;
@@ -152,10 +224,18 @@ export const usePolling = () => {
     });
 
     socketRef.current.on('EA_HEARTBEAT_QUICK', (data: any) => {
-      // Price updates every tick — cheap, always allowed
-      if (data?.price != null) setAccountPrice(Number(data.price));
+      if (data?.price != null) {
+        const prev = lastAccountPriceAt.current;
+        const price = Number(data.price || 0);
+        const now = Date.now();
+        const meaningfulDelta = Math.abs(prev.price - price) >= 0.05;
+        const stale = now - prev.t >= 250;
+        if (meaningfulDelta || stale) {
+          lastAccountPriceAt.current = { price, t: now };
+          setAccountPrice(price);
+        }
+      }
 
-      // Position updates: only commit to state if positions array content changed
       if (data?.positions && Array.isArray(data.positions)) {
         const openPositions = (data.positions || []).map((p: any) => ({
           ticket: String(p.ticket),
@@ -168,13 +248,12 @@ export const usePolling = () => {
           pnl: Number(p.profit || p.pnl || 0),
           openTime: p.time ? new Date(Number(p.time) * 1000).toISOString() : new Date().toISOString(),
         }));
-        if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+        if (!positionsShallowEqual(prevPositionsSnapshot.current, openPositions)) {
           prevPositionsSnapshot.current = openPositions;
           setOpenPositions(openPositions);
         }
       }
 
-      // Account fields: batch equity/balance/spread — only set if any meaningful number changed
       if (data?.equity != null || data?.balance != null || data?.spread != null || data?.autoTradingEnabled != null) {
         setAccount(prev => {
           const next: any = { ...prev };
@@ -217,7 +296,7 @@ export const usePolling = () => {
           ? `SL ${data?.sl ?? '?'} · TP ${data?.tp ?? '?'} · ${(Number(data.confidence) * 100).toFixed(0)}% conf`
           : undefined,
       } as any);
-      refresh(false);
+      refreshRef.current(false);
     });
 
     socketRef.current.on('TRADE_CLOSED', (data: any) => {
@@ -227,27 +306,18 @@ export const usePolling = () => {
         level: pnl >= 0 ? 'success' : 'warning',
         message: `CLOSED #${data?.ticket ?? '?'} · ${pnl >= 0 ? 'WIN' : 'LOSS'} ${pnl.toFixed(2)}`,
       } as any);
-      refresh(false);
+      refreshRef.current(false);
     });
 
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [
-    serverUrl,
-    setAccountPrice,
-    setAccount,
-    setOpenPositions,
-    setLastSignalReason,
-    setSetupProgress,
-    addLog,
-    updateBotSettings,
-    refresh,
-  ]);
+    // NOTE: intentionally minimal deps. Everything changing is read via refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverUrl]);
 
   const refresh = useCallback(
     async (showLoading = false) => {
-      // Throttle: don't allow more than one refresh every 1200ms
       const now = Date.now();
       if (!showLoading && now - lastRefreshAt.current < 1200) {
         return;
@@ -276,19 +346,26 @@ export const usePolling = () => {
           autoTradingEnabled: accountData.autoTradingEnabled,
           aiTradingEnabled: accountData.aiTradingEnabled,
         };
-        if (!shallowJsonEqual(prevAccountSnapshot.current, accountSnapshot)) {
+        if (!accountsShallowEqual(prevAccountSnapshot.current, accountSnapshot)) {
           prevAccountSnapshot.current = accountSnapshot;
           setAccount(accountSnapshot);
         }
 
-        if (accountData.setupProgress) {
+        if (accountData.setupProgress && !setupProgressEqual(prevSetupSnapshot.current, accountData.setupProgress)) {
+          prevSetupSnapshot.current = accountData.setupProgress;
           setSetupProgress(accountData.setupProgress);
         }
-        if (accountData.lastSignalReason) {
+        if (accountData.lastSignalReason && prevSignalReason.current !== accountData.lastSignalReason) {
+          prevSignalReason.current = accountData.lastSignalReason;
           setLastSignalReason(accountData.lastSignalReason);
         }
 
-        setAccountPrice(Number(accountData.price || 0));
+        const price = Number(accountData.price || 0);
+        const prev = lastAccountPriceAt.current;
+        if (Math.abs(prev.price - price) >= 0.05 || now - prev.t >= 250) {
+          lastAccountPriceAt.current = { price, t: now };
+          setAccountPrice(price);
+        }
 
         const openPositions = (accountData.positions || []).map((p: any) => ({
           ticket: String(p.ticket),
@@ -303,34 +380,38 @@ export const usePolling = () => {
             ? new Date(Number(p.time) * 1000).toISOString()
             : new Date().toISOString(),
         }));
-        if (!shallowJsonEqual(prevPositionsSnapshot.current, openPositions)) {
+        if (!positionsShallowEqual(prevPositionsSnapshot.current, openPositions)) {
           prevPositionsSnapshot.current = openPositions;
           setOpenPositions(openPositions);
         }
 
-        const tzEnabled = botSettings.timezoneTradingEnabled !== false;
-        const maxSpread = botSettings.maxSpreadPoints ?? 800;
+        const settings = botSettingsRef.current;
+        const tzEnabled = settings.timezoneTradingEnabled !== false;
+        const maxSpread = settings.maxSpreadPoints ?? 800;
+        const configStale = now - lastConfigSyncAt.current > 5000;
         if (
           accountData.ea_connected &&
-          (prevAutoTrading.current !== botSettings.autoTradingEnabled ||
-            prevAiTrading.current !== botSettings.aiTradingEnabled ||
+          configStale &&
+          (prevAutoTrading.current !== settings.autoTradingEnabled ||
+            prevAiTrading.current !== settings.aiTradingEnabled ||
             prevTimezone.current !== tzEnabled ||
             prevMaxSpread.current !== maxSpread)
         ) {
-          prevAutoTrading.current = botSettings.autoTradingEnabled;
-          prevAiTrading.current = botSettings.aiTradingEnabled;
+          lastConfigSyncAt.current = now;
+          prevAutoTrading.current = settings.autoTradingEnabled;
+          prevAiTrading.current = settings.aiTradingEnabled;
           prevTimezone.current = tzEnabled;
           prevMaxSpread.current = maxSpread;
           await setBotConfig({
-            autoTradingEnabled: botSettings.autoTradingEnabled,
-            aiTradingEnabled: botSettings.aiTradingEnabled,
+            autoTradingEnabled: settings.autoTradingEnabled,
+            aiTradingEnabled: settings.aiTradingEnabled,
             timezoneTradingEnabled: tzEnabled,
             maxSpreadPoints: maxSpread,
           });
           addLog({
             component: 'App',
             level: 'info',
-            message: `Config synced · auto=${botSettings.autoTradingEnabled ? 'ON' : 'OFF'} · ai=${botSettings.aiTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'} · maxSpread=${maxSpread}pts`,
+            message: `Config synced · auto=${settings.autoTradingEnabled ? 'ON' : 'OFF'} · ai=${settings.aiTradingEnabled ? 'ON' : 'OFF'} · timezone=${tzEnabled ? 'ON' : 'OFF'} · maxSpread=${maxSpread}pts`,
           } as any);
         }
 
@@ -341,6 +422,9 @@ export const usePolling = () => {
         if (showLoading) setLoading(false);
       }
     },
+    // NOTE: store setters are stable (zustand create function references).
+    // Settings read via botSettingsRef; log via addLog.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       setAccount,
       setAccountPrice,
@@ -349,16 +433,16 @@ export const usePolling = () => {
       setLoading,
       setSetupProgress,
       setLastSignalReason,
-      botSettings,
       addLog,
     ]
   );
 
+  // Keep refresh ref in sync so socket events can call latest version without reconnect.
   useEffect(() => {
-    // Initial load only — after that we rely 100% on realtime WebSocket
-    // EA_HEARTBEAT_QUICK + EA_HEARTBEAT events for perfect sync.
-    // No more stale 2/6-second HTTP polling gaps where MT5 equity moves
-    // before the app refreshes!
+    refreshRef.current = refresh;
+  }, [refresh]);
+
+  useEffect(() => {
     refresh(true);
   }, [refresh]);
 

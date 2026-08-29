@@ -52,6 +52,12 @@ const io = new Server(server, {
 });
 const tradingEngine = new TradingEngine(io);
 
+// Throttle fast-path socket broadcasts: max 4 quick updates per second per server.
+// EA ticks can come every 100-200ms; anything faster than 250ms is undetectable to
+// humans and would just double-process store updates on the client.
+let lastQuickEmitAt = 0;
+const QUICK_EMIT_MIN_MS = 250;
+
 // Gate Socket.IO connections behind a valid access JWT, passed via handshake auth
 // or query param. This only guards the connection itself — what gets emitted after
 // a successful connection is unchanged and owned by another agent.
@@ -124,60 +130,51 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
   // running processMT5Update (which can take 10-50ms running signal validators).
   // This guarantees the mobile app sees the EA's latest equity/price/tick within
   // one single network hop (EA → backend → app Socket) with no processing delay.
-  try {
-    const quickPrice = Number(data.price ?? data.lastPrice ?? data.bid ?? 0);
-    const quickSpread = Number(data.spread ?? 0);
-    const quickBalance = Number(data.balance ?? data.account_balance ?? 0);
-    const quickEquity = Number(data.equity ?? data.account_equity ?? 0);
-    const quickPositions = Array.isArray(data.positions)
-      ? data.positions.map((p: any) => ({
-          ticket: String(p.ticket ?? p.id),
-          symbol: p.symbol,
-          type: p.type,
-          volume: Number(p.volume ?? p.lots ?? 0),
-          lots: Number(p.volume ?? p.lots ?? 0),
-          openPrice: Number(p.openPrice ?? p.price ?? 0),
-          price: Number(p.openPrice ?? p.price ?? 0),
-          profit: Number(p.profit ?? p.pnl ?? 0),
-          pnl: Number(p.profit ?? p.pnl ?? 0),
-          time: p.time ?? null,
-        }))
-      : undefined;
-    io.emit('EA_HEARTBEAT_QUICK', {
-      positions: quickPositions,
-      price: quickPrice || undefined,
-      spread: quickSpread || undefined,
-      balance: quickBalance || undefined,
-      equity: quickEquity || undefined,
-      currency: data.currency || 'USD',
-      lastUpdate: Date.now(),
-      ea_connected: true,
-      autoTradingEnabled: typeof data.autoTradingEnabled === 'boolean' ? data.autoTradingEnabled : undefined,
-      aiTradingEnabled: typeof data.aiTradingEnabled === 'boolean' ? data.aiTradingEnabled : undefined,
-      serverTs: Date.now(),
-      fastPath: true,
-    });
-  } catch (_emitErr) { /* no-op: engine emits full copy below */ }
+  const now = Date.now();
+  if (now - lastQuickEmitAt >= QUICK_EMIT_MIN_MS) {
+    lastQuickEmitAt = now;
+    try {
+      const quickPrice = Number(data.price ?? data.lastPrice ?? data.bid ?? 0);
+      const quickSpread = Number(data.spread ?? 0);
+      const quickBalance = Number(data.balance ?? data.account_balance ?? 0);
+      const quickEquity = Number(data.equity ?? data.account_equity ?? 0);
+      const quickPositions = Array.isArray(data.positions)
+        ? data.positions.map((p: any) => ({
+            ticket: String(p.ticket ?? p.id),
+            symbol: p.symbol,
+            type: p.type,
+            volume: Number(p.volume ?? p.lots ?? 0),
+            lots: Number(p.volume ?? p.lots ?? 0),
+            openPrice: Number(p.openPrice ?? p.price ?? 0),
+            price: Number(p.openPrice ?? p.price ?? 0),
+            profit: Number(p.profit ?? p.pnl ?? 0),
+            pnl: Number(p.profit ?? p.pnl ?? 0),
+            time: p.time ?? null,
+          }))
+        : undefined;
+      io.emit('EA_HEARTBEAT_QUICK', {
+        positions: quickPositions,
+        price: quickPrice || undefined,
+        spread: quickSpread || undefined,
+        balance: quickBalance || undefined,
+        equity: quickEquity || undefined,
+        currency: data.currency || 'USD',
+        lastUpdate: Date.now(),
+        ea_connected: true,
+        autoTradingEnabled: typeof data.autoTradingEnabled === 'boolean' ? data.autoTradingEnabled : undefined,
+        aiTradingEnabled: typeof data.aiTradingEnabled === 'boolean' ? data.aiTradingEnabled : undefined,
+        serverTs: Date.now(),
+        fastPath: true,
+      });
+    } catch (_emitErr) { /* no-op: engine emits full copy below */ }
+  }
 
   try {
     await tradingEngine.processMT5Update(data);
     monitoring.trackBrokerResponse(true, Date.now() - start, 'EA_UPDATE');
-    try {
-      const state = tradingEngine.getAccountState();
-      io.emit('EA_HEARTBEAT_QUICK', {
-        positions: state.positions,
-        price: state.price,
-        spread: state.spread,
-        balance: state.balance,
-        equity: state.equity,
-        currency: state.currency || 'USD',
-        lastUpdate: state.lastUpdate,
-        ea_connected: state.ea_connected,
-        autoTradingEnabled: state.autoTradingEnabled,
-        aiTradingEnabled: state.aiTradingEnabled,
-        serverTs: Date.now(),
-      });
-    } catch (_emitErr2) { /* engine already emits full EA_HEARTBEAT internally */ }
+    // NOTE: engine internally emits EA_HEARTBEAT (full payload with setupProgress/signalReason)
+    // after every update, so we deliberately do NOT emit a second QUICK heartbeat here
+    // (that used to double-process client store updates on every tick).
     res.json({ success: true, commands: [] });
   } catch (error) {
     monitoring.trackBrokerResponse(false, Date.now() - start, 'EA_UPDATE_FAIL');
