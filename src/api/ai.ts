@@ -18,6 +18,7 @@ export interface AIDashboardData {
     profitFactor: number;
     averageRr: number;
     totalPnl: number;
+    learningDatasetSamples?: number;
   };
   modelPerformance: any;
   readOnlyProduction: true;
@@ -30,6 +31,19 @@ export interface TrainingStatusPayload {
   currentVersion: string | null;
   dataSource?: string | null;
   cloudMode?: boolean;
+  progress?: {
+    progressPct: number;
+    elapsedSec: number;
+    remainingSec: number;
+    epochsTotal: number;
+    epochSecondsEstimate: number;
+  };
+  bestCandidate?: {
+    version: string;
+    deployment_recommendation?: string;
+    recommendation_reason?: string;
+    metrics?: any;
+  } | null;
   lastResult?: {
     success?: boolean;
     best_candidate?: string;

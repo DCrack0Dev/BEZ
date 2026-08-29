@@ -78,6 +78,12 @@ let lastTrainingResult: any = null;
 let latestConfidence: number | null = null;
 let lastTrainingDataSource: string | null = null;
 let trainingKickoffPromise: Promise<any> | null = null;
+/** Epochs the current/pending run was asked to do. Used for progress est. default 40. */
+let trainingEpochCount: number = 40;
+/** Wall-clock start of RUNNING training (ms epoch). Compute elapsed + progress est. */
+let trainingStartedAt: number | null = null;
+/** Observed seconds per epoch from last completed run (Render CPU ~40-120s/epoch). */
+let observedEpochSeconds: number | null = null;
 
 let pythonCheckCache: any = null;
 let pythonCheckCheckedAt = 0;
@@ -226,23 +232,19 @@ export class ModelManager {
       return { success: false, error: 'Training already in progress', status: trainingStatus };
     }
 
-    // If caller already resolved dataPath (via enqueueTraining's non-blocking
-    // resolveTrainingDataPathAsync), trust it. Otherwise resolve locally.
-    // Avoids double-JSON-parse of the continuous dataset file on every train.
     const dataPath = options.dataPath && fs.existsSync(options.dataPath)
       ? options.dataPath
       : resolveTrainingDataPath(options.dataPath);
     lastTrainingDataSource = dataPath;
     const version = options.version;
     const requestedEpochs = Number(options.epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 40);
-    // Frontend default is 40 epochs; allow a sensible hard upper bound of 200
-    // (CPU train on Render: ~1-3min per epoch depending on dataset size, so
-    // ~200 keeps us safely under 900s timeout).
     const epochs = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 200) : 40;
 
     trainingStatus = 'RUNNING';
     currentTrainingVersion = version || 'pending';
     lastTrainingResult = null;
+    trainingEpochCount = epochs;
+    trainingStartedAt = Date.now();
     appendAudit('TRAINING', 'STARTED', {
       dataPath,
       version,
@@ -257,6 +259,11 @@ export class ModelManager {
 
     try {
       const { stdout, stderr, code } = await runPython(args, 900000);
+      const endAt = Date.now();
+      const ranForSeconds = trainingStartedAt ? Math.max(1, Math.floor((endAt - trainingStartedAt) / 1000)) : 0;
+      if (ranForSeconds && epochs > 0) {
+        observedEpochSeconds = Math.min(600, Math.max(5, Math.round(ranForSeconds / epochs)));
+      }
       if (code !== 0) {
         trainingStatus = 'FAILED';
         lastTrainingResult = { success: false, error: stderr || stdout, auto_promoted: false };
@@ -273,7 +280,6 @@ export class ModelManager {
         version ||
         null;
 
-      // --- CLOUD PERSIST: push new candidate model + scalers + updated registry to DB blobs ---
       if (result.success && currentTrainingVersion) {
         const persisted = await persistTrainingArtifacts(currentTrainingVersion);
         logger.info(`[CloudPersistence] Training complete: persisted ${persisted} new artifacts to DB (version=${currentTrainingVersion})`);
@@ -288,6 +294,8 @@ export class ModelManager {
           recommendation: result.best_candidate?.deployment_recommendation,
           auto_promoted: false,
           dataSource: lastTrainingDataSource,
+          ranForSeconds,
+          observedEpochSeconds,
         },
         currentTrainingVersion || undefined
       );
@@ -295,6 +303,8 @@ export class ModelManager {
         ...result,
         auto_promoted: false,
         dataSource: lastTrainingDataSource,
+        ranForSeconds,
+        observedEpochSeconds,
         message:
           result.message ||
           'Training complete. Production model was NOT replaced automatically. Promote from the app when ready.',
@@ -328,9 +338,9 @@ export class ModelManager {
     }
     trainingStatus = 'RUNNING';
     currentTrainingVersion = options.version || 'pending';
-    // Capture self-reference so nested setImmediate / Promise callbacks never
-    // lose the ModelManager instance if Promise executor is rebound later or
-    // called in a context where `this` would otherwise be undefined.
+    const requestedEpochs = Number(options.epochs ?? process.env.CL_TRAIN_EPOCHS ?? process.env.TRAIN_EPOCHS ?? 40);
+    trainingEpochCount = Number.isFinite(requestedEpochs) ? Math.min(Math.max(requestedEpochs, 5), 200) : 40;
+    trainingStartedAt = Date.now();
     const self = this;
     setImmediate(() => {
       resolveTrainingDataPathAsync(options.dataPath)
@@ -534,11 +544,45 @@ export class ModelManager {
   }
 
   getTrainingStatus() {
+    const elapsedSec = trainingStatus === 'RUNNING' && trainingStartedAt
+      ? Math.max(0, Math.floor((Date.now() - trainingStartedAt) / 1000))
+      : 0;
+    // Heuristic progress: use observed epoch time if available, else use 60s/epoch Render CPU default,
+    // else fall back to time-based 0-5% gentle ramp while training is spinning up (import numpy/torch).
+    const baselineEpochSec = observedEpochSeconds ?? 60;
+    const totalExpectedSec = trainingEpochCount * baselineEpochSec;
+    let progressPct = 0;
+    if (trainingStatus === 'COMPLETED') {
+      progressPct = 1;
+    } else if (trainingStatus === 'FAILED') {
+      progressPct = Math.min(0.99, elapsedSec / Math.max(totalExpectedSec, 60));
+    } else if (trainingStatus === 'RUNNING') {
+      const expected = Math.max(totalExpectedSec, 30);
+      progressPct = Math.min(0.99, Math.max(0.02, elapsedSec / expected));
+    }
+    const remainingSec = trainingStatus === 'RUNNING'
+      ? Math.max(0, totalExpectedSec - elapsedSec)
+      : 0;
     return {
       status: trainingStatus,
       currentVersion: currentTrainingVersion,
       dataSource: lastTrainingDataSource,
       cloudMode: process.env.NODE_ENV === 'production',
+      progress: {
+        progressPct: Number(progressPct.toFixed(3)),
+        elapsedSec,
+        remainingSec,
+        epochsTotal: trainingEpochCount,
+        epochSecondsEstimate: baselineEpochSec,
+      },
+      bestCandidate: lastTrainingResult?.best_candidate
+        ? {
+            version: lastTrainingResult.best_candidate.version,
+            deployment_recommendation: lastTrainingResult.best_candidate.deployment_recommendation,
+            recommendation_reason: lastTrainingResult.best_candidate.recommendation_reason,
+            metrics: lastTrainingResult.best_candidate.evaluation || lastTrainingResult.best_candidate.metrics || null,
+          }
+        : null,
       lastResult: lastTrainingResult
         ? {
             success: lastTrainingResult.success,

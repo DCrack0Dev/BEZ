@@ -15,6 +15,7 @@ import {
   startAITraining,
   promoteAIModel,
   waitForTraining,
+  fetchTrainingStatus,
   AIDashboardData,
 } from '../api/ai';
 import { fetchMonitoring, fetchLearningStatus, runBacktest } from '../api/ops';
@@ -31,6 +32,13 @@ const pct = (n: number | null | undefined, digits = 1) =>
 
 const num = (n: number | null | undefined, digits = 2) =>
   n == null || !Number.isFinite(Number(n)) ? '—' : Number(n).toFixed(digits);
+
+const formatSeconds = (s: number | null | undefined) => {
+  const v = Math.max(0, Math.floor(Number(s ?? 0)));
+  const m = Math.floor(v / 60);
+  const r = v % 60;
+  return m > 0 ? `${m}m ${r.toString().padStart(2, '0')}s` : `${r}s`;
+};
 
 function MiniEquityChart({ data }: { data: number[] }) {
   if (!data || data.length < 2) {
@@ -85,6 +93,9 @@ const AIDashboardScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [training, setTraining] = useState(false);
   const [backtesting, setBacktesting] = useState(false);
+  const [trainingProgress, setTrainingProgress] = useState<{
+    progressPct: number; elapsedSec: number; remainingSec: number; epochsTotal: number; epochSecondsEstimate: number;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -109,6 +120,42 @@ const AIDashboardScreen = () => {
     const id = setInterval(load, 15000);
     return () => clearInterval(id);
   }, [load]);
+
+  /**
+   * If dashboard reports RUNNING training (e.g. user left the screen then came back)
+   * keep a parallel 4s poll on /training/status to drive the progress bar + elapsed timer.
+   * The dedicated waitForTraining() poll inside handleTrain ALREADY sets this while the
+   * dialog flow is live — this effect just ensures the bar moves after navigating back.
+   */
+  useEffect(() => {
+    if (data?.trainingStatus !== 'RUNNING' && !training) {
+      if (trainingProgress && data?.trainingStatus) {
+        setTrainingProgress(null);
+      }
+      return;
+    }
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      try {
+        const s = await fetchTrainingStatus();
+        if (!alive) return;
+        if (s.progress) setTrainingProgress(s.progress);
+        if (s.status === 'COMPLETED' || s.status === 'FAILED') {
+          setTrainingProgress(null);
+          await load();
+          if (timer) clearInterval(timer);
+        }
+      } catch { /* ignore poll failures */ }
+    };
+    tick();
+    timer = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.trainingStatus, training]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -153,29 +200,47 @@ const AIDashboardScreen = () => {
                 return;
               }
 
+              // Dashboard refresh: models list + training-runs card refresh on every poll.
+              const refreshDashboard = async () => {
+                try {
+                  const fresh = await fetchAIDashboard();
+                  setData(fresh);
+                } catch { /* swallow — poll continues */ }
+              };
+
               // Poll server until COMPLETED / FAILED (async cloud job)
               const finalStatus = await waitForTraining({
                 onTick: (s) => {
-                  if (s.status === 'RUNNING') {
-                    setData((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            trainingStatus: 'RUNNING',
-                            currentTrainingVersion: s.currentVersion,
-                          }
-                        : prev
-                    );
+                  if (s.progress) setTrainingProgress(s.progress);
+                  setData((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          trainingStatus: s.status,
+                          currentTrainingVersion: s.currentVersion,
+                        }
+                      : prev
+                  );
+                  // Refresh full dashboard every 3 ticks so candidate cards appear live —
+                  // user sees Promote button instantly when job ends instead of waiting for
+                  // a manual leave/reload. Light status poll already runs on every tick.
+                  if ((s.progress?.elapsedSec ?? 0) % 12 < 4) {
+                    refreshDashboard();
                   }
                 },
               });
+              setTrainingProgress(null);
+
+              // Make sure we have latest candidates + promote button in state
+              await refreshDashboard();
 
               if (finalStatus.status === 'COMPLETED' || finalStatus.lastResult?.success) {
+                const promotedNow = finalStatus.bestCandidate?.version;
                 Alert.alert(
                   'Training Complete',
-                  `Candidate ${finalStatus.lastResult?.best_candidate || finalStatus.currentVersion || ''} saved on the server.\n` +
-                    `Recommendation: ${finalStatus.lastResult?.deployment_recommendation || 'NO'}\n` +
-                    `Promote from the model list when ready.`
+                  `Candidate ${finalStatus.lastResult?.best_candidate || finalStatus.currentVersion || promotedNow || ''} saved on the server.\n` +
+                    `Recommendation: ${finalStatus.lastResult?.deployment_recommendation || finalStatus.bestCandidate?.deployment_recommendation || 'NO'}\n` +
+                    `Promote from the model list below, or use the "Promote now" banner at the top of Model Performance.`
                 );
               } else {
                 Alert.alert(
@@ -183,7 +248,6 @@ const AIDashboardScreen = () => {
                   finalStatus.lastResult?.error || finalStatus.lastResult?.message || 'Unknown error'
                 );
               }
-              await load();
             } catch (e: any) {
               Alert.alert('Training Failed', e?.message || String(e));
             } finally {
@@ -288,6 +352,41 @@ const AIDashboardScreen = () => {
           </Text>
         </View>
 
+        {(training || data?.trainingStatus === 'RUNNING') && trainingProgress ? (
+          <View style={styles.progressWrap}>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${Math.max(2, Math.min(100, trainingProgress.progressPct * 100)).toFixed(1)}%` as any,
+                    backgroundColor:
+                      data?.trainingStatus === 'FAILED'
+                        ? COLORS.error
+                        : data?.trainingStatus === 'COMPLETED'
+                          ? COLORS.success
+                          : COLORS.primary,
+                  },
+                ]}
+              />
+            </View>
+            <View style={styles.progressMeta}>
+              <Text style={TYPOGRAPHY.bodySecondary}>
+                {Math.round(trainingProgress.progressPct * 100)}%
+                {' · '}
+                {trainingProgress.epochsTotal} epochs
+                {' · '}
+                ~{trainingProgress.epochSecondsEstimate}s/ep
+              </Text>
+              <Text style={TYPOGRAPHY.bodySecondary}>
+                Elapsed {formatSeconds(trainingProgress.elapsedSec)}
+                {' · '}
+                Remaining ~{formatSeconds(trainingProgress.remainingSec)}
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
         <TouchableOpacity
           style={[styles.trainBtn, (training || data?.trainingStatus === 'RUNNING') && styles.trainBtnDisabled]}
           onPress={handleTrain}
@@ -376,10 +475,65 @@ const AIDashboardScreen = () => {
               value={num(data?.tradeAnalytics?.totalPnl)}
               accent={(data?.tradeAnalytics?.totalPnl ?? 0) >= 0 ? COLORS.success : COLORS.error}
             />
+            <MetricTile
+              label="Dataset Samples"
+              value={String(data?.tradeAnalytics?.learningDatasetSamples ?? learning?.datasetSize ?? 0)}
+              accent={
+                (Number(data?.tradeAnalytics?.learningDatasetSamples ?? learning?.datasetSize ?? 0) >= 20)
+                  ? COLORS.success
+                  : COLORS.warning
+              }
+            />
           </View>
+          {(Number(data?.tradeAnalytics?.learningDatasetSamples ?? learning?.datasetSize ?? 0) < 4) ? (
+            <Text style={[TYPOGRAPHY.bodySecondary, { marginTop: SPACING.s, color: COLORS.warning }]}>
+              ⚠ Need 4+ labeled closed MT5 trades before training can learn. Continuous learning dataset is cold — use MT5 + EA to build history first.
+            </Text>
+          ) : null}
         </Section>
 
         <Section title="Model Performance">
+          {(() => {
+            const latest: any = (() => {
+              // Prefer the newest candidate that is NOT production; fall back to
+              // training dashboard modelPerformance.candidates[0] so the quick
+              // banner appears even if the full cards list is being filtered.
+              const candList = (data?.models || []).filter((m) => !m.is_production);
+              if (candList.length) return candList[0];
+              return (data?.modelPerformance?.candidates || [])[0] || null;
+            })();
+            if (latest?.version) {
+              const rec = latest.deployment_recommendation || 'NO';
+              const recColor =
+                rec === 'YES' ? COLORS.success : rec === 'MONITOR' ? COLORS.warning : COLORS.textSecondary;
+              return (
+                <View style={styles.quickPromoteBanner}>
+                  <View style={styles.quickPromoteHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.cardTitle}>Latest Candidate · {latest.version}</Text>
+                      <Text style={[TYPOGRAPHY.bodySecondary, { marginTop: 2 }]}>
+                        {latest.recommendation_reason || 'Candidate ready — compare with production before promote.'}
+                      </Text>
+                    </View>
+                    <Text style={{ color: recColor, fontWeight: '700' }}>{rec}</Text>
+                  </View>
+                  <View style={styles.metricGrid}>
+                    <MetricTile label="Win Rate" value={pct(latest.metrics?.win_rate)} />
+                    <MetricTile label="PF" value={num(latest.metrics?.profit_factor)} />
+                    <MetricTile label="F1" value={pct(latest.metrics?.f1)} />
+                    <MetricTile label="DD" value={pct(latest.metrics?.max_drawdown)} accent={COLORS.error} />
+                  </View>
+                  <TouchableOpacity
+                    style={styles.promoteBtn}
+                    onPress={() => handlePromote(latest.version, rec)}
+                  >
+                    <Text style={styles.promoteBtnText}>Promote {latest.version} → Production</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            }
+            return null;
+          })()}
           {data?.modelPerformance?.production ? (
             <View style={styles.prodCard}>
               <Text style={styles.cardTitle}>Production ({data.productionVersion}) — read only</Text>
@@ -544,6 +698,38 @@ const styles = StyleSheet.create({
   statusBadge: {
     fontWeight: '700',
     letterSpacing: 1,
+  },
+  progressWrap: {
+    marginBottom: SPACING.m,
+  },
+  progressTrack: {
+    width: '100%',
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.border,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 5,
+  },
+  progressMeta: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: SPACING.s,
+  },
+  quickPromoteBanner: {
+    backgroundColor: COLORS.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    padding: SPACING.m,
+    marginBottom: SPACING.m,
+  },
+  quickPromoteHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: SPACING.s,
   },
   trainBtn: {
     backgroundColor: COLORS.primary,
