@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   Alert,
   Dimensions,
+  Platform,
 } from 'react-native';
 import Svg, { Polyline, Line } from 'react-native-svg';
 import {
@@ -16,7 +17,9 @@ import {
   promoteAIModel,
   waitForTraining,
   fetchTrainingStatus,
+  cancelAITraining,
   AIDashboardData,
+  TrainingStatusPayload,
 } from '../api/ai';
 import { fetchMonitoring, fetchLearningStatus, runBacktest } from '../api/ops';
 import SkeletonLoader from '../components/SkeletonLoader';
@@ -93,9 +96,12 @@ const AIDashboardScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [training, setTraining] = useState(false);
   const [backtesting, setBacktesting] = useState(false);
+  const [cancelTrainRunning, setCancelTrainRunning] = useState(false);
+  const [tailExpanded, setTailExpanded] = useState(false);
   const [trainingProgress, setTrainingProgress] = useState<{
-    progressPct: number; elapsedSec: number; remainingSec: number; epochsTotal: number; epochSecondsEstimate: number;
+    progressPct: number; elapsedSec: number; remainingSec: number; epochsTotal: number; epochSecondsEstimate: number; deadlineSec?: number; deadlineLeftSec?: number;
   } | null>(null);
+  const [latestTrainingTick, setLatestTrainingTick] = useState<TrainingStatusPayload | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -140,6 +146,7 @@ const AIDashboardScreen = () => {
       try {
         const s = await fetchTrainingStatus();
         if (!alive) return;
+        setLatestTrainingTick(s);
         if (s.progress) setTrainingProgress(s.progress);
         if (s.status === 'COMPLETED' || s.status === 'FAILED') {
           setTrainingProgress(null);
@@ -156,6 +163,31 @@ const AIDashboardScreen = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.trainingStatus, training]);
+
+  /**
+   * Frontend watchdog: if user sits on RUNNING and we've been at progress>0.9 for
+   * significantly longer than 2× the original total estimate → auto-fire cancel
+   * (server-side watchdog also does this, but belt-and-suspenders prevents a
+   * broken server-watchdog from causing "99% forever" on the client).
+   */
+  useEffect(() => {
+    if (!trainingProgress || !latestTrainingTick || (latestTrainingTick.status !== 'RUNNING')) return;
+    const totalEst = Math.max(60, (trainingProgress.epochsTotal || 40) * (trainingProgress.epochSecondsEstimate || 90));
+    const elapsed = trainingProgress.elapsedSec ?? 0;
+    if (elapsed > 2 * totalEst && trainingProgress.progressPct >= 0.9) {
+      // Auto-cancel once after 2× estimate and high progress stalled
+      cancelAITraining(`Frontend watchdog: past 2× estimate (${2 * totalEst}s) at progress=${(trainingProgress.progressPct * 100).toFixed(0)}%`)
+        .then(async () => {
+          const s = await fetchTrainingStatus();
+          setLatestTrainingTick(s);
+          if (s.progress) setTrainingProgress(s.progress);
+          setData((prev) => prev ? { ...prev, trainingStatus: s.status, currentTrainingVersion: s.currentVersion } : prev);
+          await load();
+        })
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainingProgress?.elapsedSec]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -200,7 +232,6 @@ const AIDashboardScreen = () => {
                 return;
               }
 
-              // Dashboard refresh: models list + training-runs card refresh on every poll.
               const refreshDashboard = async () => {
                 try {
                   const fresh = await fetchAIDashboard();
@@ -208,9 +239,9 @@ const AIDashboardScreen = () => {
                 } catch { /* swallow — poll continues */ }
               };
 
-              // Poll server until COMPLETED / FAILED (async cloud job)
               const finalStatus = await waitForTraining({
                 onTick: (s) => {
+                  setLatestTrainingTick(s);
                   if (s.progress) setTrainingProgress(s.progress);
                   setData((prev) =>
                     prev
@@ -221,17 +252,14 @@ const AIDashboardScreen = () => {
                         }
                       : prev
                   );
-                  // Refresh full dashboard every 3 ticks so candidate cards appear live —
-                  // user sees Promote button instantly when job ends instead of waiting for
-                  // a manual leave/reload. Light status poll already runs on every tick.
                   if ((s.progress?.elapsedSec ?? 0) % 12 < 4) {
                     refreshDashboard();
                   }
                 },
               });
               setTrainingProgress(null);
+              setLatestTrainingTick(finalStatus);
 
-              // Make sure we have latest candidates + promote button in state
               await refreshDashboard();
 
               if (finalStatus.status === 'COMPLETED' || finalStatus.lastResult?.success) {
@@ -243,9 +271,13 @@ const AIDashboardScreen = () => {
                     `Promote from the model list below, or use the "Promote now" banner at the top of Model Performance.`
                 );
               } else {
+                const parts: string[] = [];
+                if (finalStatus.lastResult?.error) parts.push(finalStatus.lastResult.error);
+                if (finalStatus.stderrTail) parts.push('stderr tail:\n' + finalStatus.stderrTail);
+                if (finalStatus.stdoutTail) parts.push('stdout tail:\n' + finalStatus.stdoutTail);
                 Alert.alert(
                   'Training Failed',
-                  finalStatus.lastResult?.error || finalStatus.lastResult?.message || 'Unknown error'
+                  parts.join('\n----\n') || finalStatus.lastResult?.message || 'Unknown error'
                 );
               }
             } catch (e: any) {
@@ -257,6 +289,33 @@ const AIDashboardScreen = () => {
         },
       ]
     );
+  };
+
+  const handleCancelTrain = () => {
+    Alert.alert('Cancel Training', 'Kill the running training job on the server? Progress is lost.', [
+      { text: 'Keep waiting', style: 'cancel' },
+      {
+        text: 'Cancel job',
+        style: 'destructive',
+        onPress: async () => {
+          setCancelTrainRunning(true);
+          try {
+            await cancelAITraining('User canceled from AI Lab screen');
+            const s = await fetchTrainingStatus();
+            setLatestTrainingTick(s);
+            if (s.progress) setTrainingProgress(s.progress);
+            setData((prev) =>
+              prev ? { ...prev, trainingStatus: s.status, currentTrainingVersion: s.currentVersion } : prev
+            );
+            await load();
+          } catch (e: any) {
+            Alert.alert('Cancel failed', e?.message || String(e));
+          } finally {
+            setCancelTrainRunning(false);
+          }
+        },
+      },
+    ]);
   };
 
   const handlePromote = (version: string, rec: string) => {
@@ -377,6 +436,7 @@ const AIDashboardScreen = () => {
                 {trainingProgress.epochsTotal} epochs
                 {' · '}
                 ~{trainingProgress.epochSecondsEstimate}s/ep
+                {trainingProgress.deadlineLeftSec ? ` · timeout ${formatSeconds(trainingProgress.deadlineLeftSec)} left` : ''}
               </Text>
               <Text style={TYPOGRAPHY.bodySecondary}>
                 Elapsed {formatSeconds(trainingProgress.elapsedSec)}
@@ -384,6 +444,64 @@ const AIDashboardScreen = () => {
                 Remaining ~{formatSeconds(trainingProgress.remainingSec)}
               </Text>
             </View>
+            <View style={styles.cancelTrainRow}>
+              <TouchableOpacity
+                style={[styles.secondaryBtnSmall, styles.cancelTrainBtn, cancelTrainRunning && styles.trainBtnDisabled]}
+                onPress={handleCancelTrain}
+                disabled={cancelTrainRunning}
+              >
+                <Text style={styles.cancelTrainBtnText}>
+                  {cancelTrainRunning ? 'Canceling…' : 'Cancel training'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.secondaryBtnSmall}
+                onPress={() => setTailExpanded((v) => !v)}
+              >
+                <Text style={styles.secondaryBtnTextSmall}>
+                  {tailExpanded ? 'Hide logs' : 'Show logs'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {tailExpanded ? (
+              <View style={styles.tailPanel}>
+                <Text style={[TYPOGRAPHY.bodySecondary, { color: COLORS.textSecondary }]}>stderr</Text>
+                <Text selectable style={styles.tailText}>
+                  {(latestTrainingTick?.stderrTail || data?.trainingStatus === 'FAILED'
+                    ? (latestTrainingTick?.lastResult?.stderrTail ?? '')
+                    : '') || '(empty)'}</Text>
+                <Text style={[TYPOGRAPHY.bodySecondary, { color: COLORS.textSecondary, marginTop: SPACING.s }]}>stdout</Text>
+                <Text selectable style={styles.tailText}>
+                  {(latestTrainingTick?.stdoutTail || data?.trainingStatus === 'FAILED'
+                    ? (latestTrainingTick?.lastResult?.stdoutTail ?? '')
+                    : '') || '(empty)'}</Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {(data?.trainingStatus === 'FAILED' ||
+          (latestTrainingTick && latestTrainingTick.status === 'FAILED')) ? (
+          <View style={[styles.tailPanel, { borderColor: COLORS.error, marginTop: -SPACING.m + 4 }]}>
+            <Text style={[TYPOGRAPHY.bodySecondary, { color: COLORS.error, fontWeight: '700' }]}>
+              Training FAILED
+            </Text>
+            <Text selectable style={[styles.tailText, { marginBottom: SPACING.s }]}>
+              {latestTrainingTick?.lastResult?.error ||
+                data?.trainingStatus /* noop */ && (latestTrainingTick?.lastResult?.message || 'See logs below for details.')}
+            </Text>
+            <Text style={[TYPOGRAPHY.bodySecondary, { color: COLORS.textSecondary }]}>stderr</Text>
+            <Text selectable style={styles.tailText}>
+              {(latestTrainingTick?.lastResult?.stderrTail ??
+                latestTrainingTick?.stderrTail ??
+                '') || '(empty)'}
+            </Text>
+            <Text style={[TYPOGRAPHY.bodySecondary, { color: COLORS.textSecondary, marginTop: SPACING.s }]}>stdout</Text>
+            <Text selectable style={styles.tailText}>
+              {(latestTrainingTick?.lastResult?.stdoutTail ??
+                latestTrainingTick?.stdoutTail ??
+                '') || '(empty)'}
+            </Text>
           </View>
         ) : null}
 
@@ -717,6 +835,50 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginTop: SPACING.s,
+  },
+  cancelTrainRow: {
+    flexDirection: 'row',
+    gap: SPACING.s,
+    marginTop: SPACING.m,
+  },
+  secondaryBtnSmall: {
+    backgroundColor: COLORS.cardAlt || COLORS.surface2,
+    paddingVertical: SPACING.s,
+    paddingHorizontal: SPACING.m,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  secondaryBtnTextSmall: {
+    color: COLORS.textPrimary,
+    fontSize: TYPOGRAPHY.bodySecondary.fontSize || 12,
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  cancelTrainBtn: {
+    borderColor: COLORS.error,
+    flex: 1,
+  },
+  cancelTrainBtnText: {
+    color: COLORS.error,
+    fontSize: TYPOGRAPHY.bodySecondary.fontSize || 12,
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+  tailPanel: {
+    marginTop: SPACING.m,
+    padding: SPACING.s,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.cardAlt || COLORS.surface2,
+    maxHeight: 220,
+  },
+  tailText: {
+    marginTop: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
+    color: COLORS.textPrimary,
   },
   quickPromoteBanner: {
     backgroundColor: COLORS.card,

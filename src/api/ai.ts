@@ -37,6 +37,8 @@ export interface TrainingStatusPayload {
     remainingSec: number;
     epochsTotal: number;
     epochSecondsEstimate: number;
+    deadlineSec?: number;
+    deadlineLeftSec?: number;
   };
   bestCandidate?: {
     version: string;
@@ -44,6 +46,8 @@ export interface TrainingStatusPayload {
     recommendation_reason?: string;
     metrics?: any;
   } | null;
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
   lastResult?: {
     success?: boolean;
     best_candidate?: string;
@@ -51,6 +55,9 @@ export interface TrainingStatusPayload {
     auto_promoted?: boolean;
     message?: string;
     error?: string;
+    code?: number | null;
+    stdoutTail?: string | null;
+    stderrTail?: string | null;
   } | null;
   readOnlyProduction: true;
 }
@@ -84,6 +91,15 @@ export async function promoteAIModel(version: string) {
     '/api/ai/promote',
     { version },
     { timeout: 120000 }
+  );
+  return res.data;
+}
+
+export async function cancelAITraining(reason?: string) {
+  const res = await apiClient.post(
+    '/api/ai/train/reset',
+    { reason: reason || 'User canceled from mobile app' },
+    { timeout: 20000 }
   );
   return res.data;
 }

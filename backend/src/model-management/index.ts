@@ -84,6 +84,12 @@ let trainingEpochCount: number = 40;
 let trainingStartedAt: number | null = null;
 /** Observed seconds per epoch from last completed run (Render CPU ~40-120s/epoch). */
 let observedEpochSeconds: number | null = null;
+/** Last stdout/stderr tail from a RUNNING or just-finished train so stuck UI can show it. */
+let trainingOutTail: { stdout: string; stderr: string } | null = null;
+/** Hard deadline for current RUNNING train (ms epoch). Abort subprocess + set FAILED when past. */
+let trainingDeadlineMs: number | null = null;
+/** Kill handle for the current train subprocess (only used by watchdog / reset). */
+let activeTrainingProc: any = null;
 
 let pythonCheckCache: any = null;
 let pythonCheckCheckedAt = 0;
@@ -147,18 +153,35 @@ export async function resolveTrainingDataPathAsync(explicit?: string): Promise<s
 function runPython(args: string[], timeoutMs = 600000): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve) => {
     const proc = spawn(PYTHON_PATH, args, { cwd: PYTHON_DIR });
+    activeTrainingProc = proc;
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
-      proc.kill();
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      try { setTimeout(() => proc.kill('SIGKILL'), 5000); } catch { /* ignore */ }
       resolve({ stdout, stderr: stderr + '\nTIMEOUT', code: -1 });
     }, timeoutMs);
 
-    proc.stdout?.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+    const tail = () => {
+      trainingOutTail = {
+        stdout: stdout.slice(-2000),
+        stderr: stderr.slice(-2000),
+      };
+    };
+    proc.stdout?.on('data', (d) => { stdout += d.toString(); tail(); });
+    proc.stderr?.on('data', (d) => { stderr += d.toString(); tail(); });
     proc.on('close', (code) => {
       clearTimeout(timer);
+      tail();
+      if (activeTrainingProc === proc) activeTrainingProc = null;
       resolve({ stdout, stderr, code });
+    });
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      stderr += `\nSPAWN_ERROR ${String(e)}`;
+      tail();
+      if (activeTrainingProc === proc) activeTrainingProc = null;
+      resolve({ stdout, stderr, code: -2 });
     });
   });
 }
@@ -243,8 +266,17 @@ export class ModelManager {
     trainingStatus = 'RUNNING';
     currentTrainingVersion = version || 'pending';
     lastTrainingResult = null;
+    trainingOutTail = null;
     trainingEpochCount = epochs;
     trainingStartedAt = Date.now();
+    const baselineSec = observedEpochSeconds ?? 90; // 90s/ep default on Render CPU
+    const expectedTotalSec = epochs * baselineSec;
+    // Hard cap: use 2× the estimate OR 15 minutes, whichever is larger — prevents 99%
+    // forever for slow trains while keeping short-train safety net.
+    const deadlineMs = Math.max(900_000, expectedTotalSec * 2 * 1000);
+    trainingDeadlineMs = trainingStartedAt + deadlineMs;
+    // Reset any previously-stuck proc handle (shouldn't exist).
+    activeTrainingProc = null;
     appendAudit('TRAINING', 'STARTED', {
       dataPath,
       version,
@@ -258,7 +290,7 @@ export class ModelManager {
     args.push('--epochs', String(epochs));
 
     try {
-      const { stdout, stderr, code } = await runPython(args, 900000);
+      const { stdout, stderr, code } = await runPython(args, deadlineMs);
       const endAt = Date.now();
       const ranForSeconds = trainingStartedAt ? Math.max(1, Math.floor((endAt - trainingStartedAt) / 1000)) : 0;
       if (ranForSeconds && epochs > 0) {
@@ -266,12 +298,38 @@ export class ModelManager {
       }
       if (code !== 0) {
         trainingStatus = 'FAILED';
-        lastTrainingResult = { success: false, error: stderr || stdout, auto_promoted: false };
-        await this.persistTrainingFailure(stderr || stdout);
+        const tail = trainingOutTail || { stdout: '', stderr: '' };
+        lastTrainingResult = {
+          success: false,
+          error:
+            (String(stderr || '').slice(-2000)) ||
+            (String(stdout || '').slice(-2000)) ||
+            `Python process exited with code ${code}`,
+          code,
+          stdoutTail: tail.stdout,
+          stderrTail: tail.stderr,
+          auto_promoted: false,
+        };
+        await this.persistTrainingFailure(lastTrainingResult.error + '\nstdout:\n' + tail.stdout + '\nstderr:\n' + tail.stderr);
         return lastTrainingResult;
       }
 
-      const result = parseLastJson(stdout);
+      let result: any;
+      try {
+        result = parseLastJson(stdout);
+      } catch (e) {
+        const tail = trainingOutTail || { stdout, stderr };
+        trainingStatus = 'FAILED';
+        lastTrainingResult = {
+          success: false,
+          error: `Python finished with no JSON output. ${String(e)}`,
+          stdoutTail: tail.stdout.slice(-2000),
+          stderrTail: tail.stderr.slice(-2000),
+          auto_promoted: false,
+        };
+        await this.persistTrainingFailure(lastTrainingResult.error + '\nstdout:\n' + lastTrainingResult.stdoutTail + '\nstderr:\n' + lastTrainingResult.stderrTail);
+        return lastTrainingResult;
+      }
       lastTrainingResult = result;
       trainingStatus = result.success ? 'COMPLETED' : 'FAILED';
       currentTrainingVersion =
@@ -310,12 +368,45 @@ export class ModelManager {
           'Training complete. Production model was NOT replaced automatically. Promote from the app when ready.',
       };
     } catch (error) {
+      const tail = trainingOutTail || { stdout: '', stderr: '' };
       trainingStatus = 'FAILED';
-      lastTrainingResult = { success: false, error: String(error), auto_promoted: false };
+      lastTrainingResult = {
+        success: false,
+        error: String(error),
+        stdoutTail: tail.stdout,
+        stderrTail: tail.stderr,
+        auto_promoted: false,
+      };
       return lastTrainingResult;
     } finally {
       trainingKickoffPromise = null;
+      trainingDeadlineMs = null;
     }
+  }
+
+  /**
+   * Hard-reset a stuck RUNNING training state. Kills subprocess, clears progress state,
+   * and writes lastResult so the UI can show what was interrupted. Safe to call from
+   * client /reset button whenever progress has been pinned at 99% for longer than
+   * the user is willing to wait (even if we only get here via status poll, the
+   * watchdog below auto-calls this at deadline for hands-off safety).
+   */
+  resetTraining(reason: string = 'User canceled or stale RUNNING watchdog expired'): { ok: boolean } {
+    try { if (activeTrainingProc && typeof activeTrainingProc.kill === 'function') activeTrainingProc.kill('SIGKILL'); } catch { /* ignore */ }
+    activeTrainingProc = null;
+    const tail = trainingOutTail || { stdout: '', stderr: '' };
+    trainingStatus = 'FAILED';
+    lastTrainingResult = {
+      success: false,
+      error: reason,
+      stdoutTail: tail.stdout,
+      stderrTail: tail.stderr,
+      auto_promoted: false,
+    };
+    trainingDeadlineMs = null;
+    trainingKickoffPromise = null;
+    appendAudit('TRAINING', 'RESET', { reason });
+    return { ok: true };
   }
 
   /**
@@ -544,12 +635,20 @@ export class ModelManager {
   }
 
   getTrainingStatus() {
+    // --- WATCHDOG: auto-reset a RUNNING job that has exceeded its deadline.
+    // Prevents the "stuck 99% for 30 min" UX disaster when subprocess hangs
+    // or timer inside child_process Promise.resolve never fires (SIGTERM lost).
+    if (trainingStatus === 'RUNNING' && trainingDeadlineMs && Date.now() > trainingDeadlineMs) {
+      this.resetTraining(
+        `Training watchdog expired after ${Math.floor((trainingDeadlineMs - (trainingStartedAt || trainingDeadlineMs)) / 1000)}s; subprocess killed automatically`
+      );
+    }
     const elapsedSec = trainingStatus === 'RUNNING' && trainingStartedAt
       ? Math.max(0, Math.floor((Date.now() - trainingStartedAt) / 1000))
       : 0;
     // Heuristic progress: use observed epoch time if available, else use 60s/epoch Render CPU default,
     // else fall back to time-based 0-5% gentle ramp while training is spinning up (import numpy/torch).
-    const baselineEpochSec = observedEpochSeconds ?? 60;
+    const baselineEpochSec = observedEpochSeconds ?? 90; // bumped to 90 — better match slow Render CPU
     const totalExpectedSec = trainingEpochCount * baselineEpochSec;
     let progressPct = 0;
     if (trainingStatus === 'COMPLETED') {
@@ -558,11 +657,25 @@ export class ModelManager {
       progressPct = Math.min(0.99, elapsedSec / Math.max(totalExpectedSec, 60));
     } else if (trainingStatus === 'RUNNING') {
       const expected = Math.max(totalExpectedSec, 30);
-      progressPct = Math.min(0.99, Math.max(0.02, elapsedSec / expected));
+      // Progress ramp toward soft cap 0.98, never actually shows 100 until COMPLETED
+      // (avoids "99% for 30 min" when estimate underruns by a little bit — instead
+      // the bar will grow slowly toward 98% and the elapsed counter keeps climbing
+      // until deadline kills it.)
+      const raw = elapsedSec / expected;
+      const softCap = 0.98;
+      if (raw >= 1) {
+        // Over estimate: grow toward 0.98 logarithmically so bar never sits flat.
+        const over = 1 + Math.log10(Math.max(1.01, raw));
+        progressPct = Math.min(0.989, 0.92 + 0.069 * Math.min(1, (over - 1) / (over + 3)));
+      } else {
+        progressPct = Math.max(0.02, raw * softCap);
+      }
     }
     const remainingSec = trainingStatus === 'RUNNING'
       ? Math.max(0, totalExpectedSec - elapsedSec)
       : 0;
+    const tail = trainingOutTail;
+    const lr = lastTrainingResult;
     return {
       status: trainingStatus,
       currentVersion: currentTrainingVersion,
@@ -574,7 +687,15 @@ export class ModelManager {
         remainingSec,
         epochsTotal: trainingEpochCount,
         epochSecondsEstimate: baselineEpochSec,
+        deadlineSec: trainingDeadlineMs && trainingStartedAt
+          ? Math.max(0, Math.floor((trainingDeadlineMs - trainingStartedAt) / 1000))
+          : 0,
+        deadlineLeftSec: trainingDeadlineMs
+          ? Math.max(0, Math.floor((trainingDeadlineMs - Date.now()) / 1000))
+          : 0,
       },
+      stdoutTail: tail?.stdout ?? lr?.stdoutTail ?? null,
+      stderrTail: tail?.stderr ?? lr?.stderrTail ?? null,
       bestCandidate: lastTrainingResult?.best_candidate
         ? {
             version: lastTrainingResult.best_candidate.version,
@@ -592,6 +713,9 @@ export class ModelManager {
             auto_promoted: false,
             message: lastTrainingResult.message,
             error: lastTrainingResult.error,
+            code: lastTrainingResult.code,
+            stdoutTail: lastTrainingResult.stdoutTail,
+            stderrTail: lastTrainingResult.stderrTail,
           }
         : null,
       readOnlyProduction: true as const,

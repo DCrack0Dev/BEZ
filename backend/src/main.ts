@@ -404,6 +404,19 @@ app.post('/api/ai/train', requireAuth, userActionLimiter, async (req, res) => {
   }
 });
 
+app.post('/api/ai/train/reset', requireAuth, userActionLimiter, async (req, res) => {
+  try {
+    const { modelManager } = await import('./model-management');
+    const reason = (req.body?.reason && typeof req.body.reason === 'string')
+      ? req.body.reason.slice(0, 300)
+      : 'User requested reset via API';
+    const r = modelManager.resetTraining(reason);
+    return res.json({ success: true, ok: r.ok, data: modelManager.getTrainingStatus() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 app.post('/api/ai/promote', requireAuth, userActionLimiter, async (req, res) => {
   try {
     const { modelManager } = await import('./model-management');
