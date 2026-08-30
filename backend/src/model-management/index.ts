@@ -6,7 +6,7 @@
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { prisma } from '../database';
+import { prisma, checkDbHealth } from '../database';
 import { logger } from '../logging';
 import { tradingModel } from '../ai/tradingModel';
 import { appendAudit } from '../monitoring/audit';
@@ -67,6 +67,18 @@ export interface DashboardPayload {
   predictionHistory: any[];
   tradeAnalytics: Record<string, number | string>;
   modelPerformance: any;
+  postgres: {
+    ok: boolean;
+    latencyMs: number;
+    error?: string;
+    host: string | null;
+    poolsize?: { max: number };
+    tableCounts?: {
+      advancedTradeJournals: number;
+      modelArtifacts: number;
+      trainingRuns: number;
+    };
+  };
   readOnlyProduction: true;
   cloudMode: boolean;
   trainingDataSource: string | null;
@@ -904,6 +916,12 @@ export class ModelManager {
         candidates: models.filter((m: any) => !m.is_production).slice(0, 5),
         lastTraining: lastTrainingResult?.best_candidate?.evaluation || null,
       },
+      postgres: await Promise.race([
+        checkDbHealth(),
+        new Promise<{ ok: boolean; latencyMs: number; error: string; host: null }>((resolve) =>
+          setTimeout(() => resolve({ ok: false, latencyMs: 500, error: 'db check took too long', host: null }), 500)
+        ),
+      ]).catch((e) => ({ ok: false, latencyMs: 0, error: String(e), host: null })),
       readOnlyProduction: true,
       cloudMode: process.env.NODE_ENV === 'production',
       trainingDataSource: lastTrainingDataSource,

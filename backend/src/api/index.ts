@@ -14,6 +14,7 @@ import { requireAuth } from '../middleware/auth';
 import { userActionLimiter } from '../middleware/rateLimiter';
 import { simulationRouter } from '../simulation/routes';
 import { liveTradeObserver } from '../analytics/tradeObserver';
+import { checkDbHealth } from '../database';
 
 const router = express.Router();
 
@@ -31,22 +32,70 @@ router.get('/test', (req, res) => {
 // Root health check — keeps Render / Reverse Proxy probes from logging 404,
 // and prevents "warning HTTP 404 /" spamming when the app opens AI Lab on
 // a fresh base URL navigation.
-router.get('/', (_req, res) => {
-  res.status(200).json({
-    success: true,
+router.get('/', async (_req, res) => {
+  let db: any = null;
+  let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
+  let http = 200;
+  try {
+    const race = await Promise.race([
+      checkDbHealth(),
+      new Promise<{ ok: false; latencyMs: number; error: string }>((resolve) =>
+        setTimeout(() => resolve({ ok: false, latencyMs: 3000, error: 'timeout' }), 3000)
+      ),
+    ]) as any;
+    db = race;
+    if (!race.ok) {
+      statusLabel = 'DOWN';
+      http = 503;
+    } else if ((race.latencyMs ?? 0) > 1500) {
+      statusLabel = 'DEGRADED';
+      http = 200;
+    }
+  } catch (e: any) {
+    db = { ok: false, error: String(e) };
+    statusLabel = 'DOWN';
+    http = 503;
+  }
+  res.status(http).json({
+    success: statusLabel !== 'DOWN',
     service: 'LiquiBot Backend',
-    status: 'UP',
+    status: statusLabel,
     version: '4.0.0',
     time: new Date().toISOString(),
+    postgres: db,
   });
 });
-router.get('/health', (_req, res) => {
-  res.status(200).json({
-    success: true,
+router.get('/health', async (_req, res) => {
+  let db: any = null;
+  let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
+  let http = 200;
+  try {
+    const race = await Promise.race([
+      checkDbHealth(),
+      new Promise<{ ok: false; latencyMs: number; error: string }>((resolve) =>
+        setTimeout(() => resolve({ ok: false, latencyMs: 3000, error: 'timeout' }), 3000)
+      ),
+    ]) as any;
+    db = race;
+    if (!race.ok) {
+      statusLabel = 'DOWN';
+      http = 503;
+    } else if ((race.latencyMs ?? 0) > 1500) {
+      statusLabel = 'DEGRADED';
+      http = 200;
+    }
+  } catch (e: any) {
+    db = { ok: false, error: String(e) };
+    statusLabel = 'DOWN';
+    http = 503;
+  }
+  res.status(http).json({
+    success: statusLabel !== 'DOWN',
     service: 'LiquiBot Backend',
-    status: 'UP',
+    status: statusLabel,
     version: '4.0.0',
     time: new Date().toISOString(),
+    postgres: db,
   });
 });
 router.head('/', (_req, res) => {

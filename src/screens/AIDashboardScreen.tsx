@@ -602,11 +602,34 @@ const AIDashboardScreen = () => {
                   : COLORS.warning
               }
             />
+            <MetricTile
+              label="Postgres DB"
+              value={data?.postgres?.ok ? 'OK' : 'FAIL'}
+              accent={data?.postgres?.ok ? COLORS.success : COLORS.error}
+            />
           </View>
           {(Number(data?.tradeAnalytics?.learningDatasetSamples ?? learning?.datasetSize ?? 0) < 4) ? (
             <Text style={[TYPOGRAPHY.bodySecondary, { marginTop: SPACING.s, color: COLORS.warning }]}>
               ⚠ Need 4+ labeled closed MT5 trades before training can learn. Continuous learning dataset is cold — use MT5 + EA to build history first.
             </Text>
+          ) : null}
+          {data?.postgres ? (
+            <View style={styles.dbInfoCard}>
+              <Text style={TYPOGRAPHY.bodySecondary}>
+                Host: {data.postgres.host || '(not connected)'}
+              </Text>
+              <Text style={TYPOGRAPHY.bodySecondary}>
+                Latency: {data.postgres.latencyMs}ms · Pool max {data.postgres.poolsize?.max ?? '—'}
+                {data.postgres.ok ? '' : ` · Error: ${data.postgres.error || 'unknown'}`}
+              </Text>
+              {data.postgres.tableCounts ? (
+                <Text style={TYPOGRAPHY.bodySecondary}>
+                  Counts: journals={data.postgres.tableCounts.advancedTradeJournals} ·
+                  artifacts={data.postgres.tableCounts.modelArtifacts} ·
+                  runs={data.postgres.tableCounts.trainingRuns}
+                </Text>
+              ) : null}
+            </View>
           ) : null}
         </Section>
 
@@ -879,6 +902,15 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 11,
     color: COLORS.textPrimary,
+  },
+  dbInfoCard: {
+    marginTop: SPACING.m,
+    padding: SPACING.s,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.cardAlt || COLORS.surface2,
+    gap: 2,
   },
   quickPromoteBanner: {
     backgroundColor: COLORS.card,

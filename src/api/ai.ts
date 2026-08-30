@@ -21,6 +21,18 @@ export interface AIDashboardData {
     learningDatasetSamples?: number;
   };
   modelPerformance: any;
+  postgres?: {
+    ok: boolean;
+    latencyMs: number;
+    error?: string;
+    host: string | null;
+    poolsize?: { max: number };
+    tableCounts?: {
+      advancedTradeJournals: number;
+      modelArtifacts: number;
+      trainingRuns: number;
+    };
+  };
   readOnlyProduction: true;
   cloudMode?: boolean;
   trainingDataSource?: string | null;

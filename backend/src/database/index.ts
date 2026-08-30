@@ -5,9 +5,11 @@
 import 'dotenv/config';
 import { PrismaClient, Prisma } from '../generated/prisma';
 import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { logger } from '../logging';
 
 const { Decimal } = Prisma;
+let dbHostSnippet: string | null = null;
 
 // Allows callers (e.g. trading-engine's close-trade transaction) to pass an
 // interactive transaction client so writes commit atomically, while
@@ -31,12 +33,46 @@ if (!process.env.DATABASE_URL) {
   );
 }
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+try {
+  const u = new URL(process.env.DATABASE_URL);
+  const host = u.hostname || '';
+  if (host) {
+    const masked = host.length > 6
+      ? `${host.slice(0, 3)}***${host.slice(-3)}`
+      : '***';
+    dbHostSnippet = `${u.protocol}//${u.username ? '***@' : ''}${masked}${u.port ? `:${u.port}` : ''}${u.pathname ? u.pathname.split('/').slice(0, 2).join('/') : ''}`;
+  }
+} catch {
+  dbHostSnippet = null;
+}
+
+// Render Postgres free / Small plan caps total connections very low (Free=5, Pro plan higher).
+// Prisma adapter passes its own pool through pg.Pool defaults to 10 which silently exhausts the
+// Render quota after 2-3 restarts → socket hangs, dashboard returns empty,
+// AI Lab looks dead, journal 400s on writes. Cap pool low, short idle timeout, quick connect timeout.
+const defaultMaxConn = process.env.RENDER === 'true' || process.env.RENDER_SERVICE_ID ? 3 : 10;
+const maxConn = Number(process.env.PG_MAX_CONNECTIONS ?? defaultMaxConn);
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: Math.max(1, Math.min(30, Number.isFinite(maxConn) ? maxConn : 3)),
+  connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 10000),
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 15000),
+  allowExitOnIdle: true,
+});
+pool.on('error', (err) => {
+  logger.warn(`[pg.Pool] error: ${err?.message ?? String(err)}`);
+});
+
+const adapter = new PrismaPg(pool);
 
 const prisma = new PrismaClient({
   adapter,
   log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['query', 'info', 'warn', 'error'],
 });
+
+export function getDbHostSnippet(): string | null {
+  return dbHostSnippet;
+}
 
 export async function initDb() {
   try {
@@ -46,6 +82,54 @@ export async function initDb() {
   } catch (error) {
     logger.error('Failed to connect to database', error);
     throw error;
+  }
+}
+
+/**
+ * Returns a DB health report. Used by Render /health probes so the load
+ * balancer terminates pods that can't talk to Postgres (instead of keeping
+ * them alive and serving empty dashboards / stuck training).
+ */
+export async function checkDbHealth(): Promise<{
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+  host: string | null;
+  poolsize?: { max: number };
+  tableCounts?: {
+    advancedTradeJournals: number;
+    modelArtifacts: number;
+    trainingRuns: number;
+  };
+}> {
+  const t0 = Date.now();
+  try {
+    const r = await prisma.$queryRawUnsafe<{ one: number }[]>('SELECT 1 AS one');
+    const t1 = Date.now();
+    let counts: any = undefined;
+    try {
+      const [tr, ma, tj] = await Promise.all([
+        prisma.trainingRun.count(),
+        prisma.modelArtifact.count(),
+        prisma.advancedTradeJournal.count(),
+      ]);
+      counts = { advancedTradeJournals: tj, modelArtifacts: ma, trainingRuns: tr };
+    } catch { /* counts optional */ }
+    return {
+      ok: Array.isArray(r) && (r[0]?.one === 1),
+      latencyMs: t1 - t0,
+      host: getDbHostSnippet(),
+      poolsize: { max: (pool as any)?.options?.max ?? maxConn },
+      tableCounts: counts,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - t0,
+      error: e?.message ?? String(e),
+      host: getDbHostSnippet(),
+      poolsize: { max: (pool as any)?.options?.max ?? maxConn },
+    };
   }
 }
 
