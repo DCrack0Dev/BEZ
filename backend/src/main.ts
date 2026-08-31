@@ -1,4 +1,6 @@
 import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
 import http from 'http';
 import { Server } from 'socket.io';
 import dotenv from 'dotenv';
@@ -6,7 +8,7 @@ import dotenv from 'dotenv';
 import { logger } from './logging';
 import { TradingEngine } from './trading-engine';
 import { attachAPI } from './api';
-import { prisma, getCandles, listGateProposals, approveProposal, rejectProposal } from './database';
+import { prisma, getCandles, listGateProposals, approveProposal, rejectProposal, checkDbHealth } from './database';
 import { monitoring } from './monitoring';
 import { continuousLearning } from './continuous-learning';
 import {
@@ -28,6 +30,22 @@ import { gateConfig, GATE_DEFAULTS } from './gate-config/gateConfig';
 dotenv.config();
 
 const app = express();
+// Helmet early: basic HTTP security headers. Uses permissive crossOriginResourcePolicy
+// and crossOriginEmbedderPolicy so cross-origin RN apps render embedded fonts/images
+// (Expo Go / WebView devtools).
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+    frameguard: false, // required for embedded dashboards / embedded views
+  })
+);
+// Global CORS BEFORE routes (socket.io has own CORS explicit in Server({ cors: }) for socket but HTTP routes here.
+app.use(cors({ origin: corsOriginCheck, credentials: true }));
+// Preflight OPTIONS requests short-circuits here with 204 + correct CORS headers
+// BEFORE any auth middleware — else axios reports "Network Error" on preflight.
+app.options('*', cors({ origin: corsOriginCheck, credentials: true }));
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 
@@ -81,7 +99,57 @@ io.use((socket, next) => {
 // Global monitoring middleware (API latency / errors)
 app.use(monitoring.middleware());
 
-// Attach API
+// Root + health checks BEFORE attachAPI — they exist once, with real Postgres
+// SELECT 1, so Render load balancers can mark pods UNHEALTHY when DB link dead
+// (instead of keep-podding a "healthy" server that only returns empty dashboards).
+// attachAPI() mounts handlers only under /api to avoid duplicates.
+async function healthPayload() {
+  let db: any = null;
+  let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
+  let http = 200;
+  try {
+    const race = (await Promise.race([
+      checkDbHealth(),
+      new Promise<any>((resolve) =>
+        setTimeout(() => resolve({ ok: false, latencyMs: 3000, error: 'timeout' }), 3000)
+      ),
+    ])) as any;
+    db = race;
+    if (!race.ok) {
+      statusLabel = 'DOWN';
+      http = 503;
+    } else if ((race.latencyMs ?? 0) > 1500) {
+      statusLabel = 'DEGRADED';
+      http = 200;
+    }
+  } catch (e: any) {
+    db = { ok: false, error: String(e) };
+    statusLabel = 'DOWN';
+    http = 503;
+  }
+  return { http, payload: {
+    success: statusLabel !== 'DOWN',
+    service: 'LiquiBot Backend',
+    status: statusLabel,
+    version: '4.0.0',
+    time: new Date().toISOString(),
+    postgres: db,
+  }};
+}
+
+app.get('/', async (_req, res) => {
+  const { http, payload } = await healthPayload();
+  res.status(http).json(payload);
+});
+app.get('/health', async (_req, res) => {
+  const { http, payload } = await healthPayload();
+  res.status(http).json(payload);
+});
+app.head('/', (_req, res) => res.status(200).end());
+app.head('/health', (_req, res) => res.status(200).end());
+
+// Attach API — see attachAPI for router mount details. Now mounts ONLY at /api
+// (never also at /) to avoid duplicate handlers, double auth, double CORS.
 attachAPI(app);
 
 // API Endpoints
@@ -429,27 +497,10 @@ app.post('/api/ai/promote', requireAuth, userActionLimiter, async (req, res) => 
   }
 });
 
-app.post('/api/backtest', requireAuth, userActionLimiter, async (req, res) => {
-  try {
-    const { backtestEngine } = await import('./backtesting');
-    const result = await backtestEngine.run({
-      dataPath: req.body?.dataPath,
-      modelVersion: req.body?.modelVersion,
-    });
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ success: false, error: String(error) });
-  }
-});
-
-app.get('/api/backtest/reports', requireAuth, async (_req, res) => {
-  try {
-    const { backtestEngine } = await import('./backtesting');
-    res.json({ success: true, data: backtestEngine.listReports() });
-  } catch (error) {
-    res.status(500).json({ success: false, error: String(error) });
-  }
-});
+// NOTE: /api/backtest* routes are handled INSIDE attachAPI → router.post('/backtest', …)
+// (202 Accepted + /status poll), NOT here in main.ts. Previous blocking
+// `await backtestEngine.run()` in main.ts caused event loop starvation and the
+// classic "Backtest clicked → Train on Cloud button dies, everything Network Error" bug.
 
 // --- Cloud Storage Persistence (Ephemeral FS Safety) ---
 // Dual-writes saved_models, saved_scalers, data/learning to Postgres BYTEA blobs,

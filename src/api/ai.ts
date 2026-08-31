@@ -116,6 +116,43 @@ export async function cancelAITraining(reason?: string) {
   return res.data;
 }
 
+/** Poll until backtest leaves RUNNING (or timeout). Shared pattern with waitForTraining. */
+export async function waitForBacktest(options?: {
+  intervalMs?: number;
+  timeoutMs?: number;
+  onTick?: (status: any) => void;
+}): Promise<any> {
+  const intervalMs = options?.intervalMs ?? 3000;
+  const timeoutMs = options?.timeoutMs ?? 20 * 60 * 1000;
+  const started = Date.now();
+  let sawRunning = false;
+  while (Date.now() - started < timeoutMs) {
+    const status = await fetchBacktestStatus();
+    options?.onTick?.(status);
+    if (status.status === 'RUNNING') sawRunning = true;
+    if (sawRunning && (status.status === 'COMPLETED' || status.status === 'FAILED')) return status;
+    if (!sawRunning && Date.now() - started > 10000 && (status.status === 'COMPLETED' || status.status === 'FAILED')) {
+      return status;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error('Backtest timed out while waiting for server status');
+}
+
+export async function fetchBacktestStatus(): Promise<any> {
+  const res = await apiClient.get('/api/backtest/status', { timeout: 30000 });
+  return res.data.data ?? res.data;
+}
+
+export async function cancelBacktest(reason?: string) {
+  const res = await apiClient.post(
+    '/api/backtest/reset',
+    { reason: reason || 'User canceled from mobile app' },
+    { timeout: 20000 }
+  );
+  return res.data;
+}
+
 /** Poll until training leaves RUNNING (or timeout). */
 export async function waitForTraining(options?: {
   intervalMs?: number;

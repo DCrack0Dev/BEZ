@@ -7,7 +7,7 @@ import { journalManager } from '../trade-journal';
 import { modelManager } from '../model-management';
 import { monitoring } from '../monitoring';
 import { readAuditLog } from '../monitoring/audit';
-import { backtestEngine } from '../backtesting';
+import { backtestEngine, getBacktestStatus, resetBacktest } from '../backtesting';
 import { continuousLearning } from '../continuous-learning';
 import { corsOriginCheck } from '../middleware/corsConfig';
 import { requireAuth } from '../middleware/auth';
@@ -18,92 +18,24 @@ import { checkDbHealth } from '../database';
 
 const router = express.Router();
 
-// Apply CORS (explicit allowlist, see middleware/corsConfig.ts) and body parser to router
+// Apply CORS (explicit allowlist, see middleware/corsConfig.ts) and body parser to router.
+// NOTE: main.ts ALSO applies global CORS + OPTIONS * before this router runs.
+// Router-level CORS is kept here as defense-in-depth so future refactors don't break it.
 router.use(cors({ origin: corsOriginCheck, credentials: true }));
 router.use(bodyParser.json({ limit: '50mb' }));
-router.use(bodyParser.urlencoded({ extended: true }));
+router.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// Health check endpoint
+// Health check endpoint (API-only /api/test — used by mobile for server connectivity test)
 router.get('/test', (req, res) => {
   apiLogger.info('Health check requested');
   res.status(200).send('OK');
 });
 
-// Root health check — keeps Render / Reverse Proxy probes from logging 404,
-// and prevents "warning HTTP 404 /" spamming when the app opens AI Lab on
-// a fresh base URL navigation.
-router.get('/', async (_req, res) => {
-  let db: any = null;
-  let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
-  let http = 200;
-  try {
-    const race = await Promise.race([
-      checkDbHealth(),
-      new Promise<{ ok: false; latencyMs: number; error: string }>((resolve) =>
-        setTimeout(() => resolve({ ok: false, latencyMs: 3000, error: 'timeout' }), 3000)
-      ),
-    ]) as any;
-    db = race;
-    if (!race.ok) {
-      statusLabel = 'DOWN';
-      http = 503;
-    } else if ((race.latencyMs ?? 0) > 1500) {
-      statusLabel = 'DEGRADED';
-      http = 200;
-    }
-  } catch (e: any) {
-    db = { ok: false, error: String(e) };
-    statusLabel = 'DOWN';
-    http = 503;
-  }
-  res.status(http).json({
-    success: statusLabel !== 'DOWN',
-    service: 'LiquiBot Backend',
-    status: statusLabel,
-    version: '4.0.0',
-    time: new Date().toISOString(),
-    postgres: db,
-  });
-});
-router.get('/health', async (_req, res) => {
-  let db: any = null;
-  let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
-  let http = 200;
-  try {
-    const race = await Promise.race([
-      checkDbHealth(),
-      new Promise<{ ok: false; latencyMs: number; error: string }>((resolve) =>
-        setTimeout(() => resolve({ ok: false, latencyMs: 3000, error: 'timeout' }), 3000)
-      ),
-    ]) as any;
-    db = race;
-    if (!race.ok) {
-      statusLabel = 'DOWN';
-      http = 503;
-    } else if ((race.latencyMs ?? 0) > 1500) {
-      statusLabel = 'DEGRADED';
-      http = 200;
-    }
-  } catch (e: any) {
-    db = { ok: false, error: String(e) };
-    statusLabel = 'DOWN';
-    http = 503;
-  }
-  res.status(http).json({
-    success: statusLabel !== 'DOWN',
-    service: 'LiquiBot Backend',
-    status: statusLabel,
-    version: '4.0.0',
-    time: new Date().toISOString(),
-    postgres: db,
-  });
-});
-router.head('/', (_req, res) => {
-  res.status(200).end();
-});
-router.head('/health', (_req, res) => {
-  res.status(200).end();
-});
+// NOTE: root / and /health DO NOT live on this router — they are ONLY registered
+// in main.ts, outside attachAPI, under the global app with Postgres SELECT 1.
+// Mounting them here (and then attaching router to both '/' + '/api') caused
+// duplicate handlers that fired auth/CORS middleware twice per request → random
+// "Network Error" on Train on Cloud / Backtest when starved.
 
 // --- Advanced Trade Journal API ---
 router.get('/journal', async (req, res) => {
@@ -335,25 +267,54 @@ router.get('/audit', (req, res) => {
 });
 
 // --- Backtesting ---
-router.post('/backtest', async (req, res) => {
+// Python backtest can run > 30s on Render CPU (slow numpy/torch on large datasets)
+// → return 202 Accepted immediately, client polls /status. This guarantees the
+// 30s axios timeout doesn't fire mid-run and kill the connection (which was
+// causing "Network Error" across all pending requests due to event loop starvation).
+router.post('/backtest', requireAuth, userActionLimiter, async (req, res) => {
   try {
-    const { dataPath, modelVersion } = req.body || {};
-    const result = await backtestEngine.run({ dataPath, modelVersion });
-    res.json(result);
+    const { dataPath, modelVersion, deadlineMs } = req.body || {};
+    const kickoff = backtestEngine.enqueue({ dataPath, modelVersion, deadlineMs });
+    if (!kickoff.accepted) {
+      return res.status(409).json({
+        success: false,
+        error: kickoff.error || 'Backtest already in progress',
+        data: getBacktestStatus(),
+      });
+    }
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      data: getBacktestStatus(),
+      note: 'Backtest started. Poll GET /api/backtest/status.',
+    });
   } catch (error) {
-    apiLogger.error(`Backtest failed: ${error}`);
-    monitoring.trackFailure(`Backtest failed: ${error}`, 'ERROR');
+    apiLogger.error(`Backtest enqueue failed: ${error}`);
+    monitoring.trackFailure(`Backtest enqueue failed: ${error}`, 'ERROR');
     res.status(500).json({ success: false, error: (error as Error).message });
   }
 });
 
-router.get('/backtest/reports', (_req, res) => {
+router.get('/backtest/status', requireAuth, (_req, res) => {
+  res.json({ success: true, data: getBacktestStatus() });
+});
+
+router.post('/backtest/reset', requireAuth, userActionLimiter, async (req, res) => {
+  const reason =
+    req.body?.reason && typeof req.body.reason === 'string'
+      ? req.body.reason.slice(0, 300)
+      : 'User canceled from app';
+  const r = resetBacktest(reason);
+  res.json({ success: true, ok: r.ok, data: getBacktestStatus() });
+});
+
+router.get('/backtest/reports', requireAuth, (_req, res) => {
   res.json({ success: true, data: backtestEngine.listReports() });
 });
 
-router.get('/backtest/reports/:name', (req, res) => {
+router.get('/backtest/reports/:name', requireAuth, (req, res) => {
   try {
-    res.json({ success: true, data: backtestEngine.readReport(req.params.name) });
+    res.json({ success: true, data: backtestEngine.readReport(String(req.params.name || '')) });
   } catch (error) {
     res.status(404).json({ success: false, error: (error as Error).message });
   }
@@ -402,7 +363,9 @@ router.use('/simulation', simulationRouter);
 export const apiRouter = router;
 
 export const attachAPI = (app: express.Application) => {
-  app.use('/', apiRouter);
+  // ONLY mount at /api. Previous '/'+ '/api' duplicate mount caused every
+  // handler to fire twice (double auth, double CORS preflight, double body parsing)
+  // → Train on Cloud and Backtest often returned "Network Error" on Render.
   app.use('/api', apiRouter);
-  apiLogger.info('API layer attached (cloud AI train/promote, monitoring, backtest, continuous learning)');
+  apiLogger.info('API layer attached under /api (cloud AI train/promote, monitoring, backtest, continuous learning)');
 };

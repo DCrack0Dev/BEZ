@@ -3,7 +3,7 @@
  * Production model is NEVER replaced automatically.
  */
 
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { prisma, checkDbHealth } from '../database';
