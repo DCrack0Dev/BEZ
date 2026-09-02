@@ -20,7 +20,7 @@ import {
   verifyEaApiKey,
   RefreshTokenPayload,
 } from './middleware/auth';
-import { eaValidateLimiter, userActionLimiter, eaPollingLimiter } from './middleware/rateLimiter';
+import { eaValidateLimiter, userActionLimiter, eaPollingLimiter, eaCommandsLimiter } from './middleware/rateLimiter';
 import { validateBody, eaUpdateSchema, orderSchema, botConfigSchema, eaValidateSchema, eaExecutionReportSchema } from './middleware/validation';
 import { replayGuard } from './middleware/replayGuard';
 import { corsOriginCheck } from './middleware/corsConfig';
@@ -240,21 +240,25 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
   try {
     await tradingEngine.processMT5Update(data);
     monitoring.trackBrokerResponse(true, Date.now() - start, 'EA_UPDATE');
-    // NOTE: engine internally emits EA_HEARTBEAT (full payload with setupProgress/signalReason)
-    // after every update, so we deliberately do NOT emit a second QUICK heartbeat here
-    // (that used to double-process client store updates on every tick).
-    res.json({ success: true, commands: [] });
+    // Return commands[] inline so the EA does NOT need to run a separate tight
+    // poll loop on /api/ea/commands — that was the single largest contributor
+    // to Cloudflare 429 challenge pages (half of all EA HTTP requests were
+    // separate /commands polls). Backwards-compat: /commands endpoint still
+    // works for older EAs.
+    const commands = tradingEngine.clearPendingCommands();
+    if (commands.length > 0) logger.info('Sent commands (inline update) to EA', commands.length);
+    res.json({ success: true, commands });
   } catch (error) {
     monitoring.trackBrokerResponse(false, Date.now() - start, 'EA_UPDATE_FAIL');
     monitoring.trackFailure(`EA update failed: ${error}`, 'BROKER');
     logger.error('Error in /api/ea/update', error);
-    res.status(500).json({ success: false, error: 'Failed to process update' });
+    res.status(500).json({ success: false, error: 'Failed to process update', commands: [] });
   }
 });
 
-app.get('/api/ea/commands', requireEaKey, eaPollingLimiter, (req, res) => {
+app.get('/api/ea/commands', requireEaKey, eaCommandsLimiter, (req, res) => {
   const cmds = tradingEngine.clearPendingCommands();
-  if (cmds.length > 0) logger.info('Sent commands to EA', cmds.length);
+  if (cmds.length > 0) logger.info('Sent commands to EA (/commands compat)', cmds.length);
   res.json(cmds);
 });
 
