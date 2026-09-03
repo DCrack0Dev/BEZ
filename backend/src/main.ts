@@ -41,10 +41,9 @@ app.use(
   })
 );
 // Global CORS BEFORE routes (socket.io has own CORS explicit in Server({ cors: }) for socket but HTTP routes here.
+// app.use(cors(...)) covers ALL methods including OPTIONS preflights, so we don't need a separate
+// app.options('*') call — Express 5 / path-to-regexp v7 rejects bare '*' as a route (PathError).
 app.use(cors({ origin: corsOriginCheck, credentials: true }));
-// Preflight OPTIONS requests short-circuits here with 204 + correct CORS headers
-// BEFORE any auth middleware — else axios reports "Network Error" on preflight.
-app.options('*', cors({ origin: corsOriginCheck, credentials: true }));
 
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
