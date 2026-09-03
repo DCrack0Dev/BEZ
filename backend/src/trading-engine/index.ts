@@ -173,6 +173,7 @@ export class TradingEngine {
     }
     await this.rehydrateOpenPositions();
     await this.reconcileStaleOpenJournals().catch((e) => logger.warn('Stale journal reconcile skipped', e));
+    await this.hydrateClosedTradesFromDb().catch((e) => logger.warn('Closed trades hydrate skipped', e));
     logger.success('Trading Engine initialized with PostgreSQL');
   }
 
@@ -246,6 +247,57 @@ export class TradingEngine {
       }
     } catch (e) {
       logger.warn('Stale OPEN journal reconciler failed (non-fatal)', e);
+    }
+  }
+
+  /**
+   * Render containers have ephemeral in-memory state — every restart/push wipes
+   * closedTrades[] → empty, which is the #1 source of the App Journal showing "no
+   * trades" on open". This re-seeds the in-memory closedTrades array on boot
+   * from the Postgres AdvancedTradeJournal closed rows (the same rows the AI Lab
+   * dashboard already shows). Uses outcome non-OPEN, max 200 rows LIFO order.
+   */
+  private async hydrateClosedTradesFromDb() {
+    try {
+      const rows = await prisma.advancedTradeJournal.findMany({
+        where: { outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] }, closeTimestamp: { not: null } },
+        orderBy: { closeTimestamp: 'desc' },
+        take: 200,
+      });
+      const ticketsSeen = new Set<string>();
+      const arr: any[] = [];
+      for (const r of rows as any[]) {
+        const ticket = String(r.ticket);
+        if (ticketsSeen.has(ticket)) continue;
+        ticketsSeen.add(ticket);
+        const openTs = r.entryTimestamp ? new Date(r.entryTimestamp).getTime() : null;
+        const closeTs = r.closeTimestamp ? new Date(r.closeTimestamp).getTime() : Date.now();
+        arr.push({
+          ticket,
+          symbol: r.symbol || 'UNKNOWN',
+          type: String(r.direction || 'BUY').toUpperCase(),
+          lots: Number(r.lotSize || 0.01),
+          openPrice: Number(r.entryPrice || 0),
+          closePrice: Number(r.executionPrice || r.entryPrice || 0),
+          profit: Number(r.profitDollars ?? 0),
+          pnl: Number(r.profitDollars ?? 0),
+          profitPips: Number(r.profitPips ?? 0),
+          outcome: String(r.outcome),
+          sl: Number(r.sl || 0),
+          tp: Number(r.tp || 0),
+          stopLoss: Number(r.sl || 0),
+          takeProfit: Number(r.tp || 0),
+          openTime: openTs,
+          closeTime: closeTs,
+          _source: 'hydrate_db',
+        });
+      }
+      this.closedTrades = arr;
+      if (this.closedTrades.length) {
+        logger.success(`[Hydrate] Re-seeded closedTrades memory with ${this.closedTrades.length} rows from Postgres`);
+      }
+    } catch (e) {
+      logger.warn('Failed to hydrate closedTrades memory from Postgres (non-fatal)', e);
     }
   }
 
@@ -363,8 +415,22 @@ export class TradingEngine {
       // This table carries the EXACT P&L that MT5 reports (profitDollars / profitPips / outcome)
       const dbJournal = await getAdvancedJournalClosedTrades({ range, limit: 200 });
 
-      // Step 2: secondary — journalManager (PostgreSQL or JSONL fallback)
-      const entries = await journalManager.getAllEntries({ limit: 200 });
+      // Step 2: secondary — journalManager (PostgreSQL or JSONL fallback).
+      // Pass range startDate (trades closed AFTER start) so filter=today/etc matches
+      // the App Journal's user expectation (closed today, not opened today).
+      const jrnlOpts: any = { limit: 200 };
+      if (range !== 'all') {
+        const now = new Date();
+        const d = new Date(now);
+        if (range === 'today') d.setHours(0, 0, 0, 0);
+        else if (range === 'week') { const day = d.getDay() || 7; d.setDate(d.getDate() - (day - 1)); d.setHours(0, 0, 0, 0); }
+        else { d.setDate(1); d.setHours(0, 0, 0, 0); }
+        jrnlOpts.startDate = d;
+        // journalManager's getAllEntries keys the range on `entryTimestamp` by default;
+        // we pass outcome closed filter here so range mismatch can't bring OPEN rows.
+        jrnlOpts.outcome = { in: ['WIN', 'LOSS', 'BREAKEVEN'] };
+      }
+      const entries = await journalManager.getAllEntries(jrnlOpts);
       const byTicket = new Map(entries.map(e => [String(e.ticket), e]));
       const merged = new Map<string, any>();
 
