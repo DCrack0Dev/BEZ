@@ -233,6 +233,7 @@ export class TradingEngine {
               durationMinutes: p.closeTimestamp && jEntry?.entryTimestamp
                 ? Math.max(0, Math.round((new Date(p.closeTimestamp).getTime() - new Date(jEntry.entryTimestamp as any).getTime()) / 60000))
                 : undefined,
+              lotSize: p.lotSize,
               updatedAt: new Date(),
               reasonForExit: 'CLOSED_BY_RECONCILE',
             },
@@ -276,7 +277,7 @@ export class TradingEngine {
           ticket,
           symbol: r.symbol || 'UNKNOWN',
           type: String(r.direction || 'BUY').toUpperCase(),
-          lots: Number(r.lotSize || 0.01),
+          lots: Number(r.volume ?? r.lotSize ?? r.lots ?? 0.01),
           openPrice: Number(r.entryPrice || 0),
           closePrice: Number(r.executionPrice || r.entryPrice || 0),
           profit: Number(r.profitDollars ?? 0),
@@ -715,12 +716,30 @@ export class TradingEngine {
           0
         );
         const closePriceRaw = Number(closedTrade?.closePrice ?? this.accountState.price);
-        const lots = Number(
+        // Lot size: MT5 standard field is `volume`; some EAs send `lots`; DNA stores `lotSize`;
+        // posState in-memory or Position table DB carries actual value. Render ephemeral restarts
+        // wipe posState/DNA, so fall back to prisma.position.lotSize before the hardcoded default.
+        let lots: number = Number(
+          closedTrade?.volume ??
           closedTrade?.lots ??
+          (posState as any)?.volume ??
+          (posState as any)?.lots ??
+          (posState as any)?.lotSize ??
           dnaAny.lotSize ??
           dnaAny.lots ??
-          0.01
+          0
         );
+        if (!lots || lots <= 0) {
+          try {
+            const posRow = await prisma.position.findUnique({
+              where: { ticket: String(ticket) },
+              select: { lotSize: true, profit: true, openPrice: true, direction: true },
+            });
+            const fromDb = Number(posRow?.lotSize || 0);
+            if (fromDb > 0) lots = fromDb;
+          } catch (_) { /* ignore */ }
+        }
+        if (!lots || lots <= 0) lots = 0.01;
         const dirRaw = dna?.direction ?? closedTrade?.type ?? posState?.direction ?? 'BUY';
         const dir = (dirRaw === 'BUY' || dirRaw === 0 || String(dirRaw).toUpperCase() === 'BUY') ? 'BUY' : 'SELL';
         const pipVal = Number(this.accountState.pipValue || closedTrade?.pipValue || 1);
@@ -1015,7 +1034,19 @@ export class TradingEngine {
           ticket,
           symbol: closedTrade?.symbol || this.accountState.symbol,
           type: closedTrade?.type || dnaAnyClose.direction || 'BUY',
-          lots: Number(closedTrade?.lots || dnaAnyClose.lots || dnaAnyClose.lotSize || 0),
+          // Use the already-resolved `lots` value from the top of this close
+          // handler (it ran volume→lots→posState→DB.prisma.position fallback).
+          lots: Number(
+            closedTrade?.volume ??
+            closedTrade?.lots ??
+            (posStateClose as any)?.volume ??
+            (posStateClose as any)?.lots ??
+            (posStateClose as any)?.lotSize ??
+            dnaAnyClose.lots ??
+            dnaAnyClose.lotSize ??
+            lots ??
+            0.01
+          ),
           openPrice: Number(closedTrade?.openPrice || dnaAnyClose.entryPrice || 0),
           closePrice,
           profit,

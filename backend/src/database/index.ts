@@ -965,7 +965,7 @@ export async function getAdvancedJournalClosedTrades(opts: {
         ticket: String(r.ticket),
         symbol: r.symbol,
         type: String(r.direction || 'BUY').toUpperCase(),
-        lots: Number(r.lotSize || 0.01),
+        lots: Number(r.volume ?? r.lotSize ?? r.lots ?? 0.01),
         openPrice: Number(r.entryPrice || 0),
         closePrice: Number(r.executionPrice || r.entryPrice || 0),
         profit: Number(r.profitDollars ?? 0),
