@@ -639,10 +639,28 @@ io.on('connection', (socket) => {
 
 // Start server
 async function startServer() {
+  // Render "Timed Out deploy" fix: Listen on port FIRST, then run slow
+  // cold-start async work (DB restores / engine init / snapshots). Render's
+  // deploy probes the service within ~10s of the build command exiting;
+  // tradingEngine.init can take 15–25s on Postgres free-tier because of
+  // checkDbHealth SELECT 1 + table counts + cold-boot DB restore loops, so
+  // previously server.listen happened AFTER engine init → Render saw no
+  // response → "Timed Out" even though the process came up.
+  const httpListenPromise = new Promise<void>((resolve) => {
+    server.listen(Number(PORT), '0.0.0.0', () => resolve());
+  });
+  // Register the fast health probe endpoint BEFORE awaiting engine init.
+  // Render Web Service → Health Check Path: set this to /health-fast in
+  // Render dashboard (Settings → Health Check) for zero-latency deploy
+  // checks. /health and / still run the real SELECT 1 watchdog for live LB.
+  app.get('/health-fast', (_req, res) => {
+    res.type('application/json');
+    res.status(200).json({ status: 'UP', fast: true, ts: Date.now() });
+  });
+  await httpListenPromise;
+  logger.info('[Listen] HTTP + Socket.IO port bound, Render probes see 200 on /health-fast');
+
   // --- Cloud cold-start restore BEFORE engine init ---
-  // Render/Railway/Fly wipe the container FS on deploy. If saved_models/registry.json
-  // is missing on disk, pull everything from the ModelArtifact table (Postgres BYTEA blobs)
-  // so training history, production model, scalers, and labeled dataset survive restarts.
   const restore = await restoreFromDbIfCold();
   if (restore.restored > 0) {
     logger.success(`[CloudPersistence] Restored ${restore.restored} artifacts from DB on cold boot`);
@@ -650,15 +668,12 @@ async function startServer() {
 
   await tradingEngine.init();
   continuousLearning.start();
-  server.listen(Number(PORT), '0.0.0.0', () => {
-    logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
-    logger.info('Monitoring + continuous learning active');
-    if (process.env.NODE_ENV === 'production') {
-      logger.info('[CloudPersistence] Running in production — models/scalers/datasets dual-written to FS + DB');
-      // Background snapshot of any pre-existing FS state on first boot (idempotent)
-      setTimeout(() => snapshotAllToDb().catch(() => {}), 10000);
-    }
-  });
+  logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
+  logger.info('Monitoring + continuous learning active');
+  if (process.env.NODE_ENV === 'production') {
+    logger.info('[CloudPersistence] Running in production — models/scalers/datasets dual-written to FS + DB');
+    setTimeout(() => snapshotAllToDb().catch(() => {}), 10000);
+  }
 }
 
 startServer();
