@@ -270,8 +270,14 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
         currency: data.currency || 'USD',
         lastUpdate: Date.now(),
         ea_connected: true,
-        autoTradingEnabled: typeof data.autoTradingEnabled === 'boolean' ? data.autoTradingEnabled : undefined,
-        aiTradingEnabled: typeof data.aiTradingEnabled === 'boolean' ? data.aiTradingEnabled : undefined,
+        // NOTE: DO NOT accept EA payload autoTrading/aiTrading/trailing flags here.
+        // Mobile app user toggles are APP-USER-OWNED; EA heartbeats happen every
+        // 60s with stale auto/ai/trailing=false from broker/MT5 state which would
+        // flip the switches OFF against the user's intent. Use the server-side
+        // persisted Postgres BotSetting values instead (tradingEngine owns state).
+        autoTradingEnabled: (tradingEngine.getAccountState() as any).autoTradingEnabled,
+        aiTradingEnabled: (tradingEngine.getAccountState() as any).aiTradingEnabled,
+        trailingStopEnabled: (tradingEngine.getAccountState() as any).trailingStopEnabled,
         serverTs: Date.now(),
         fastPath: true,
       });
@@ -382,9 +388,14 @@ app.get('/api/orders/closed', requireAuth, async (req, res) => {
 });
 app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema), replayGuard, (req, res) => {
   if (req.body.action === 'RESUME' || req.body.action === 'PAUSE') {
+    const nextAuto = req.body.action === 'RESUME';
     const state = tradingEngine.getAccountState();
-    tradingEngine.processMT5Update({ ...state, autoTradingEnabled: req.body.action === 'RESUME' } as any);
-    return res.json({ success: true });
+    tradingEngine.processMT5Update({ ...state, autoTradingEnabled: nextAuto } as any);
+    // Persist the new autoTradingEnabled flag to Postgres BotSetting (survives
+    // Render restart). The app can hit RESUME/PAUSE via dashboard as well as
+    // via the autoTradingEnabled toggle UI; both paths must write DB.
+    (tradingEngine as any).applyBotConfig({ autoTradingEnabled: nextAuto });
+    return res.json({ success: true, autoTradingEnabled: nextAuto });
   }
 
   // Manual BUY/SELL must carry risk-sized lots + SL/TP — never blind-forward.
@@ -419,20 +430,40 @@ app.post('/api/order', requireAuth, userActionLimiter, validateBody(orderSchema)
   tradingEngine.addCommand(req.body);
   res.json({ success: true });
 });
+// GET /api/bot/config: lets the mobile app hydrate switches BEFORE socket.io
+// handshake, so the UI renders correct toggle state even on cold app boot
+// (socket.io has optional auth handshake that can take 1-3s, the user sees
+// switches flash to defaults then flip back otherwise). Returns same shape as
+// BOT_CONFIG socket broadcast.
+app.get('/api/bot/config', requireAuth, (_req, res) => {
+  const st = tradingEngine.getAccountState() as any;
+  res.json({
+    success: true,
+    autoTradingEnabled: Boolean(st.autoTradingEnabled),
+    aiTradingEnabled: Boolean(st.aiTradingEnabled),
+    trailingStopEnabled: Boolean(st.trailingStopEnabled),
+    timezoneTradingEnabled: Boolean(st.timezoneTradingEnabled),
+    maxSpreadPoints: Number(st.maxSpreadPoints),
+    source: 'db_memory',
+  });
+});
 app.post('/api/bot/config', requireAuth, userActionLimiter, validateBody(botConfigSchema), replayGuard, (req, res) => {
   tradingEngine.applyBotConfig({
     autoTradingEnabled: req.body.autoTradingEnabled,
     aiTradingEnabled: req.body.aiTradingEnabled,
+    trailingStopEnabled: req.body.trailingStopEnabled,
     timezoneTradingEnabled: req.body.timezoneTradingEnabled,
     maxSpreadPoints: req.body.maxSpreadPoints,
   });
   tradingEngine.addCommand({ action: 'CONFIG_SYNC', ...req.body });
+  const st = tradingEngine.getAccountState() as any;
   res.json({
     success: true,
-    autoTradingEnabled: tradingEngine.getAccountState().autoTradingEnabled,
-    aiTradingEnabled: tradingEngine.getAccountState().aiTradingEnabled,
-    timezoneTradingEnabled: tradingEngine.getAccountState().timezoneTradingEnabled,
-    maxSpreadPoints: tradingEngine.getAccountState().maxSpreadPoints,
+    autoTradingEnabled: Boolean(st.autoTradingEnabled),
+    aiTradingEnabled: Boolean(st.aiTradingEnabled),
+    trailingStopEnabled: Boolean(st.trailingStopEnabled),
+    timezoneTradingEnabled: Boolean(st.timezoneTradingEnabled),
+    maxSpreadPoints: Number(st.maxSpreadPoints),
   });
 });
 app.get('/api/subscription', requireAuth, (req, res) => res.json({ active: true, plan: 'Lifetime Pro', expiry: '2027-12-31' }));

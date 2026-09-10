@@ -75,6 +75,8 @@ export interface AccountState {
   candles: Candle[];
   autoTradingEnabled: boolean;
   aiTradingEnabled: boolean;
+  /** Master kill-switch for trailing stop manager (app toggle: "Trailing"). */
+  trailingStopEnabled: boolean;
   /** When true, respect CONFIG.blockedSessions (Asia). When false, trade any time. */
   timezoneTradingEnabled: boolean;
   /** Max allowed spread in points (XAUUSD). Adjustable from app settings. */
@@ -109,6 +111,7 @@ export class TradingEngine {
     candles: [],
     autoTradingEnabled: false,
     aiTradingEnabled: Boolean(CONFIG.aiTradingEnabled),
+    trailingStopEnabled: Boolean((CONFIG as any).trailingStopEnabled),
     timezoneTradingEnabled: true,
     maxSpreadPoints: CONFIG.maxSpreadPoints,
   };
@@ -188,21 +191,25 @@ export class TradingEngine {
       };
       const restoredAuto = getBool('autoTradingEnabled', this.accountState.autoTradingEnabled);
       const restoredAi = getBool('aiTradingEnabled', this.accountState.aiTradingEnabled);
+      const restoredTrailing = getBool('trailingStopEnabled', this.accountState.trailingStopEnabled);
       const restoredTz = getBool('timezoneTradingEnabled', this.accountState.timezoneTradingEnabled);
       const restoredSpread = getInt('maxSpreadPoints', this.accountState.maxSpreadPoints);
       this.accountState.autoTradingEnabled = restoredAuto;
       this.accountState.aiTradingEnabled = restoredAi;
+      this.accountState.trailingStopEnabled = restoredTrailing;
       this.accountState.timezoneTradingEnabled = restoredTz;
       this.accountState.maxSpreadPoints = restoredSpread;
       CONFIG.aiTradingEnabled = restoredAi;
       CONFIG.maxSpreadPoints = restoredSpread;
-      if (rows.length) logger.success(`Restored ${rows.length} BotSetting rows from Postgres: auto=${restoredAuto} ai=${restoredAi} tz=${restoredTz} spread=${restoredSpread}`);
+      (CONFIG as any).trailingStopEnabled = restoredTrailing;
+      if (rows.length) logger.success(`Restored ${rows.length} BotSetting rows from Postgres: auto=${restoredAuto} ai=${restoredAi} trailing=${restoredTrailing} tz=${restoredTz} spread=${restoredSpread}`);
       // Re-broadcast to any waiting app UI clients that reconnect before first
       // heartbeat, so switches render the correct persisted DB state.
       try {
         this.io.emit('BOT_CONFIG', {
           autoTradingEnabled: this.accountState.autoTradingEnabled,
           aiTradingEnabled: this.accountState.aiTradingEnabled,
+          trailingStopEnabled: this.accountState.trailingStopEnabled,
           timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
           maxSpreadPoints: this.accountState.maxSpreadPoints,
         });
@@ -461,6 +468,7 @@ export class TradingEngine {
     autoTradingEnabled?: boolean;
     aiTradingEnabled?: boolean;
     timezoneTradingEnabled?: boolean;
+    trailingStopEnabled?: boolean;
     maxSpreadPoints?: number;
   }) {
     if (cfg.autoTradingEnabled !== undefined) {
@@ -469,6 +477,10 @@ export class TradingEngine {
     if (cfg.aiTradingEnabled !== undefined) {
       this.accountState.aiTradingEnabled = !!cfg.aiTradingEnabled;
       CONFIG.aiTradingEnabled = this.accountState.aiTradingEnabled;
+    }
+    if (cfg.trailingStopEnabled !== undefined) {
+      this.accountState.trailingStopEnabled = !!cfg.trailingStopEnabled;
+      (CONFIG as any).trailingStopEnabled = this.accountState.trailingStopEnabled;
     }
     if (cfg.timezoneTradingEnabled !== undefined) {
       this.accountState.timezoneTradingEnabled = !!cfg.timezoneTradingEnabled;
@@ -485,6 +497,7 @@ export class TradingEngine {
     this.io.emit('BOT_CONFIG', {
       autoTradingEnabled: this.accountState.autoTradingEnabled,
       aiTradingEnabled: this.accountState.aiTradingEnabled,
+      trailingStopEnabled: this.accountState.trailingStopEnabled,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
       maxSpreadPoints: this.accountState.maxSpreadPoints,
     });
@@ -494,6 +507,7 @@ export class TradingEngine {
     const rows = [
       { key: 'autoTradingEnabled', boolValue: this.accountState.autoTradingEnabled },
       { key: 'aiTradingEnabled', boolValue: this.accountState.aiTradingEnabled },
+      { key: 'trailingStopEnabled', boolValue: this.accountState.trailingStopEnabled },
       { key: 'timezoneTradingEnabled', boolValue: this.accountState.timezoneTradingEnabled },
       { key: 'maxSpreadPoints', intValue: this.accountState.maxSpreadPoints },
     ];
@@ -1006,12 +1020,14 @@ export class TradingEngine {
     const HEARTBEAT_BLACKLIST: Record<string, boolean> = {
       autoTradingEnabled: true,
       aiTradingEnabled: true,
+      trailingStopEnabled: true,
       timezoneTradingEnabled: true,
       maxSpreadPoints: true,
     };
     const userOwnedFlags = {
       autoTradingEnabled: this.accountState.autoTradingEnabled,
       aiTradingEnabled: this.accountState.aiTradingEnabled,
+      trailingStopEnabled: this.accountState.trailingStopEnabled,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
       maxSpreadPoints: this.accountState.maxSpreadPoints,
     };

@@ -76,6 +76,11 @@ export const CONFIG = {
   // Flip AI_TRADING_ENABLED=true only after reviewing enough shadow-mode
   // PredictionLog history to trust the model's live behavior.
   aiTradingEnabled: envBool('AI_TRADING_ENABLED', false),
+  // Master switch for trailing-stop manager (app toggle: "Trailing"). Runs
+  // every tick inside processTrailingStop(); when false, no SL updates are
+  // generated for any position. Persisted to Postgres BotSetting table so it
+  // survives Render container restarts / ephemeral pod cycles.
+  trailingStopEnabled: envBool('TRAILING_STOP_ENABLED', true),
   // Minimum combined (rule + AI) confidence required to accept a signal
   // once aiTradingEnabled is true.
   aiMinConfidence: envNum('AI_MIN_CONFIDENCE', 0.6),

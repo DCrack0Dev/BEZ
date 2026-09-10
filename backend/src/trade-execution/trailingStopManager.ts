@@ -14,6 +14,13 @@ import { PositionState } from '../types';
  * @returns An object containing the new stop loss and phase if an update is required.
  */
 export const processTrailingStop = (pos: PositionState): { newSL: number; phase: number } | null => {
+  // Master kill-switch: when CONFIG.trailingStopEnabled is flipped OFF by the
+  // mobile app toggle (survives Render restart via Postgres BotSetting table
+  // upsert/restore + engine heartbeat blacklist), the trailing-stop manager is
+  // COMPLETELY disabled — no SL updates, no phase advances, no PENDING_COMMANDS
+  // written. This lets the user explicitly opt-out of trailing behavior via the
+  // app's Trailing switch without modifying position states in flight.
+  if ((CONFIG as any).trailingStopEnabled === false) return null;
   const { direction, openPrice, currentSL, currentPrice, phase, scaleInLevels, tpLevels, spread, pipSize, pointSize } = pos;
   const isBuy = direction === 'BUY';
   const isXAUUSD = pos.symbol.includes("XAU") || pos.symbol.includes("GOLD");
