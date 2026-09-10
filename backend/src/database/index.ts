@@ -1001,6 +1001,7 @@ export async function getAdvancedJournalClosedTrades(opts: {
         takeProfit: Number(r.tp || 0),
         openTime: openTs,
         closeTime: closeTs,
+        reasonForExit: String(r.reasonForExit || ''),
         _fromAdvancedJournal: true,
         modelVersion: r.modelVersion,
       };

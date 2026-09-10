@@ -217,36 +217,30 @@ export class TradingEngine {
         .map((p) => {
           const lotSize = Number(p.lotSize || 0.01) || 0.01;
           const openPrice = Number(p.openPrice || 0);
-          // Use last known closePrice if set on position (EA writes closePrice on close),
-          // otherwise fall back to currentPrice. At pod restart time we don't have the
-          // final MT5 close event payload in memory so the best we have is what was
-          // persisted on Position at last heartbeat before close happened. If closePrice
-          // is available on the Position row it means the EA OR a prior close handler
-          // wrote the final executed close price there.
-          const closePx = Number(p.closePrice ?? p.currentPrice ?? 0);
+          const closePx = Number((p as any).closePrice ?? p.currentPrice ?? 0);
           const direction = String(p.direction || 'BUY').toUpperCase();
           const isBuy = direction === 'BUY';
           const pipSz = Number(this.accountState.pipSize || 0.01) || 0.01;
-          const pipVal = Number(this.accountState.pipValue || 1) || 1;
+          // PIP COUNT: calculated from open/close (always reliable as pips are
+          // relative ratio, not $-dependent).
           const rawDiff = openPrice > 0 && closePx > 0 && pipSz > 0
             ? (isBuy ? (closePx - openPrice) : (openPrice - closePx))
             : 0;
           const profitPipsComputed = pipSz > 0 ? rawDiff / pipSz : rawDiff;
-          const profitComputedUsd = openPrice > 0 && closePx > 0 && lotSize > 0
-            ? profitPipsComputed * lotSize * pipVal
+          // IMPORTANT: DO NOT compute USD P&L here via pipSize/lot/pipVal product.
+          // That's wrong for metals (XAUUSD), indices, cryptos, commissions, swaps.
+          // We only accept the stored position.profit from last heartbeat. If live
+          // closeATrade ran before restart, position.profit was updated to final $;
+          // otherwise we keep this heartbeat value in USD and the user understands
+          // the trade may be updated when the next close payload arrives.
+          const profit = Number(p.profit || 0);
+          // Use best available pip count (either position-profit-derived / computed).
+          const profitPipsStored = Math.abs(lotSize) > 0 && Math.abs(profit) > 0.00001
+            ? (Math.sign(profit) * Math.abs(Number(p.profit || 0)) / Math.max(0.000000001, Number(lotSize)) / Math.max(Number(this.accountState.pipValue || 0), 0.000000000001))
             : 0;
-          // If position row already has profit (last heartbeat unrealized) use it if
-          // magnitude > computed. Otherwise, use computed (which uses final closePrice if
-          // stored on position, giving the correct MT5 result even for tickets like
-          // XAUUSD #46795062 where last heartbeat unrealized was $69.45 but the real
-          // final P&L (based on stored open/close/direction/lot/pipVal) is $480).
-          const pnlStored = Number(p.profit || 0);
-          const profit = Math.abs(profitComputedUsd) > Math.abs(pnlStored)
-            ? profitComputedUsd
-            : pnlStored;
-          const profitPips = Math.abs(profitPipsComputed) > Math.abs(Number(p.profit || 0) / Math.max(lotSize, 0.01) / Math.max(pipVal, 0.00001))
+          const profitPips = Math.abs(profitPipsComputed) > Math.abs(Number.isFinite(profitPipsStored) ? profitPipsStored : 0)
             ? profitPipsComputed
-            : (Number(pnlStored) / Math.max(lotSize, 0.01) / Math.max(pipVal, 1));
+            : (Number.isFinite(profitPipsStored) ? profitPipsStored : profitPipsComputed);
           const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' =
             profit > 0.0001 ? 'WIN' : profit < -0.0001 ? 'LOSS' : 'BREAKEVEN';
           const jEntry = journalsByTicket.get(String(p.ticket));
@@ -456,13 +450,13 @@ export class TradingEngine {
         const key = String(c.ticket);
         if (key && !ticketsToInspect.includes(key)) ticketsToInspect.push(key);
       }
-      type PosRow = { ticket: string | number; lotSize: any; profit?: any; openPrice?: any; closePrice?: any; direction?: string; pipValue?: any; pipSize?: any };
+      type PosRow = { ticket: string | number; lotSize: any; profit?: any; openPrice?: any; closePrice?: any; currentPrice?: any; direction?: string; pipValue?: any; pipSize?: any };
       const lotSizeByTicket = new Map<string, number>();
       const posByTicket = new Map<string, PosRow>();
       try {
         const posRows = await (prisma as any).position.findMany({
           where: { ticket: { in: ticketsToInspect } },
-          select: { ticket: true, lotSize: true, profit: true, openPrice: true, closePrice: true, direction: true },
+          select: { ticket: true, lotSize: true, profit: true, openPrice: true, closePrice: true, currentPrice: true, direction: true },
         }) as PosRow[];
         for (const pr of posRows) {
           const k = String(pr.ticket);
@@ -481,54 +475,70 @@ export class TradingEngine {
         }
         return 0.01;
       };
-      // Best-effort compute P&L from trade metadata when all DB values disagree.
-      // Example ticket XAUUSD #46795062: MT5 final P&L = $480, but at boot reconciler
-      // wrote the last-heartbeat unrealized p.profit ($69.45 mid-flight) as profitDollars.
-      // If we have open/close/direction/lotSize/pipSize/pipValue we can re-derive the
-      // correct final $ value that MT5 reported. Max-abs priority later picks this over stale
-      // mid-trade heartbeat dollar values (since the final close P&L will always be larger
-      // in magnitude than any mid-trade unrealized snapshot).
+      // DO NOT compute USD P&L from open/close/lot/pipVal here. Computing
+      // rawDiff * lots * pipValue is wrong for metals (XAUUSD), indices,
+      // cryptos, brokers with micro lots, swap/commissions, etc. That caused
+      // "MT5 480 → App Journal 625" regression on recent trades (wrong pipVal
+      // assumption + commissions ignored). Instead we only accept values
+      // MT5/EA actually reported + stored in Postgres. Priority:
+      //   1. position.profit if position.closePrice is set (live close handler wrote it)
+      //   2. AdvancedJournal.profitDollars unless reason=CLOSED_BY_RECONCILE
+      //   3. journalManager.profitDollars
+      //   4. (lowest) existing heartbeat/reconciler $ values as-is.
       const defaultAccountPipSize = Number(this.accountState.pipSize || 0.01);
-      const defaultAccountPipVal = Number(this.accountState.pipValue || 1);
-      const computeFinalProfit = (row: any): number | null => {
-        try {
-          const dir = String(row.direction || row.type || 'BUY').toUpperCase();
-          const isBuy = dir === 'BUY';
-          const open = Number(row.openPrice || 0);
-          const close = Number(row.closePrice || 0);
-          const lot = Number(row.lots ?? row.lotSize ?? resolveLots(row.ticket, [row]));
-          if (!(open > 0) || !(close > 0) || !(lot > 0)) return null;
-          const pipSz = Number((row as any).pipSize ?? defaultAccountPipSize) || 0.01;
-          const pipVal = Number((row as any).pipValue ?? defaultAccountPipVal) || 1;
-          const rawDiff = isBuy ? (close - open) : (open - close);
-          const pips = pipSz > 0 ? rawDiff / pipSz : rawDiff;
-          const value = pips * lot * pipVal;
-          if (!Number.isFinite(value)) return null;
-          // Only trust computed if magnitude > $0.01 — otherwise keep stored values.
-          return Math.abs(value) > 0.01 ? value : null;
-        } catch (_) { return null; }
-      };
       const pickBestProfit = (args: {
         ticket: string | number;
         fromPos?: number;
+        posClosePrice?: number;
+        posCurrentPrice?: number;
         fromAdvanced?: number;
+        ajReason?: string;
         fromJournalDollars?: number;
         fromMemoryPnl?: number;
-        row: any;
+        _row: any;
       }): { usd: number; source: string } => {
-        const { fromPos, fromAdvanced, fromJournalDollars, fromMemoryPnl, row, ticket } = args;
-        const candidates: Array<{ v: number; s: string }> = [];
-        if (typeof fromPos === 'number' && Number.isFinite(fromPos) && Math.abs(fromPos) > 0.0001) candidates.push({ v: fromPos, s: 'pos' });
-        if (typeof fromAdvanced === 'number' && Number.isFinite(fromAdvanced) && Math.abs(fromAdvanced) > 0.0001) candidates.push({ v: fromAdvanced, s: 'aj' });
-        if (typeof fromJournalDollars === 'number' && Number.isFinite(fromJournalDollars) && Math.abs(fromJournalDollars) > 0.0001) candidates.push({ v: fromJournalDollars, s: 'jm' });
-        if (typeof fromMemoryPnl === 'number' && Number.isFinite(fromMemoryPnl) && Math.abs(fromMemoryPnl) > 0.0001) candidates.push({ v: fromMemoryPnl, s: 'mem' });
-        const computed = computeFinalProfit({ ...row, ticket });
-        if (computed !== null) candidates.push({ v: computed, s: 'calc' });
-        if (candidates.length === 0) return { usd: 0, source: 'zero' };
-        candidates.sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+        const { fromPos, posClosePrice, posCurrentPrice, fromAdvanced, ajReason, fromJournalDollars, fromMemoryPnl } = args;
+        const candidates: Array<{ v: number; s: string; rank: number }> = [];
+        const posFinalized = typeof posClosePrice === 'number' && Number.isFinite(posClosePrice)
+          && (posClosePrice !== 0)
+          && !(typeof posCurrentPrice === 'number' && Math.abs(posClosePrice - posCurrentPrice) < 1e-6 && posClosePrice === posCurrentPrice && posCurrentPrice === undefined as any);
+        // #1 HIGHEST: position.profit, only if close handler actually wrote the
+        // final close price there (so position.closePrice !== heartbeat/NULL).
+        if (posFinalized && typeof fromPos === 'number' && Number.isFinite(fromPos) && Math.abs(fromPos) > 0.0001) {
+          candidates.push({ v: fromPos, s: 'pos-final', rank: 1 });
+        }
+        // #2: Advanced journal profit dollars from LIVE close handler (not reconciler).
+        const ajNotReconcile = ajReason !== 'CLOSED_BY_RECONCILE' && typeof ajReason === 'string'
+          ? true
+          : (typeof ajReason !== 'string'); // no reason recorded = assume not reconciled
+        if (typeof fromAdvanced === 'number' && Number.isFinite(fromAdvanced) && Math.abs(fromAdvanced) > 0.0001) {
+          if (ajNotReconcile) candidates.push({ v: fromAdvanced, s: 'aj-live', rank: 2 });
+          else candidates.push({ v: fromAdvanced, s: 'aj-recon', rank: 4 });
+        }
+        // #3: journalManager profitDollars (stored by live closeATrade updateEntry call)
+        if (typeof fromJournalDollars === 'number' && Number.isFinite(fromJournalDollars) && Math.abs(fromJournalDollars) > 0.0001) {
+          candidates.push({ v: fromJournalDollars, s: 'jm', rank: 3 });
+        }
+        // #4 position profit if NOT finalized (heartbeat snapshot / reconciler closed).
+        if (!posFinalized && typeof fromPos === 'number' && Number.isFinite(fromPos) && Math.abs(fromPos) > 0.0001) {
+          candidates.push({ v: fromPos, s: 'pos-hb', rank: 4 });
+        }
+        // #5 memory (least reliable, only if nothing else).
+        if (typeof fromMemoryPnl === 'number' && Number.isFinite(fromMemoryPnl) && Math.abs(fromMemoryPnl) > 0.0001) {
+          candidates.push({ v: fromMemoryPnl, s: 'mem', rank: 5 });
+        }
+        if (!candidates.length) return { usd: 0, source: 'zero' };
+        // No max-abs! Use strict priority (rank ascending). Break ties by highest abs magnitude
+        // (MT5 reported swap/commission-adjusted value is almost always larger than a stale
+        // heartbeat partial float, but if two tie at rank, pick the larger magnitude one).
+        candidates.sort((a, b) => {
+          if (a.rank !== b.rank) return a.rank - b.rank;
+          return Math.abs(b.v) - Math.abs(a.v);
+        });
         const best = candidates[0];
         return { usd: best.v, source: best.s };
       };
+      // Pick pip count separately (pips are safe to compute from open/close price).
       const pickBestPips = (args: { fromAdvancedPips?: number; fromJournalPips?: number; row: any }) => {
         const { fromAdvancedPips, fromJournalPips, row } = args;
         const dir = String((row as any)?.direction || (row as any)?.type || 'BUY').toUpperCase();
@@ -544,6 +554,8 @@ export class TradingEngine {
           candidates.push(pipSz > 0 ? rawDiff / pipSz : rawDiff);
         }
         if (!candidates.length) return 0;
+        // Pips: prefer stored MT5 pips first; if absent, compute from open/close.
+        // Max-abs fallback: if stored pips are tiny, maybe mid-flight heartbeat, use calculated.
         candidates.sort((a, b) => Math.abs(b) - Math.abs(a));
         return candidates[0];
       };
@@ -623,10 +635,13 @@ export class TradingEngine {
         const best = pickBestProfit({
           ticket,
           fromPos: posRow?.profit !== undefined ? Number(posRow.profit) : undefined,
+          posClosePrice: posRow?.closePrice !== undefined ? Number(posRow.closePrice) : undefined,
+          posCurrentPrice: posRow?.currentPrice !== undefined ? Number(posRow.currentPrice) : undefined,
           fromAdvanced: fromAdvancedUsd,
+          ajReason: existing?.reasonForExit as any,
           fromJournalDollars: Number.isFinite(rawDollars) ? rawDollars : undefined,
           fromMemoryPnl: Number.isFinite(existingProfit) ? existingProfit : undefined,
-          row: mergeForBest,
+          _row: mergeForBest,
         });
         const finalProfit = best.usd;
         const finalPips = pickBestPips({
