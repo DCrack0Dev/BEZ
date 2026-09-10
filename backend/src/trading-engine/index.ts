@@ -109,7 +109,17 @@ export class TradingEngine {
     ema50: 0,
     atr14: 0,
     candles: [],
-    autoTradingEnabled: false,
+    // Default autoTradingEnabled=true to TRUE: mirror the pre-heartbeat-blacklist behavior.
+    //
+    // Previously (before BotSetting + EA payload user-flag blacklist), the EA heartbeat carried
+    // autoTradingEnabled=true (MT5 broker AlgoTrading=ON payload; spread after blacklist blocked EA from
+    // overwriting app toggles, but the default had been FALSE for months prior code-level. So after
+    // blacklist kicked in, autoTradingEnabled stayed FALSE forever until user manually toggled once
+    // → validateSignal() gate L1877 was closed for hours → ZERO trades opened even though the
+    // app showed switch still said "it was working before last changes". Restore original effective default
+    // TRUE until app or BotSetting overrides it. BotSetting still wins (loaded from Postgres on init
+    // and/or applyBotConfig toggles; this default only applies when neither has run yet.
+    autoTradingEnabled: true,
     aiTradingEnabled: Boolean(CONFIG.aiTradingEnabled),
     trailingStopEnabled: Boolean((CONFIG as any).trailingStopEnabled),
     timezoneTradingEnabled: true,
@@ -1249,7 +1259,10 @@ export class TradingEngine {
 
         // Track trailing-stop profitable closures to limit re-entries (per-symbol)
         // If a trade closed by trailing stop in profit, grant only 2 re-entries for that symbol.
-        // Reset allowance on loss.
+        // On LOSS: CLEAR the allowance (delete from the reentries map entirely) so the very next signal
+        // can open as normal — no permanent block. Old bug: wrote 0 on loss; because typeof 0 entered the guard
+        // then remaining<=0 suppressed all future entries = PERMANENT ban after any 1 loss = ZERO trades
+        // for affected symbol forever (no way to grant 2 re-entry allowance back because need trade=close loss ban)
         try {
           const reasonStr = String((closedTrade && (closedTrade as any).reason) || '').toUpperCase();
           const closedByTrailing = reasonStr.includes('TRAIL') || reasonStr.includes('TRAILING') || reasonStr.includes('STOP');
@@ -1259,8 +1272,9 @@ export class TradingEngine {
               this.trailingProfitReentries[sym] = 2;
               tradingLogger.info(`Trailing-stop profit detected for ${sym}; granting 2 re-entries`);
             } else if (outcome === 'LOSS') {
-              this.trailingProfitReentries[sym] = 0;
-              tradingLogger.info(`Loss detected for ${sym}; clearing trailing re-entry allowance`);
+              // Remove any outstanding allowances on loss → next signal = unlimited (normal branch
+              delete this.trailingProfitReentries[sym];
+              tradingLogger.info(`Loss detected for ${sym}; clearing trailing re-entry allowances`);
             }
           }
         } catch (e) { /* non-fatal */ }
@@ -2002,9 +2016,15 @@ export class TradingEngine {
           }
           this.lastSignal = signal;
           // Enforce per-symbol trailing-profit re-entry limit if set.
+          //
+          // CRITICAL: skip the entire re-entry guard when the user has flipped the Trailing
+          // switch OFF via app toggle (CONFIG.trailingStopEnabled=false). Trailing-profit
+          // allowances are 100% trailing-behavior-specific; if trailing is off the user expects
+          // fully unlimited entries, not a hidden permanent block from the last loss/ban.
+          const trailingOn = !!(CONFIG as any).trailingStopEnabled;
           try {
             const sym = signal.symbol;
-            const remaining = this.trailingProfitReentries?.[sym];
+            const remaining = trailingOn ? this.trailingProfitReentries?.[sym] : undefined;
             if (typeof remaining === 'number') {
               if (remaining <= 0) {
                 tradingLogger.warn(`Signal suppressed for ${sym}: trailing-profit re-entry limit reached`);
