@@ -46,28 +46,51 @@ try {
   dbHostSnippet = null;
 }
 
-// Render Postgres free / Small plan caps total connections very low (Free=5, Pro plan higher).
-// Prisma adapter passes its own pool through pg.Pool defaults to 10 which silently exhausts the
-// Render quota after 2-3 restarts → socket hangs, dashboard returns empty,
-// AI Lab looks dead, journal 400s on writes. Cap pool low, short idle timeout, quick connect timeout.
-const defaultMaxConn = process.env.RENDER === 'true' || process.env.RENDER_SERVICE_ID ? 3 : 10;
+// Render Postgres free plan caps ALL connections on the cluster (not per-pod)
+// at ~5 TOTAL. It is critical that the ENTIRE process (checkDbHealth, Prisma
+// queries, Prisma adapter internal pool, any extra pg.Pool instances you see)
+// share ONE single low-cap pool. Older versions created two pools (ours +
+// PrismaPg's implicit default) which added up to 3+3 = 6 → every deploy or
+// traffic spike blew the global Postgres cap, socket hung until connect
+// timeout, Render thought service failed.
+// Cap: max 2 TOTAL per-pod by default on Render, 10 local. This leaves 3 free
+// for migrate deploy + adjacent pods (since Render sometimes has 2 pods
+// briefly during rolling restarts: 2 pods × 2 = 4 connections, leaves 1 spare
+// for migrations/psql).
+const isRender = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID;
+const defaultMaxConn = isRender ? 2 : 10;
 const maxConn = Number(process.env.PG_MAX_CONNECTIONS ?? defaultMaxConn);
-const pool = new pg.Pool({
+export const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  max: Math.max(1, Math.min(30, Number.isFinite(maxConn) ? maxConn : 3)),
-  connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 10000),
-  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 15000),
+  max: Math.max(1, Math.min(10, Number.isFinite(maxConn) ? maxConn : 2)),
+  // Short connect timeout: Postgres free instances sometimes stall >30s
+  // during quota exhaust — fail fast so Render health sees 503 and recycles.
+  connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 6000),
+  // Aggressively reclaim idle sockets: Postgres Free plans count every open
+  // TCP against the hard cap even if the socket isn't running a query.
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 4000),
   allowExitOnIdle: true,
 });
 pool.on('error', (err) => {
   logger.warn(`[pg.Pool] error: ${err?.message ?? String(err)}`);
 });
+// Extra safety: every 30s end any pool socket that has been idle for >2s
+// beyond idleTimeoutMillis (defense-in-depth against Render cap leaks).
+setInterval(() => {
+  try {
+    (pool as any)._clients?.forEach?.((c: any) => {
+      if (c && !c.active && Date.now() - (c.lastUsed || 0) > 6000) {
+        c.release?.(true);
+      }
+    });
+  } catch { /* ignore */ }
+}, 15000).unref?.();
 
 const adapter = new PrismaPg(pool);
 
 const prisma = new PrismaClient({
   adapter,
-  log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['query', 'info', 'warn', 'error'],
+  log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['info', 'warn', 'error'],
 });
 
 export function getDbHostSnippet(): string | null {

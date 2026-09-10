@@ -98,11 +98,37 @@ io.use((socket, next) => {
 // Global monitoring middleware (API latency / errors)
 app.use(monitoring.middleware());
 
-// Root + health checks BEFORE attachAPI — they exist once, with real Postgres
-// SELECT 1, so Render load balancers can mark pods UNHEALTHY when DB link dead
-// (instead of keep-podding a "healthy" server that only returns empty dashboards).
+// Root + health checks BEFORE attachAPI — they exist once.
+//
+// Render deploy health: by default the deploy probe GETs `/` repeatedly every
+// 2–5s during the "Waiting for deploy" phase, then stops when it gets 200. If
+// every `/` probe runs checkDbHealth (SELECT 1 + 3 COUNT(*) queries on
+// Postgres free-tier), that's N * 4 concurrent Postgres calls while the pod
+// is still bootstrapping — plus migrate deploy running its own connections.
+// Together those easily exceed Render Postgres Free's TOTAL 5 connection cap:
+//   migrate deploy: 1
+//   deploy probe × 5 concurrent: 5 × 4 Prisma connections = 20
+//   Prisma pool warmup: 2
+//   Total: 23, Postgres allows: 5 → all sockets hang, Render says "Timed Out".
+//
+// Fix:
+//   /            → fast HTTP 200 with NO DB work. Render deploy passes instantly.
+//   /health-fast → same fast responder (explicit for dashboard Health Check Path).
+//   /health      → real SELECT 1 + counts (load balancer watchdog, runs AFTER deploy).
+//   /health?full=1 OR /?full=1 → real DB checks (optional for debugging via browser).
 // attachAPI() mounts handlers only under /api to avoid duplicates.
-async function healthPayload() {
+const FAST_HEALTH = {
+  success: true,
+  service: 'LiquiBot Backend',
+  status: 'UP' as const,
+  fast: true,
+  version: '4.0.0',
+  time: new Date().toISOString(),
+};
+async function healthPayload({ full }: { full: boolean }) {
+  if (!full) {
+    return { http: 200, payload: { ...FAST_HEALTH, time: new Date().toISOString() } };
+  }
   let db: any = null;
   let statusLabel: 'UP' | 'DEGRADED' | 'DOWN' = 'UP';
   let http = 200;
@@ -136,16 +162,32 @@ async function healthPayload() {
   }};
 }
 
-app.get('/', async (_req, res) => {
-  const { http, payload } = await healthPayload();
+// Render's deploy probe + dashboard Health Check Path: always fast, no DB.
+app.get('/health-fast', (_req, res) => {
+  res.status(200).json({ ...FAST_HEALTH, time: new Date().toISOString() });
+});
+// Render deploy default probe path is `/` — keep that FAST by default unless
+// caller explicitly asks for full checks via ?full=1 (browser debug).
+app.get('/', async (req, res) => {
+  const full = String(req.query.full || '') === '1';
+  const { http, payload } = await healthPayload({ full });
   res.status(http).json(payload);
 });
-app.get('/health', async (_req, res) => {
-  const { http, payload } = await healthPayload();
+// /health: real full watchdog SELECT 1 by default (Render LB will call this
+// occasionally post-deploy). Fast 200 if you set Health Check Path on dashboard.
+app.get('/health', async (req, res) => {
+  const skip = String(req.query.fast || '') === '1';
+  const { http, payload } = await healthPayload({ full: !skip });
   res.status(http).json(payload);
 });
 app.head('/', (_req, res) => res.status(200).end());
 app.head('/health', (_req, res) => res.status(200).end());
+app.head('/health-fast', (_req, res) => res.status(200).end());
+
+// Stop the /test 404 flood from Render deploy probes (seen in logs: 7+ GET
+// /test 404 spam per deploy creating ALERT WARNING entries that drown out real
+// alerts). Respond 204 No Content to any /test probe noise.
+app.all('/test', (_req, res) => res.status(204).end());
 
 // Attach API — see attachAPI for router mount details. Now mounts ONLY at /api
 // (never also at /) to avoid duplicate handlers, double auth, double CORS.
