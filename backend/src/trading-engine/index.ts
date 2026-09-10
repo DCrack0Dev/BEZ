@@ -171,6 +171,48 @@ export class TradingEngine {
     } catch (e) {
       logger.warn('gateConfig.init failed (safe fallbacks active)', e);
     }
+    // Restore app-user-owned bot settings BEFORE any heartbeat or trade logic
+    // runs. Render containers have EPHEMERAL filesystems + every new deploy or
+    // rolling restart wipes in-memory state; the default memory values reset
+    // autoTradingEnabled=false regardless of what the app toggle showed the
+    // user. We restore any persistent DB values here so settings survive.
+    try {
+      const rows = await (prisma as any).botSetting.findMany();
+      const getBool = (k: string, d: boolean) => {
+        const r = rows.find((x: any) => x.key === k);
+        return r && typeof r.boolValue === 'boolean' ? r.boolValue : d;
+      };
+      const getInt = (k: string, d: number) => {
+        const r = rows.find((x: any) => x.key === k);
+        return r && typeof r.intValue === 'number' ? r.intValue : d;
+      };
+      const restoredAuto = getBool('autoTradingEnabled', this.accountState.autoTradingEnabled);
+      const restoredAi = getBool('aiTradingEnabled', this.accountState.aiTradingEnabled);
+      const restoredTz = getBool('timezoneTradingEnabled', this.accountState.timezoneTradingEnabled);
+      const restoredSpread = getInt('maxSpreadPoints', this.accountState.maxSpreadPoints);
+      this.accountState.autoTradingEnabled = restoredAuto;
+      this.accountState.aiTradingEnabled = restoredAi;
+      this.accountState.timezoneTradingEnabled = restoredTz;
+      this.accountState.maxSpreadPoints = restoredSpread;
+      CONFIG.aiTradingEnabled = restoredAi;
+      CONFIG.maxSpreadPoints = restoredSpread;
+      if (rows.length) logger.success(`Restored ${rows.length} BotSetting rows from Postgres: auto=${restoredAuto} ai=${restoredAi} tz=${restoredTz} spread=${restoredSpread}`);
+      // Re-broadcast to any waiting app UI clients that reconnect before first
+      // heartbeat, so switches render the correct persisted DB state.
+      try {
+        this.io.emit('BOT_CONFIG', {
+          autoTradingEnabled: this.accountState.autoTradingEnabled,
+          aiTradingEnabled: this.accountState.aiTradingEnabled,
+          timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+          maxSpreadPoints: this.accountState.maxSpreadPoints,
+        });
+      } catch (_io) { /* noop */ }
+    } catch (e) {
+      // BotSetting table may not exist yet until migration runs on first deploy.
+      // This is fine: default memory values apply until the user toggles once
+      // after migration applied (applyBotConfig then writes DB value).
+      logger.warn('BotSetting restore skipped (table pending migration?): using in-memory defaults', e);
+    }
     await this.rehydrateOpenPositions();
     await this.reconcileStaleOpenJournals().catch((e) => logger.warn('Stale journal reconcile skipped', e));
     await this.hydrateClosedTradesFromDb().catch((e) => logger.warn('Closed trades hydrate skipped', e));
@@ -433,13 +475,51 @@ export class TradingEngine {
     }
     if (cfg.maxSpreadPoints !== undefined && Number.isFinite(cfg.maxSpreadPoints) && cfg.maxSpreadPoints > 0) {
       this.accountState.maxSpreadPoints = Math.round(cfg.maxSpreadPoints);
+      CONFIG.maxSpreadPoints = this.accountState.maxSpreadPoints;
     }
+    // Persist to Postgres BotSetting table so settings survive Render restarts.
+    // Otherwise every new deploy wipes in-memory state → autoTradingEnabled randomly
+    // resets to default=false when the next pod boots (the user's app switch ON
+    // has no corresponding DB state). Safe to fire-and-forget (non-critical path).
+    this.persistBotSettings().catch((e) => logger.warn('BotSetting persist failed', e));
     this.io.emit('BOT_CONFIG', {
       autoTradingEnabled: this.accountState.autoTradingEnabled,
       aiTradingEnabled: this.accountState.aiTradingEnabled,
       timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
       maxSpreadPoints: this.accountState.maxSpreadPoints,
     });
+  }
+
+  private async persistBotSettings() {
+    const rows = [
+      { key: 'autoTradingEnabled', boolValue: this.accountState.autoTradingEnabled },
+      { key: 'aiTradingEnabled', boolValue: this.accountState.aiTradingEnabled },
+      { key: 'timezoneTradingEnabled', boolValue: this.accountState.timezoneTradingEnabled },
+      { key: 'maxSpreadPoints', intValue: this.accountState.maxSpreadPoints },
+    ];
+    try {
+      await prisma.$transaction(
+        rows.map((r) =>
+          (prisma as any).botSetting.upsert({
+            where: { key: r.key },
+            update: {
+              boolValue: r.boolValue !== undefined ? r.boolValue : null,
+              intValue: r.intValue !== undefined ? r.intValue : null,
+              updatedAt: new Date(),
+            },
+            create: {
+              key: r.key,
+              boolValue: r.boolValue !== undefined ? r.boolValue : null,
+              intValue: r.intValue !== undefined ? r.intValue : null,
+            },
+          })
+        )
+      );
+    } catch (e) {
+      // Migration might not have run yet on first deploy after schema change.
+      // Silently ignore; memory value still applies for current pod lifetime.
+      logger.warn(`BotSetting persist failed (safe): ${String(e)}`);
+    }
   }
 
   getPendingCommands(): any[] {
@@ -915,28 +995,58 @@ export class TradingEngine {
     }
 
     // Update Account State
+    // BLACKLIST: the following keys from being overwritten by the EA heartbeat
+    // payload. These are APP-USER-OWNED flags (mobile UI toggle settings set by the
+    // user via applyBotConfig()). The EA payload sometimes carries stale values of
+    // autoTradingEnabled=false or undefined; if the EA/MT5 payload's own
+    // 或者 heartbeats, and `...this.accountState, ...payload` order caused the
+    // user's last app switch to randomly reset to false even though in-memory toggle
+    // (EA wrote `ON`. This is exactly the user-reported: "heartbeat auto trading
+    // keeps randomly going off even though it's on on the app".
+    const HEARTBEAT_BLACKLIST: Record<string, boolean> = {
+      autoTradingEnabled: true,
+      aiTradingEnabled: true,
+      timezoneTradingEnabled: true,
+      maxSpreadPoints: true,
+    };
+    const userOwnedFlags = {
+      autoTradingEnabled: this.accountState.autoTradingEnabled,
+      aiTradingEnabled: this.accountState.aiTradingEnabled,
+      timezoneTradingEnabled: this.accountState.timezoneTradingEnabled,
+      maxSpreadPoints: this.accountState.maxSpreadPoints,
+    };
+    const sanitizedPayload: any = {};
+    if (payload && typeof payload === 'object') {
+      for (const k of Object.keys(payload)) {
+        if (HEARTBEAT_BLACKLIST[k]) continue;
+        (sanitizedPayload as any)[k] = (payload as any)[k];
+      }
+    }
     this.accountState = {
       ...this.accountState,
-      ...payload,
-      positions: payload.positions || payload.openPositions || [],
+      ...sanitizedPayload,
+      positions: sanitizedPayload.positions || sanitizedPayload.openPositions || [],
       chart: {
         'M5': sortedCandles,
-        ...(payload.chart && typeof payload.chart === 'object' ? payload.chart : {}),
+        ...(sanitizedPayload.chart && typeof sanitizedPayload.chart === 'object' ? sanitizedPayload.chart : {}),
       },
       ea_connected: true,
       lastUpdate: Date.now(),
-      pipSize: payload.pipSize || 0.01,
-      pointSize: payload.pointSize || 0.001,
-      pipValue: payload.pipValue || 1,
-      minLot: payload.minLot || 0.01,
-      maxLot: payload.maxLot || 100,
-      minLotStep: payload.minLotStep || 0.01,
+      pipSize: sanitizedPayload.pipSize || 0.01,
+      pointSize: sanitizedPayload.pointSize || 0.001,
+      pipValue: sanitizedPayload.pipValue || 1,
+      minLot: sanitizedPayload.minLot || 0.01,
+      maxLot: sanitizedPayload.maxLot || 100,
+      minLotStep: sanitizedPayload.minLotStep || 0.01,
       ema20,
-      ema20Prev: payload.ema20Prev || ema20,
+      ema20Prev: sanitizedPayload.ema20Prev || ema20,
       ema50,
       atr14,
       candles: sortedCandles,
       lastFeatures: features,
+      // Re-apply user owned flags explicitly AFTER spread so even if someone later adds new
+      // nested spread above they still win.
+      ...userOwnedFlags,
     };
 
     // Persist to PostgreSQL
