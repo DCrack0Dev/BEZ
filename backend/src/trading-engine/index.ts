@@ -416,6 +416,39 @@ export class TradingEngine {
       // This table carries the EXACT P&L that MT5 reports (profitDollars / profitPips / outcome)
       const dbJournal = await getAdvancedJournalClosedTrades({ range, limit: 200 });
 
+      // Step 1b: Preload prisma.position for any tickets that are still showing 0.01 lots.
+      // savePosition() is called on EVERY EA heartbeat, so the Position table always
+      // has the correct MT5 ticket lotSize regardless of DNA / advanced journal lag.
+      const ticketsToInspect: string[] = [];
+      const allCandidates: Array<{ ticket: any }> = [
+        ...memory.map((t: any) => ({ ticket: (t as any).ticket })),
+        ...dbJournal.map((j: any) => ({ ticket: (j as any).ticket })),
+      ];
+      for (const c of allCandidates) {
+        const key = String(c.ticket);
+        if (key && !ticketsToInspect.includes(key)) ticketsToInspect.push(key);
+      }
+      const lotSizeByTicket = new Map<string, number>();
+      try {
+        const posRows = await (prisma as any).position.findMany({
+          where: { ticket: { in: ticketsToInspect } },
+          select: { ticket: true, lotSize: true, profit: true, openPrice: true, direction: true },
+        }) as Array<{ ticket: string | number; lotSize: any; profit?: any; openPrice?: any; direction?: string }>;
+        for (const pr of posRows) {
+          const n = Number(pr.lotSize || 0);
+          if (n > 0) lotSizeByTicket.set(String(pr.ticket), n);
+        }
+      } catch (_) { /* lotSize enrich optional; skip if table missing etc */ }
+      const resolveLots = (ticket: string | number, candidates: Array<any>) => {
+        const fromPos = lotSizeByTicket.get(String(ticket));
+        if (fromPos && fromPos > 0) return fromPos;
+        for (const c of candidates) {
+          const v = Number(c?.volume ?? c?.lots ?? c?.lotSize ?? 0);
+          if (v > 0) return v;
+        }
+        return 0.01;
+      };
+
       // Step 2: secondary — journalManager (PostgreSQL or JSONL fallback).
       // Pass range startDate (trades closed AFTER start) so filter=today/etc matches
       // the App Journal's user expectation (closed today, not opened today).
@@ -438,11 +471,15 @@ export class TradingEngine {
       // Merge memory first
       for (const t of memory) {
         const ticket = String(t.ticket);
-        merged.set(ticket, { ...t, _source: 'memory' });
+        const lots = resolveLots(ticket, [t, { volume: (t as any).volume, lots: t.lots, lotSize: (t as any).lotSize }]);
+        merged.set(ticket, { ...t, lots, lotSize: lots, _source: 'memory' });
       }
       // Merge DB AdvancedJournal ON TOP (highest priority — real MT5 profit!)
       for (const j of dbJournal) {
-        merged.set(String(j.ticket), { ...(merged.get(String(j.ticket)) || {}), ...j, _source: 'advancedJournal' });
+        const ticket = String(j.ticket);
+        const prior = merged.get(ticket) || {};
+        const lots = resolveLots(ticket, [j, prior, { lotSize: (j as any).lotSize, volume: (j as any).volume }]);
+        merged.set(ticket, { ...prior, ...j, lots, lotSize: lots, _source: 'advancedJournal', _fromAdvancedJournal: true });
       }
       // Merge journalManager last (lowest priority, but preserve outcome)
       for (const e of entries) {
@@ -451,11 +488,13 @@ export class TradingEngine {
         const outcomeVal = e.outcome === 'WIN' || e.outcome === 'LOSS' || e.outcome === 'BREAKEVEN' ? e.outcome : existing?.outcome;
         const rawDollars = (e.profitDollars !== undefined && e.profitDollars !== null) ? Number(e.profitDollars) : NaN;
         const rawPips = (e.profitPips !== undefined && e.profitPips !== null) ? Number(e.profitPips) : NaN;
+        const journalLots = resolveLots(ticket, [existing, e]);
         const m: any = existing || {
           ticket,
           symbol: e.symbol,
           type: e.direction,
-          lots: Number(e.lotSize || 0.01),
+          lots: journalLots,
+          lotSize: journalLots,
           openPrice: Number(e.entryPrice || 0),
           closePrice: Number(e.executionPrice || e.entryPrice || 0),
           openTime: e.entryTimestamp ? new Date(e.entryTimestamp).getTime() : null,
@@ -466,6 +505,11 @@ export class TradingEngine {
           takeProfit: Number(e.tp || 0),
           _source: 'journalManager',
         };
+        if (!existing) {
+          // journal-only ticket (no memory or advanced journal). Force lot enrich.
+          m.lots = journalLots;
+          m.lotSize = journalLots;
+        }
         const existingProfit = Number(existing?.profit ?? existing?.pnl ?? NaN);
         const memoryHasProfit = Number.isFinite(existingProfit) && Math.abs(existingProfit) > 0.0001;
         const journalProfitFinite = Number.isFinite(rawDollars) && Math.abs(rawDollars) > 0.0001;
@@ -485,13 +529,19 @@ export class TradingEngine {
           pnl: finalProfit,
           profitPips: finalPips,
           outcome: outcomeVal || m?.outcome || existing?.outcome,
+          lots: (existing?.lots && Number(existing.lots) > 0 && Math.abs(Number(existing.lots) - 0.01) > 1e-6)
+            ? Number(existing.lots)
+            : journalLots,
+          lotSize: (existing?.lots && Number(existing.lots) > 0 && Math.abs(Number(existing.lots) - 0.01) > 1e-6)
+            ? Number(existing.lots)
+            : journalLots,
         });
       }
       const arr = Array.from(merged.values());
       arr.sort((a, b) => Number(b.closeTime || 0) - Number(a.closeTime || 0));
       return arr.slice(0, 200);
     } catch (e) {
-      return memory;
+      return this.getClosedTrades();
     }
   }
   getDna(): TradeDNA[] {

@@ -78,11 +78,16 @@ export const eaPollingLimiter = rateLimit({
   handler: jsonRateLimitHandler(120),
 });
 
-// EA /api/ea/commands — compat endpoint (hard cap lower to encourage inline
-// commands from /update response).
+// EA /api/ea/commands — compat endpoint for older EA builds that still
+// call this in a tight loop (ScalpKing EA v3 has NOT been updated yet to
+// read commands inline from the /update response body). Until we rebuild
+// the EA and drop this compat poll entirely, keep cap equal to the main
+// update limiter (6000/10min ~10/sec); the earlier 600 cap caused random
+// 429s on the EA Expert terminal whenever commands poll ran faster (which
+// is exactly what we saw after commit f2077ce1c deployed).
 export const eaCommandsLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  limit: 600,
+  limit: 6000,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: keyByApiKeyOrIp,
