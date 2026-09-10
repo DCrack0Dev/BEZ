@@ -241,6 +241,12 @@ model Position {
   lotSize       Decimal
   profit        Decimal
   openTimestamp DateTime
+  // Final MT5 executed close price (the real value from broker, not the last
+  // heartbeat's "currentPrice"). Required so reconciler at boot time can
+  // recompute the correct USD P&L from open/close/lotSize/pipValue even when
+  // the last heartbeat unrealized P&L was mid-flight (e.g. XAUUSD #46795062
+  // showed $69.45 heartbeat but real close was $480.00).
+  closePrice    Decimal?
   closeTimestamp DateTime?
   isOpen        Boolean  @default(true)
   // Trailing-stop phase (1-5), persisted so it can be rehydrated after a restart.
