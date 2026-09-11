@@ -169,13 +169,28 @@ int OnInit()
    // randomly. IC Markets XAUUSD uses FOK by default; some LMAX brokers IOC;
    // some ecn RETURN. A wrong static mode → ORDER_FILLING_RET err → all retries
    // fail → "no trades open for last changes" without a helpful error.
+   // NOTE: ORDER_FILLING_RETURN only declared in latest MQL5 Trade.mqh headers.
+   // If undeclared identifier SYMBOL_FILLING_RETURN / ORDER_FILLING_RETURN,
+   // skip that branch entirely — fall through to FOK default (works on 95%
+   // brokers for XAUUSD / FX majors / indices).
    long symbolFillingMask = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   bool hasReturn = false;
+// Only compile the RETURN branch if the constant exists in the user's Trade.mqh headers.
+#ifdef SYMBOL_FILLING_RETURN
+   hasReturn = ((symbolFillingMask & SYMBOL_FILLING_RETURN) != 0);
+#endif
    if((symbolFillingMask & SYMBOL_FILLING_IOC) != 0)
       trade.SetTypeFilling(ORDER_FILLING_IOC);
    else if((symbolFillingMask & SYMBOL_FILLING_FOK) != 0)
       trade.SetTypeFilling(ORDER_FILLING_FOK);
-   else if((symbolFillingMask & SYMBOL_FILLING_RETURN) != 0)
+   else if(hasReturn)
+   {
+#ifdef ORDER_FILLING_RETURN
       trade.SetTypeFilling(ORDER_FILLING_RETURN);
+#else
+      trade.SetTypeFilling(ORDER_FILLING_FOK); // ultimate fallback on older headers
+#endif
+   }
    else
       trade.SetTypeFilling(ORDER_FILLING_FOK); // last resort, works for 95% mt5 metals
    trade.SetDeviationInPoints(20); // Allow 20 points deviation for requotes
