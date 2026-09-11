@@ -164,9 +164,21 @@ int OnInit()
    licenseValid = true;
    lastHeartbeatStatus = "LICENSED";
    trade.SetExpertMagicNumber(MagicNumber);
-   trade.SetTypeFilling(ORDER_FILLING_IOC);
+   // Auto-select broker-native filling mode for the current symbol.
+   // Before: SetTypeFilling(IOC); SetTypeFilling(FOK); → line 169 overwrote 168
+   // randomly. IC Markets XAUUSD uses FOK by default; some LMAX brokers IOC;
+   // some ecn RETURN. A wrong static mode → ORDER_FILLING_RET err → all retries
+   // fail → "no trades open for last changes" without a helpful error.
+   long symbolFillingMask = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((symbolFillingMask & SYMBOL_FILLING_IOC) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_IOC);
+   else if((symbolFillingMask & SYMBOL_FILLING_FOK) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else if((symbolFillingMask & SYMBOL_FILLING_RETURN) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_RETURN);
+   else
+      trade.SetTypeFilling(ORDER_FILLING_FOK); // last resort, works for 95% mt5 metals
    trade.SetDeviationInPoints(20); // Allow 20 points deviation for requotes
-   trade.SetTypeFilling(ORDER_FILLING_FOK);
 
    handle_ema20 = iMA(_Symbol, PERIOD_M5, 20, 0, MODE_EMA, PRICE_CLOSE);
    handle_ema50 = iMA(_Symbol, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE);
@@ -190,8 +202,24 @@ void OnTimer()
 
    if(TimeCurrent() - lastHeartbeat >= HeartbeatInterval)
    {
-      SendHeartbeat();
-      PollCommands();
+      string heartbeatResp = "";
+      SendHeartbeat(heartbeatResp); // returns response, inline commands pulled here
+      // INLINE COMMANDS FIRST (priority — /update already cleared queue backend-side).
+      // Old 2nd HTTP GET /api/ea/commands raced backend clearPendingCommands:
+      // the inline BUY/SELL was in JSON commands[] but clearPending() deleted it
+      // before PollCommands() poll ran → zero trades for the entire user's "no trades since last changes" window.
+      int inlineCount = 0;
+      if(heartbeatResp != "" && StringFind(heartbeatResp, "\"commands\"") >= 0)
+      {
+         string cmdsArr = JsonExtractCommandsArray(heartbeatResp);
+         if(cmdsArr != "")
+            inlineCount = DispatchCommands(cmdsArr);
+      }
+      // /commands compat poll ONLY if inline returned nothing (for older
+      // backends pre-inline patch or if the response JSON missed the key).
+      // Saves half the HTTP calls (cuts 429/5203 burn rate for scanners too).
+      if(inlineCount == 0)
+         PollCommands();
       ProcessPendingOrders();
       lastHeartbeat = TimeCurrent();
       UpdateExpertComment();
@@ -266,8 +294,12 @@ void OnTick()
 //+------------------------------------------------------------------+
 //| HEARTBEAT LOGIC                                                 |
 //+------------------------------------------------------------------+
-void SendHeartbeat()
+// Returns full HTTP JSON response in `&response` so caller can pull
+// inline `commands:[]` array (backend clears queue once, no 2nd /commands
+// race to empty it — that race caused "no trades since last changes").
+void SendHeartbeat(string &response)
 {
+   response = "";
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
    {
@@ -451,6 +483,10 @@ void SendHeartbeat()
    double spreadPts = (tick.ask - tick.bid) / _Point;
    if(FxScalpKing.SendHeartbeat(json, resp))
    {
+      // Propagate raw response OUT to caller (OnTimer) so inline commands[]
+      // get parsed exactly once — backend clearPendingCommands already removed
+      // the queue, so a 2nd /api/ea/commands poll here returns [] empty.
+      response = resp;
       heartbeatOkCount++;
       lastHeartbeatOk = TimeCurrent();
       lastHeartbeatStatus = "OK";
@@ -480,8 +516,39 @@ void SendHeartbeat()
 }
 
 //+------------------------------------------------------------------+
+//| JSON HELPERS                                                     |
+//+------------------------------------------------------------------+
+// Extract the "commands":[...] array body from a larger JSON response
+// (backend returns {success:true, commands:[...]}). The returned substring
+// is a raw array "[{...},{...}]" suitable for DispatchCommands below.
+string JsonExtractCommandsArray(string json)
+{
+   string key = "\"commands\":";
+   int p = StringFind(json, key);
+   if(p < 0) return "";
+   int arrStart = StringFind(json, "[", p + StringLen(key));
+   if(arrStart < 0) return "";
+   // Find matching ] respecting balanced brackets (MQL5 string limits OK here).
+   int depth = 0;
+   int len = StringLen(json);
+   for(int i = arrStart; i < len; i++)
+   {
+      ushort ch = StringGetCharacter(json, i);
+      if(ch == '[') depth++;
+      else if(ch == ']')
+      {
+         depth--;
+         if(depth == 0)
+            return StringSubstr(json, arrStart, i - arrStart + 1);
+      }
+   }
+   return "";
+}
+
+//+------------------------------------------------------------------+
 //| POLL & VALIDATE COMMANDS                                         |
 //+------------------------------------------------------------------+
+// Compat fallback: older backends that don't inline commands in /update.
 void PollCommands()
 {
    string resp = FxScalpKing.GetCommands();
@@ -490,18 +557,47 @@ void PollCommands()
       lastCommandCount = 0;
       return;
    }
+   DispatchCommands(resp);
+}
+
+// Shared dispatcher for both INLINE commands (priority source) and COMPAT
+// /api/ea/commands poll. Returns # of commands handled so we know if the
+// compat poll even needed to run.
+int DispatchCommands(string resp)
+{
+   if(resp == "" || resp == "[]")
+   {
+      lastCommandCount = 0;
+      return 0;
+   }
 
    LogAction("INFO", "COMMANDS", "Received: " + resp);
 
-   // Walk each object in the JSON array and honour brain-calculated lots/SL/TP.
+   // Slightly safer brace walk: count depth so action values that happen to
+   // contain { or } don't prematurely split a command object.
+   int len = StringLen(resp);
    int searchFrom = 0;
    int cmdCount = 0;
-   while(true)
+   while(searchFrom < len)
    {
       int objStart = StringFind(resp, "{", searchFrom);
       if(objStart < 0) break;
-      int objEnd = StringFind(resp, "}", objStart);
+
+      // Find the matching } at depth=1 (commands is [{..},{..}] 1-deep).
+      int depth = 0;
+      int objEnd = -1;
+      for(int i = objStart; i < len; i++)
+      {
+         ushort ch = StringGetCharacter(resp, i);
+         if(ch == '{') depth++;
+         else if(ch == '}')
+         {
+            depth--;
+            if(depth == 0) { objEnd = i; break; }
+         }
+      }
       if(objEnd < 0) break;
+
       string obj = StringSubstr(resp, objStart, objEnd - objStart + 1);
       searchFrom = objEnd + 1;
       cmdCount++;
@@ -530,13 +626,48 @@ void PollCommands()
                LogAction("ERROR", "UPDATE_SL", "Failed ticket " + IntegerToString(ticket) + " err=" + IntegerToString(GetLastError()));
          }
       }
+      else if(action == "UPDATE_TP")
+      {
+         ulong ticket = (ulong)JsonGetNumber(obj, "ticket", 0);
+         double tp = JsonGetNumber(obj, "tp", 0);
+         if(ticket > 0 && tp > 0 && posInfo.SelectByTicket(ticket))
+         {
+            if(trade.PositionModify(ticket, posInfo.StopLoss(), tp))
+               LogAction("SUCCESS", "UPDATE_TP", "Ticket " + IntegerToString(ticket) + " TP -> " + DoubleToString(tp, _Digits));
+            else
+               LogAction("ERROR", "UPDATE_TP", "Failed ticket " + IntegerToString(ticket) + " err=" + IntegerToString(GetLastError()));
+         }
+      }
       else if(action == "PAUSE") { isPaused = true; LogAction("INFO", "COMMAND", "EA Paused"); }
       else if(action == "RESUME") { isPaused = false; LogAction("INFO", "COMMAND", "EA Resumed"); }
       else if(action == "CLOSE_ALL") CloseAllTrades();
+      else if(action == "TPCLOSE" || action == "CLOSE_SINGLE" || action == "CLOSE_TICKET" ||
+              action == "CLOSE_POSITION" || action == "MANUAL_CLOSE")
+      {
+         ulong ticket = (ulong)JsonGetNumber(obj, "ticket", 0);
+         if(ticket == 0)
+         {
+            // Backend may send "id" or "positionId" field too, accept either.
+            ticket = (ulong)JsonGetNumber(obj, "id", 0);
+            if(ticket == 0) ticket = (ulong)JsonGetNumber(obj, "positionId", 0);
+         }
+         if(ticket > 0 && posInfo.SelectByTicket(ticket))
+         {
+            if(trade.PositionClose(ticket))
+               LogAction("SUCCESS", "CLOSE", action + " closed ticket " + IntegerToString(ticket));
+            else
+               LogAction("ERROR", "CLOSE", action + " FAILED ticket " + IntegerToString(ticket) + " err=" + IntegerToString(GetLastError()));
+         }
+         else
+         {
+            LogAction("WARN", "CLOSE", action + " ticket not found/open: " + IntegerToString(ticket));
+         }
+      }
       else if(action == "CONFIG_SYNC") LogAction("INFO", "COMMAND", "CONFIG_SYNC acknowledged");
       else LogAction("WARN", "COMMAND", "Unknown action: " + action);
    }
    lastCommandCount = cmdCount;
+   return cmdCount;
 }
 
 //+------------------------------------------------------------------+
@@ -601,7 +732,8 @@ void QueueOrder(string type, double lotSize, double brainSL, double brainTP)
 
    if(lotSize <= 0) lotSize = FixedLotSize;
 
-   // Validate command
+   // Validate command (clamps sl/tp outward if too close to entry per broker stopsLevel/freezeLevel
+   // — passes back clamped values via &ref so they actually get used in the order).
    if(!ValidateCommand(type, entryPrice, sl, tp, lotSize))
    {
       LogAction("ERROR", "QUEUE", type + " command validation failed");
@@ -631,7 +763,7 @@ void QueueOrder(string type, double lotSize, double brainSL, double brainTP)
 //+------------------------------------------------------------------+
 //| VALIDATE COMMAND                                                 |
 //+------------------------------------------------------------------+
-bool ValidateCommand(string type, double entryPrice, double sl, double tp, double lotSize)
+bool ValidateCommand(string type, double entryPrice, double &sl, double &tp, double lotSize)
 {
    // Check valid symbol
    if(!SymbolSelect(_Symbol, true))
@@ -661,6 +793,47 @@ bool ValidateCommand(string type, double entryPrice, double sl, double tp, doubl
    {
       LogAction("ERROR", "VALIDATE", "Sell SL must be above entry price");
       return false;
+   }
+
+   // SYMBOL_TRADE_STOPS_LEVEL: broker minimum points of distance from entry
+   // for SL/TP (freeze level). XAUUSD IC Markets: 40-80 depending session.
+   // Old code: if backend calculated SL=10 points (too close) → err 130 Invalid stops,
+   // requote handler didn't fix it → max retries → perm fail, zero trades visible.
+   // Fix here: auto-clamp SL/TP OUTWARD away from entry by at least stopsLevel + buffer.
+   long stopsLevel = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel <= 0) stopsLevel = 20;
+   long freezeLevel = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   if(freezeLevel > stopsLevel) stopsLevel = freezeLevel;
+   double minOffsetPts = (double)stopsLevel + 10; // 10 point buffer beyond stopsLevel/freezeLevel
+   double minOffsetPrice = minOffsetPts * _Point;
+
+   if(sl > 0)
+   {
+      double minAllowedSl = (type == "BUY") ? entryPrice - minOffsetPrice : entryPrice + minOffsetPrice;
+      bool tooClose = (type == "BUY") ? (sl > minAllowedSl) : (sl < minAllowedSl);
+      if(tooClose)
+      {
+         double oldSl = sl;
+         sl = minAllowedSl;
+         LogAction("WARN", "VALIDATE",
+                   type + " SL too close to entry (" + DoubleToString(oldSl, _Digits) +
+                   "), clamped to broker stopsLevel " + IntegerToString((int)stopsLevel) +
+                   "pts → SL " + DoubleToString(sl, _Digits));
+      }
+   }
+   if(tp > 0)
+   {
+      double minAllowedTp = (type == "BUY") ? entryPrice + minOffsetPrice : entryPrice - minOffsetPrice;
+      bool tooClose = (type == "BUY") ? (tp < minAllowedTp) : (tp > minAllowedTp);
+      if(tooClose)
+      {
+         double oldTp = tp;
+         tp = minAllowedTp;
+         LogAction("WARN", "VALIDATE",
+                   type + " TP too close to entry (" + DoubleToString(oldTp, _Digits) +
+                   "), clamped to broker stopsLevel " + IntegerToString((int)stopsLevel) +
+                   "pts → TP " + DoubleToString(tp, _Digits));
+      }
    }
 
    LogAction("SUCCESS", "VALIDATE", type + " command validated");

@@ -29,6 +29,17 @@ import { gateConfig, GATE_DEFAULTS } from './gate-config/gateConfig';
 
 dotenv.config();
 
+// Rolling last-commands cache (dup of latest /update inline payload). Legacy EA
+// builds (pre-inline-commands) still call GET /api/ea/commands separately
+// AFTER /update. The /update route runs tradingEngine.clearPendingCommands()
+// for new EAs — that would leave old EAs starved of commands forever if the
+// backend queue flushed before compat poll ran (zero trades with old compiled
+// .ex5 files). Cache returns the same command set once (backward compat), for
+// up to ~120s of stale retries. New EAs ignore the /commands route entirely.
+let lastCommandsCache: any[] = [];
+let lastCommandsCachedAt = 0;
+const COMMANDS_CACHE_TTL_MS = 120_000;
+
 const app = express();
 // Render always runs behind a Cloudflare LB + their own nginx reverse proxy.
 // Without trustProxy:true, Express sees every request from the LB's 10.x IP
@@ -311,7 +322,15 @@ app.post('/api/ea/update',
     // separate /commands polls). Backwards-compat: /commands endpoint still
     // works for older EAs.
     const commands = tradingEngine.clearPendingCommands();
-    if (commands.length > 0) logger.info('Sent commands (inline update) to EA', commands.length);
+    // Populate backward-compat cache for old EAs (pre-inline commands).
+    // New EAs parse the inline commands[] in this JSON response directly; old
+    // ones run a separate GET /api/ea/commands 1ms later — without this cache
+    // the queue is already empty and OLD .ex5 files get zero trades forever.
+    if (commands.length > 0) {
+      lastCommandsCache = commands;
+      lastCommandsCachedAt = Date.now();
+      logger.info('Sent commands (inline update) to EA', commands.length);
+    }
     res.json({ success: true, commands });
   } catch (error) {
     monitoring.trackBrokerResponse(false, Date.now() - start, 'EA_UPDATE_FAIL');
@@ -327,8 +346,24 @@ app.get('/api/ea/commands',
   requireEaKey,
   eaCommandsLimiter,
   (req, res) => {
-  const cmds = tradingEngine.clearPendingCommands();
-  if (cmds.length > 0) logger.info('Sent commands to EA (/commands compat)', cmds.length);
+  // Fresh queue = new EAs (inline) cleared this cycle. Fall back to the
+  // rolling 120s TTL cache populated by the latest /update inline payload
+  // so old .ex5 builds still receive the command set instead of [].
+  let cmds = tradingEngine.clearPendingCommands();
+  if (cmds.length === 0 && lastCommandsCache.length > 0) {
+    const age = Date.now() - lastCommandsCachedAt;
+    if (age < COMMANDS_CACHE_TTL_MS) {
+      cmds = lastCommandsCache;
+      logger.info('Sent cached commands to legacy EA (/commands compat)', { count: cmds.length, ageMs: age });
+    }
+  } else if (cmds.length > 0) {
+    // Legacy EA hit /commands BEFORE /update (order jitter). Populate cache
+    // here too; inline-clear on the subsequent /update won't double-deliver
+    // because clearPendingCommands returns [] after this call.
+    lastCommandsCache = cmds;
+    lastCommandsCachedAt = Date.now();
+    logger.info('Sent commands to EA (/commands compat)', cmds.length);
+  }
   res.json(cmds);
 });
 
