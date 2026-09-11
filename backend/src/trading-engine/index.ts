@@ -203,7 +203,15 @@ export class TradingEngine {
       const restoredAi = getBool('aiTradingEnabled', this.accountState.aiTradingEnabled);
       const restoredTrailing = getBool('trailingStopEnabled', this.accountState.trailingStopEnabled);
       const restoredTz = getBool('timezoneTradingEnabled', this.accountState.timezoneTradingEnabled);
-      const restoredSpread = getInt('maxSpreadPoints', this.accountState.maxSpreadPoints);
+      // MIN-SAFETY clamp: the XAUUSD spread at 80 points NY session is normal. If someone once
+      // user wrote maxSpreadPoints=10 or 50 via an earlier saved garbage would permanently block every
+      // ALL entries forever (spread hard filter passing?). This is catastrophic for a
+      // persistent DB-backed setting. Clamp MIN to 80 pts so spread=80 in the logs
+      // NEVER fail restore from a stale bad DB value. They can still set higher via UI
+      // when they want 800 default; no clamp on the upper bound.
+      const MIN_SAFE_MAX_SPREAD_POINTS = 80;
+      const rawSpread = getInt('maxSpreadPoints', this.accountState.maxSpreadPoints);
+      const restoredSpread = Math.max(MIN_SAFE_MAX_SPREAD_POINTS, rawSpread);
       this.accountState.autoTradingEnabled = restoredAuto;
       this.accountState.aiTradingEnabled = restoredAi;
       this.accountState.trailingStopEnabled = restoredTrailing;
@@ -496,7 +504,12 @@ export class TradingEngine {
       this.accountState.timezoneTradingEnabled = !!cfg.timezoneTradingEnabled;
     }
     if (cfg.maxSpreadPoints !== undefined && Number.isFinite(cfg.maxSpreadPoints) && cfg.maxSpreadPoints > 0) {
-      this.accountState.maxSpreadPoints = Math.round(cfg.maxSpreadPoints);
+      // MIN safety clamp same as DB restore above — a user may accidentally input
+      // 10 points or some tiny number via settings screen. Insta-lock all entries
+      // for every signal forever (spread=80 in current market > 10). Force at
+      // least 80 pts minimum so a small typo or old saved garbage can't kill trading.
+      const MIN_SAFE_MAX_SPREAD_POINTS = 80;
+      this.accountState.maxSpreadPoints = Math.max(MIN_SAFE_MAX_SPREAD_POINTS, Math.round(cfg.maxSpreadPoints));
       CONFIG.maxSpreadPoints = this.accountState.maxSpreadPoints;
     }
     // Persist to Postgres BotSetting table so settings survive Render restarts.

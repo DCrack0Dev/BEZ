@@ -30,6 +30,13 @@ import { gateConfig, GATE_DEFAULTS } from './gate-config/gateConfig';
 dotenv.config();
 
 const app = express();
+// Render always runs behind a Cloudflare LB + their own nginx reverse proxy.
+// Without trustProxy:true, Express sees every request from the LB's 10.x IP
+// (same for ALL customers on Render shared space → rate limiter buckets merged).
+// With trustProxy: true, X-Forwarded-For = real client IP (EA home MT5 IP vs
+// random internet scanners that probe liquibot-back.onrender.com → separate
+// rate limit buckets = NO more anonymous scanners burning the EA's bucket.
+app.set('trust proxy', true);
 // Helmet early: basic HTTP security headers. Uses permissive crossOriginResourcePolicy
 // and crossOriginEmbedderPolicy so cross-origin RN apps render embedded fonts/images
 // (Expo Go / WebView devtools).
@@ -232,7 +239,18 @@ app.post('/api/auth/refresh', (req, res) => {
   }
 });
 
-app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdateSchema), replayGuard, async (req, res) => {
+app.post('/api/ea/update',
+  // AUTH FIRST — anonymous probes get 401 BEFORE they touch the rate limiter.
+  // Old order (rateLimit THEN requireEaKey) = anonymous scanners shared the
+  // EA's IP/api-key bucket (they all hit /api/ea/update first from the same
+  // Render shared LB trustProxy-bucket), which is exactly what caused the
+  // random "429 allowlist liquibot-back.onrender.com ApiKey must match" bursts
+  // in the ScalpKing EA v3 Expert log.
+  requireEaKey,
+  eaPollingLimiter,
+  validateBody(eaUpdateSchema),
+  replayGuard,
+  async (req, res) => {
   const start = Date.now();
   const data = req.body;
   // INSTANT RACE-FREE SYNC: broadcast hot fields DIRECTLY from EA payload BEFORE
@@ -303,7 +321,12 @@ app.post('/api/ea/update', requireEaKey, eaPollingLimiter, validateBody(eaUpdate
   }
 });
 
-app.get('/api/ea/commands', requireEaKey, eaCommandsLimiter, (req, res) => {
+app.get('/api/ea/commands',
+  // Same reorder: auth before rate limit. Compat poll route for older EA
+  // builds that haven't read commands[] inline from /update response body.
+  requireEaKey,
+  eaCommandsLimiter,
+  (req, res) => {
   const cmds = tradingEngine.clearPendingCommands();
   if (cmds.length > 0) logger.info('Sent commands to EA (/commands compat)', cmds.length);
   res.json(cmds);
@@ -312,7 +335,13 @@ app.get('/api/ea/commands', requireEaKey, eaCommandsLimiter, (req, res) => {
 // Broker-side execution detail report — second copy of truth next to journal.
 // The EA's ReportExecution() in FxScalpKing_HTTP.mqh calls this after every
 // order open/close/modify, requote, retry, slippage event, or broker error.
-app.post('/api/ea/execution-report', requireEaKey, eaPollingLimiter, validateBody(eaExecutionReportSchema), replayGuard, async (req, res) => {
+app.post('/api/ea/execution-report',
+  // Auth first — same rationale as /update and /commands above.
+  requireEaKey,
+  eaPollingLimiter,
+  validateBody(eaExecutionReportSchema),
+  replayGuard,
+  async (req, res) => {
   const start = Date.now();
   try {
     const data = req.body;

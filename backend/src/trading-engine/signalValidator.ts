@@ -2,7 +2,7 @@ import { CONFIG } from '../config/tradingConfig';
 import { calculateRisk, RiskParams } from '../risk-manager/riskEngine';
 import { TradeSignal, FeatureSet, Candle, MT5Payload, MarketRegime } from '../types';
 import { v4 as uuidv4 } from 'uuid';
-import { gateConfig } from '../gate-config/gateConfig';
+import { gateConfig, GATE_DEFAULTS } from '../gate-config/gateConfig';
 
 export const calculateATR = (candles: Candle[], period: number = 14): number => {
   if (candles.length < period + 1) return 0;
@@ -224,7 +224,13 @@ export const validateSignal = (
     { name: 'newsFilter', passed: !newsFilterActive },
   ];
   const hardGatesPassed = hardGates.filter(g => g.passed).length;
-  const hardGateThreshold = Math.max(1, Math.min(7, Math.round(gateConfig.getNum('hardGateThreshold'))));
+  // Safety: if gateConfig returns NaN for any reason (DB override with invalid string,
+  // migration failed, empty array on load, etc) Math.round(NaN)=NaN, max/min break.
+  // Fallback hardGateThreshold=3 (default defined in GATE_DEFAULTS) so 3/7 gates required;
+  // never allow threshold below 1 or above 7.
+  const rawHardGate = gateConfig.getNum('hardGateThreshold');
+  const safeHardGate = Number.isFinite(rawHardGate) ? Math.round(rawHardGate) : GATE_DEFAULTS.hardGateThreshold.defaultValue as number;
+  const hardGateThreshold = Math.max(1, Math.min(7, safeHardGate));
 
   if (!features) {
     return null;
@@ -350,8 +356,15 @@ export const validateSignal = (
   ];
   const sellSoftPassed = sellSoftReqs.filter(g => g.passed).length;
 
-  const softBuyThreshold = Math.max(1, Math.min(12, Math.round(gateConfig.getNum('softThreshold.buy'))));
-  const softSellThreshold = Math.max(1, Math.min(12, Math.round(gateConfig.getNum('softThreshold.sell'))));
+  // Defensive same threshold wrappers — soft thresholds are used the same way.
+  // Default for soft = GATE_DEFAULTS.softThreshold.* (buy 2, sell 2 / 12). Fallback same.
+  const rawSoftBuy = gateConfig.getNum('softThreshold.buy');
+  const rawSoftSell = gateConfig.getNum('softThreshold.sell');
+  const safeSoftBuy = Number.isFinite(rawSoftBuy) ? Math.round(rawSoftBuy) : GATE_DEFAULTS['softThreshold.buy'].defaultValue as number;
+  const safeSoftSell = Number.isFinite(rawSoftSell) ? Math.round(rawSoftSell) : GATE_DEFAULTS['softThreshold.sell'].defaultValue as number;
+  const softBuyThreshold = Math.max(1, Math.min(12, safeSoftBuy));
+  const softSellThreshold = Math.max(1, Math.min(12, safeSoftSell));
+
   const structureOrTrendOk = trendConfidenceOk || sweepBullish || sweepBearish ||
     (features.structureStrength ?? 0) >= structureMinStrength ||
     features.trendStrength >= trendMinStrength ||
