@@ -98,7 +98,60 @@ export class FeatureStorage {
         candleId: feature.candleId!,
       };
 
-      const savedFeature = await prisma.featureSet.create({ data });
+      // Multiple EA heartbeats can land for the same completed candle
+      // (10s cadence + retry jitter → 2-3 persistMarketData calls per candle).
+      // candleId is globally unique per candle (symbol+tf+openEpochMs), so use
+      // upsert-on-conflict idempotency: on duplicate candleId update all
+      // feature fields, don't throw P2002. Prevents the log spam above AND
+      // eliminates postgres rollbacks that were leaking into the 5-conn cap.
+      const savedFeature = await prisma.featureSet.upsert({
+        where: { candleId: data.candleId },
+        create: data,
+        update: {
+          symbol: data.symbol,
+          timeframe: data.timeframe,
+          trendStrength: data.trendStrength,
+          trendDirection: data.trendDirection,
+          ema20DistancePips: data.ema20DistancePips,
+          ema50DistancePips: data.ema50DistancePips,
+          adxValue: data.adxValue,
+          slope20: data.slope20,
+          slope50: data.slope50,
+          momentumDirection: data.momentumDirection,
+          rsiStrength: data.rsiStrength,
+          macdMomentum: data.macdMomentum,
+          cciValue: data.cciValue,
+          williamsR: data.williamsR,
+          atrRatio: data.atrRatio,
+          volatility: data.volatility,
+          bbPercentWidth: data.bbPercentWidth,
+          bbPosition: data.bbPosition,
+          bbWidth: data.bbWidth,
+          liquiditySweep: data.liquiditySweep,
+          swingHighs: data.swingHighs,
+          swingLows: data.swingLows,
+          nearestSupport: data.nearestSupport,
+          nearestResistance: data.nearestResistance,
+          structureType: data.structureType,
+          structureStrength: data.structureStrength,
+          fvgPresent: data.fvgPresent,
+          fvgDetails: data.fvgDetails,
+          orderBlockConfirmed: data.orderBlockConfirmed,
+          orderBlockDetails: data.orderBlockDetails,
+          marketSession: data.marketSession,
+          prevCandlePattern: data.prevCandlePattern,
+          prevCandleBodyPct: data.prevCandleBodyPct,
+          prevCandleType: data.prevCandleType,
+          volumeRatio: data.volumeRatio,
+          newsImpact: data.newsImpact,
+          normalizedFeatures: data.normalizedFeatures,
+          similarSetupWinRate: data.similarSetupWinRate,
+          riskScore: data.riskScore,
+          bullishStructurePercent: data.bullishStructurePercent,
+          bearishStructurePercent: data.bearishStructurePercent,
+          updatedAt: new Date(),
+        },
+      });
       return savedFeature;
     } catch (error) {
       console.error('Error saving feature:', error);

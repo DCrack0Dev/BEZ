@@ -360,13 +360,23 @@ export class ModelManager {
   private _dbHydratePromise: Promise<void> | null = null;
 
   constructor() {
-    this._dbHydratePromise = hydrateRegistryFromDb();
+    // Settle the hydrate promise once (never reruns prisma queries on subsequent HTTP calls).
+    // Without this, getDashboard `await ensureHydrated` would do 3 prisma queries every call →
+    // hogged connections under 5-conn Render cap → cascading 10s/28s/63s latency.
+    this._dbHydratePromise = hydrateRegistryFromDb().finally(() => {
+      this._hydrateSettled = true;
+    });
   }
 
+  private _hydrateSettled = false;
+
   /** Block until cold-start DB hydrate completed. HTTP handlers must wait for
-   *  this before returning models so Render restarts don't show empty list. */
+   *  this before returning models so Render restarts don't show empty list.
+   *  Subsequent calls (after first boot) short-circuit in O(1). */
   private async ensureHydrated() {
+    if (this._hydrateSettled) return;
     if (this._dbHydratePromise) await this._dbHydratePromise;
+    this._hydrateSettled = true;
   }
   /**
    * Start training from the cloud learning dataset (or explicit path).

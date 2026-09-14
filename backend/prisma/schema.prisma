@@ -205,8 +205,11 @@ model FeatureSet {
   candleIndicatorId       String? @unique
   candleIndicator         CandleIndicator? @relation("IndicatorToFeatureSet", fields: [candleIndicatorId], references: [id], onDelete: SetNull)
   createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   @@index([symbol, timeframe, createdAt])
+  @@index([symbol, timeframe, createdAt(sort: Desc)])
+  @@index([symbol, createdAt(sort: Desc)])
 }
 
 // --- TRADING ACCOUNT ---
@@ -260,6 +263,9 @@ model Position {
 
   @@index([isOpen])
   @@index([createdAt])
+  @@index([isOpen, symbol])
+  @@index([symbol, closeTimestamp(sort: Desc)])
+  @@index([symbol, isOpen])
 }
 
 // --- TRADING ---
@@ -437,6 +443,11 @@ model AdvancedTradeJournal {
   @@index([outcome])
   @@index([symbol])
   @@index([entryTimestamp])
+  // AI Lab dashboard hotspot: filter closed trades + sort close desc, symbol+outcome partition.
+  @@index([outcome, closeTimestamp(sort: Desc)])
+  @@index([symbol, outcome, closeTimestamp(sort: Desc)])
+  @@index([reasonForExit])
+  @@index([outcome, symbol])
 }
 
 // --- MARKET CONTEXT ---
@@ -509,6 +520,8 @@ model ModelCandidate {
 
   @@index([status])
   @@index([isProduction])
+  @@index([trainingDate(sort: Desc)])
+  @@index([status, trainingDate(sort: Desc)])
 }
 
 model ModelRegistry {
@@ -547,6 +560,8 @@ model TrainingRun {
   @@index([version])
   @@index([status])
   @@index([startedAt])
+  @@index([startedAt(sort: Desc)])
+  @@index([status, startedAt(sort: Desc)])
 }
 
 model PredictionLog {
@@ -566,6 +581,9 @@ model PredictionLog {
 
   @@index([modelVersion, createdAt])
   @@index([createdAt])
+  @@index([createdAt(sort: Desc)])
+  @@index([modelVersion, createdAt(sort: Desc)])
+  @@index([symbol, createdAt(sort: Desc)])
 }
 
 // --- MONITORING ---
