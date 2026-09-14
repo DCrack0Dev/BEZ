@@ -252,7 +252,122 @@ function computeTradeAnalytics(trades: any[]) {
   };
 }
 
+function writeRegistryFile(reg: any) {
+  try {
+    if (!fs.existsSync(MODELS_DIR)) fs.mkdirSync(MODELS_DIR, { recursive: true });
+    fs.writeFileSync(REGISTRY_PATH, JSON.stringify(reg, null, 2), 'utf8');
+  } catch (e) {
+    logger.warn('[ModelManager] Failed to write registry.json', { err: String(e) });
+  }
+}
+
+/** Cold-start hydrate: Build in-memory registry.json from DB ModelCandidate +
+ *  prisma.modelRegistry productionVersion. Without this, Render ephemeral FS
+ *  wipes registry.json on every deploy → AI Lab models = [] (the bug user
+ *  reported: "not showing my models"). DB IS the source of truth now; file is
+ *  only kept around for python train.py compatibility. */
+async function hydrateRegistryFromDb(): Promise<void> {
+  try {
+    const candidates = await prisma.modelCandidate.findMany({
+      orderBy: [{ trainingDate: 'desc' }, { createdAt: 'desc' }],
+      take: 50,
+    });
+    const regRow = await prisma.modelRegistry.findFirst({ orderBy: { updatedAt: 'desc' } });
+    const runs = await prisma.trainingRun.findMany({
+      orderBy: { startedAt: 'desc' },
+      take: 50,
+    });
+    if (!candidates.length && !runs.length && !regRow) return; // nothing to restore
+
+    const existing = fs.existsSync(REGISTRY_PATH) ? readRegistryFile() : { production_version: null, candidates: {}, training_runs: [] };
+    const reg: any = {
+      production_version: (regRow?.productionVersion ?? existing.production_version ?? null),
+      candidates: { ...(existing.candidates || {}) },
+      training_runs: [...(existing.training_runs || [])],
+    };
+
+    for (const c of candidates) {
+      const version = c.version;
+      const metrics: any = (c.metricsJson && typeof c.metricsJson === 'object') ? c.metricsJson : {};
+      if (!reg.candidates[version]) {
+        reg.candidates[version] = {
+          version,
+          registered_at: c.trainingDate ? c.trainingDate.toISOString() : new Date().toISOString(),
+          metrics: {
+            win_rate: Number(c.winRate ?? 0),
+            profit_factor: Number(c.profitFactor ?? 0),
+            avg_profit: Number(c.avgProfit ?? 0),
+            avg_rr: c.avgRr != null ? Number(c.avgRr) : null,
+            sharpe_ratio: Number(c.sharpeRatio ?? 0),
+            max_drawdown: c.maxDrawdown != null ? Number(c.maxDrawdown) : null,
+            accuracy: c.accuracy != null ? Number(c.accuracy) : null,
+            precision: c.precision != null ? Number(c.precision) : null,
+            recall: c.recall != null ? Number(c.recall) : null,
+            f1_score: c.f1Score != null ? Number(c.f1Score) : null,
+            training_loss: c.trainingLoss != null ? Number(c.trainingLoss) : null,
+            validation_loss: c.validationLoss != null ? Number(c.validationLoss) : null,
+            trade_frequency: c.tradeFrequency != null ? Number(c.tradeFrequency) : null,
+            stability: c.stability != null ? Number(c.stability) : null,
+            ...metrics,
+          },
+          deployment_recommendation: c.deploymentRec || 'NO',
+          recommendation_reason: c.recReason || '',
+          status: c.status || 'CANDIDATE',
+        };
+      }
+    }
+
+    for (const r of runs) {
+      const exists = reg.training_runs.find((t: any) => t?.id === r.id || (t?.version === r.version && String(t?.status) === r.status));
+      if (!exists) {
+        reg.training_runs.push({
+          id: r.id,
+          version: r.version,
+          status: r.status,
+          epochs: r.epochs ?? null,
+          train_samples: r.trainSamples ?? null,
+          val_samples: r.valSamples ?? null,
+          holdout_samples: r.holdoutSamples ?? null,
+          training_loss: r.trainingLoss != null ? Number(r.trainingLoss) : null,
+          validation_loss: r.validationLoss != null ? Number(r.validationLoss) : null,
+          accuracy: r.accuracy != null ? Number(r.accuracy) : null,
+          precision: r.precision != null ? Number(r.precision) : null,
+          recall: r.recall != null ? Number(r.recall) : null,
+          f1_score: r.f1Score != null ? Number(r.f1Score) : null,
+          profit_factor: r.profitFactor != null ? Number(r.profitFactor) : null,
+          sharpe_ratio: r.sharpeRatio != null ? Number(r.sharpeRatio) : null,
+          max_drawdown: r.maxDrawdown != null ? Number(r.maxDrawdown) : null,
+          error_message: r.errorMessage ?? null,
+          started_at: r.startedAt?.toISOString?.() ?? null,
+          completed_at: r.completedAt?.toISOString?.() ?? null,
+        });
+      }
+    }
+    reg.training_runs.sort((a: any, b: any) => (b.started_at || '').localeCompare(a.started_at || ''));
+
+    writeRegistryFile(reg);
+    logger.info('[ModelManager] Hydrated registry from DB (Render cold-start).', {
+      production: reg.production_version,
+      candidates: Object.keys(reg.candidates).length,
+      training_runs: reg.training_runs.length,
+    });
+  } catch (e) {
+    logger.warn('[ModelManager] DB hydrate failed (table missing? first deploy). Using existing registry.json / empty.', String(e));
+  }
+}
+
 export class ModelManager {
+  private _dbHydratePromise: Promise<void> | null = null;
+
+  constructor() {
+    this._dbHydratePromise = hydrateRegistryFromDb();
+  }
+
+  /** Block until cold-start DB hydrate completed. HTTP handlers must wait for
+   *  this before returning models so Render restarts don't show empty list. */
+  private async ensureHydrated() {
+    if (this._dbHydratePromise) await this._dbHydratePromise;
+  }
   /**
    * Start training from the cloud learning dataset (or explicit path).
    * Saves candidates with new versions. Never promotes to production.
@@ -816,6 +931,11 @@ export class ModelManager {
   }
 
   async getDashboard(): Promise<DashboardPayload> {
+    // AI Lab "not showing my models" FIX #1: block on DB hydrate BEFORE reading
+    // registry.json. Render wipes FS on every deploy; DB rows MUST be pulled
+    // into the json file first, or Object.values(reg.candidates) = [].
+    await this.ensureHydrated();
+
     const reg = readRegistryFile();
     let tradeHistory: any[] = [];
     let predictionHistory: any[] = [];
@@ -862,13 +982,114 @@ export class ModelManager {
     } catch { /* fallback to zero */ }
 
     const analytics = computeTradeAnalytics(tradeHistory);
-    const prod = reg.production_version;
-    const prodEntry = prod ? reg.candidates?.[prod] : null;
-    const models = Object.values(reg.candidates || {}).map((m: any) => ({
+    // AI Lab FIX #2: PRIMARY source for models = prisma.modelCandidate DB.
+    // Render ephemeral FS was wiping registry.json on every deploy →
+    // Object.values(reg.candidates) used to be empty → models=[] after any restart.
+    let dbCandidates: any[] = [];
+    try {
+      const rows = await prisma.modelCandidate.findMany({
+        orderBy: [{ trainingDate: 'desc' }, { createdAt: 'desc' }],
+        take: 50,
+      });
+      dbCandidates = rows.map((c) => {
+        const metrics: any = (c.metricsJson && typeof c.metricsJson === 'object') ? c.metricsJson : {};
+        return {
+          version: c.version,
+          registered_at: c.trainingDate ? c.trainingDate.toISOString() : c.createdAt.toISOString(),
+          metrics: {
+            win_rate: Number(c.winRate ?? 0),
+            profit_factor: Number(c.profitFactor ?? 0),
+            avg_profit: Number(c.avgProfit ?? 0),
+            avg_rr: c.avgRr != null ? Number(c.avgRr) : null,
+            sharpe_ratio: Number(c.sharpeRatio ?? 0),
+            max_drawdown: c.maxDrawdown != null ? Number(c.maxDrawdown) : null,
+            accuracy: c.accuracy != null ? Number(c.accuracy) : null,
+            precision: c.precision != null ? Number(c.precision) : null,
+            recall: c.recall != null ? Number(c.recall) : null,
+            f1_score: c.f1Score != null ? Number(c.f1Score) : null,
+            training_loss: c.trainingLoss != null ? Number(c.trainingLoss) : null,
+            validation_loss: c.validationLoss != null ? Number(c.validationLoss) : null,
+            trade_frequency: c.tradeFrequency != null ? Number(c.tradeFrequency) : null,
+            stability: c.stability != null ? Number(c.stability) : null,
+            ...metrics,
+          },
+          deployment_recommendation: c.deploymentRec || 'NO',
+          recommendation_reason: c.recReason || '',
+          status: c.status || 'CANDIDATE',
+          is_production: Boolean(c.isProduction),
+          editable: !Boolean(c.isProduction),
+        };
+      });
+    } catch {
+      dbCandidates = [];
+    }
+    let dbTrainingRuns: any[] = [];
+    try {
+      const rows = await prisma.trainingRun.findMany({
+        orderBy: { startedAt: 'desc' },
+        take: 50,
+      });
+      dbTrainingRuns = rows.map((r) => ({
+        id: r.id,
+        version: r.version,
+        status: r.status,
+        epochs: r.epochs ?? null,
+        train_samples: r.trainSamples ?? null,
+        val_samples: r.valSamples ?? null,
+        holdout_samples: r.holdoutSamples ?? null,
+        training_loss: r.trainingLoss != null ? Number(r.trainingLoss) : null,
+        validation_loss: r.validationLoss != null ? Number(r.validationLoss) : null,
+        accuracy: r.accuracy != null ? Number(r.accuracy) : null,
+        precision: r.precision != null ? Number(r.precision) : null,
+        recall: r.recall != null ? Number(r.recall) : null,
+        f1_score: r.f1Score != null ? Number(r.f1Score) : null,
+        profit_factor: r.profitFactor != null ? Number(r.profitFactor) : null,
+        sharpe_ratio: r.sharpeRatio != null ? Number(r.sharpeRatio) : null,
+        max_drawdown: r.maxDrawdown != null ? Number(r.maxDrawdown) : null,
+        error_message: r.errorMessage ?? null,
+        started_at: r.startedAt?.toISOString?.() ?? null,
+        completed_at: r.completedAt?.toISOString?.() ?? null,
+      }));
+    } catch {
+      dbTrainingRuns = [];
+    }
+
+    // Merge: DB wins. registry.json entries (from just-finished training python
+    // output) supplement if version not yet in DB (train.py writes registry.json
+    // then our syncRegistryToDb() runs 200ms later; we want to show the new
+    // candidate in AI Lab IMMEDIATELY even before that sync finished).
+    const fileCandidateEntries = Object.values(reg.candidates || {});
+    const seenVersions = new Set(dbCandidates.map((c: any) => c.version));
+    const mergedModels = [
+      ...dbCandidates,
+      ...fileCandidateEntries
+        .filter((m: any) => m?.version && !seenVersions.has(m.version))
+        .map((m: any) => ({
+          ...m,
+          is_production: m.version === (reg.production_version || null),
+          editable: m.version !== (reg.production_version || null),
+        })),
+    ];
+    // Production version: prefer prisma.modelRegistry (consistent after DB restore restart)
+    let prod: string | null = reg.production_version || null;
+    try {
+      const regRow = await prisma.modelRegistry.findFirst({ orderBy: { updatedAt: 'desc' } });
+      if (regRow?.productionVersion) prod = regRow.productionVersion;
+    } catch { /* ignore */ }
+    const prodEntry = prod
+      ? (mergedModels.find((m: any) => m.version === prod) || (reg.candidates?.[prod] ? reg.candidates[prod] : null))
+      : null;
+    const models = mergedModels.map((m: any) => ({
       ...m,
       is_production: m.version === prod,
       editable: m.version !== prod,
     }));
+    // Merge training runs: dedup by id prefer DB rows, fallback to registry file ones
+    const seenRunIds = new Set(dbTrainingRuns.map((r: any) => r.id));
+    const mergedRuns = [
+      ...dbTrainingRuns,
+      ...(reg.training_runs || []).filter((r: any) => !r.id || !seenRunIds.has(r.id)),
+    ].sort((a: any, b: any) => (b.started_at || b.startedAt || '').localeCompare(a.started_at || a.startedAt || '')).slice(0, 50);
 
     return {
       productionVersion: prod,
@@ -876,7 +1097,7 @@ export class ModelManager {
       trainingStatus,
       currentTrainingVersion,
       models,
-      trainingRuns: [...(reg.training_runs || [])].reverse().slice(0, 20),
+      trainingRuns: mergedRuns.slice(0, 20),
       tradeHistory: tradeHistory.slice(0, 40).map((t) => ({
         ticket: t.ticket,
         symbol: t.symbol,
