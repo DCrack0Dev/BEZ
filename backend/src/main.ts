@@ -19,11 +19,13 @@ import {
   verifyToken,
   verifyEaApiKey,
   RefreshTokenPayload,
+  eaApiKeyDiagnostic,
 } from './middleware/auth';
 import { eaValidateLimiter, userActionLimiter, eaPollingLimiter, eaCommandsLimiter } from './middleware/rateLimiter';
 import { validateBody, eaUpdateSchema, orderSchema, botConfigSchema, eaValidateSchema, eaExecutionReportSchema } from './middleware/validation';
 import { replayGuard } from './middleware/replayGuard';
 import { corsOriginCheck } from './middleware/corsConfig';
+import { eaTraceMiddleware } from './middleware/requestTrace';
 import { restoreFromDbIfCold, snapshotAllToDb, persistTrainingArtifacts } from './storage/cloudPersistence';
 import { gateConfig, GATE_DEFAULTS } from './gate-config/gateConfig';
 
@@ -212,12 +214,14 @@ app.all('/test', (_req, res) => res.status(204).end());
 attachAPI(app);
 
 // API Endpoints
-app.post('/api/ea/validate', eaValidateLimiter, validateBody(eaValidateSchema), (req, res) => {
+app.post('/api/ea/validate', eaTraceMiddleware, eaValidateLimiter, validateBody(eaValidateSchema), (req, res) => {
   const { apiKey } = req.body;
   logger.info('Auth request received');
   if (!verifyEaApiKey(apiKey)) {
+    (res.locals as any).authVerdict = (res.locals as any).authVerdict || 'FAIL_INVALID';
     return res.status(401).json({ valid: false });
   }
+  (res.locals as any).authVerdict = 'PASS';
   const subject = 'ea-license'; // no per-user identity available at this trust boundary
   const token = signAccessToken(subject, { plan: 'Lifetime Pro', maxTrades: 15, maxOpenTrades: 15 });
   const refreshToken = signRefreshToken(subject);
@@ -251,6 +255,8 @@ app.post('/api/auth/refresh', (req, res) => {
 });
 
 app.post('/api/ea/update',
+  // TRACE FIRST — log the request even if auth fails (to spot scanner probes).
+  eaTraceMiddleware,
   // AUTH FIRST — anonymous probes get 401 BEFORE they touch the rate limiter.
   // Old order (rateLimit THEN requireEaKey) = anonymous scanners shared the
   // EA's IP/api-key bucket (they all hit /api/ea/update first from the same
@@ -341,8 +347,9 @@ app.post('/api/ea/update',
 });
 
 app.get('/api/ea/commands',
-  // Same reorder: auth before rate limit. Compat poll route for older EA
+  // Same reorder: trace first, then auth before rate limit. Compat poll route for older EA
   // builds that haven't read commands[] inline from /update response body.
+  eaTraceMiddleware,
   requireEaKey,
   eaCommandsLimiter,
   (req, res) => {
@@ -372,6 +379,7 @@ app.get('/api/ea/commands',
 // order open/close/modify, requote, retry, slippage event, or broker error.
 app.post('/api/ea/execution-report',
   // Auth first — same rationale as /update and /commands above.
+  eaTraceMiddleware,
   requireEaKey,
   eaPollingLimiter,
   validateBody(eaExecutionReportSchema),
@@ -424,6 +432,19 @@ app.post('/api/ea/execution-report',
     logger.error('Error in /api/ea/execution-report', error);
     res.status(500).json({ success: false, error: 'Failed to persist execution report' });
   }
+});
+
+// Safe EA API key diagnostic — returns length + SHA-256 fingerprint prefix only,
+// NEVER the secret. Requires a valid key so anonymous probes never see the fingerprint.
+app.get('/api/ea/diag', eaTraceMiddleware, requireEaKey, (_req, res) => {
+  const diag = eaApiKeyDiagnostic();
+  res.json({
+    success: true,
+    ...diag,
+    matchesSupplied: true, // route passed requireEaKey → caller's header matched
+    serverTs: new Date().toISOString(),
+    version: '4.0.0',
+  });
 });
 
 app.get('/api/account', requireAuth, (req, res) => res.json(tradingEngine.getAccountState()));
@@ -625,17 +646,9 @@ app.post('/api/ai/train/reset', requireAuth, userActionLimiter, async (req, res)
   }
 });
 
-app.post('/api/ai/promote', requireAuth, userActionLimiter, async (req, res) => {
-  try {
-    const { modelManager } = await import('./model-management');
-    const version = String(req.body?.version || '');
-    if (!version) return res.status(400).json({ success: false, error: 'version required' });
-    const result = await modelManager.promoteCandidate(version);
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ success: false, error: String(error) });
-  }
-});
+// NOTE: /api/ai/promote is registered ONLY in attachAPI router (/api mount) to avoid
+// duplicate handlers. Do NOT re-register it here — previous double-registration caused
+// ERR_HTTP_HEADERS_SENT and risk of double-promotion on the same request.
 
 // NOTE: /api/backtest* routes are handled INSIDE attachAPI → router.post('/backtest', …)
 // (202 Accepted + /status poll), NOT here in main.ts. Previous blocking
@@ -796,6 +809,19 @@ async function startServer() {
   });
   await httpListenPromise;
   logger.info('[Listen] HTTP + Socket.IO port bound, Render probes see 200 on /health-fast');
+  {
+    const diag = eaApiKeyDiagnostic();
+    logger.info('[EA_DIAG] Boot config', {
+      eaKeyConfigured: diag.configured,
+      eaKeyLength: diag.length,
+      eaKeyFingerprint: diag.fingerprintSha256First8,
+      eaPollingLimitPer10Min: 6000,
+      eaCommandsLimitPer10Min: 6000,
+      eaValidateLimitPerMin: 60,
+      inlineCommands: true,
+      commandsCacheTtlMs: COMMANDS_CACHE_TTL_MS,
+    });
+  }
 
   // --- Cloud cold-start restore BEFORE engine init ---
   const restore = await restoreFromDbIfCold();

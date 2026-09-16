@@ -27,7 +27,7 @@
 input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
 input string   ServerURL         = "https://liquibot-back.onrender.com";
 input int      MagicNumber       = 20260101;
-input int      HeartbeatInterval = 1; // seconds
+input int      HeartbeatInterval = 10; // seconds (10=safe Render/Cloudflare default; minimum 5 if low-latency verified w/o Cloudflare 429)
 input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
@@ -57,12 +57,39 @@ bool              licenseValid      = false;
 bool              isPaused          = false;
 datetime          lastHeartbeat     = 0;
 datetime          lastHeartbeatOk   = 0;
-string            lastHeartbeatStatus = "INIT";
 int               heartbeatOkCount  = 0;
 int               heartbeatFailCount = 0;
 int               lastCommandCount  = 0;
 int               heartbeatSeq      = 0;
-string            EA_Name           = "FxScalpKing EA v3.0";
+string            EA_Name           = "FxScalpKing EA v3.1";
+
+// DISCONNECT SAFETY MODEL (do not change unless a real defect is found):
+//  • OPEN POSITIONS       — Untouched. Held by MT5 broker; EA never auto-closes
+//                           on disconnect alone (user retains control).
+//  • TRAILING STOPS       — Monetary OnTick() trail runs LOCALLY regardless
+//                           of HTTP state. Trailing stops NEVER depend on the
+//                           backend being reachable. FVG/OB drawing also runs.
+//  • PENDING COMMANDS     — The in-memory broker-execution queue
+//                           (`pendingOrders[]`) IS STILL RETRIED locally because
+//                           it talks to the MT5 broker directly, NOT to the
+//                           backend. Backend-originated BUY/SELL commands are
+//                           only dispatched when an HTTP response is fresh
+//                           (see stale-command guard in DispatchCommands).
+//  • NEW SIGNALS          — EA has no local signal generation; all signals
+//                           originate server-side. No local BUY/SELL happens
+//                           while DISCONNECTED/RATE_LIMITED because no new
+//                           commands are received.
+//  • DEAD-MAN SWITCH      — If state stays DISCONNECTED for > 5 consecutive
+//                           minutes, a single WARNING is printed. No auto-close.
+//  • AI SIGNALS           — Always originate server-side. Never execute while
+//                           disconnected because no command payload arrives.
+//  • STALE COMMAND GUARD  — Any backend command received while the EA has been
+//                           DISCONNECTED for >60s AND contains a timestamp older
+//                           than the disconnection window is logged and dropped.
+//                           (Commands without timestamp fields are still accepted
+//                           as the backend inline-queue is cleared once per
+//                           successful /update cycle.)
+datetime            disconnectedAt = 0; // 0 = not currently disconnected
 
 // Chart history depths (must match app ChartScreen TF_COUNTS)
 #define BARS_M5   600
@@ -152,7 +179,6 @@ int OnInit()
    // Free Render spins down — wake can take 50s+. Retry so init survives cold start.
    if(!FxScalpKing.ValidateLicenseWithRetries(expiry, plan, 10, 5000))
    {
-      lastHeartbeatStatus = "LICENSE_FAIL";
       LogAction("ERROR", "LICENSE",
          "Validation failed after retries. Check: (1) ApiKey == Render EA_API_KEY (2) WebRequest allowlist for "
          + ServerURL + " (3) service awake at /test");
@@ -162,7 +188,6 @@ int OnInit()
    }
 
    licenseValid = true;
-   lastHeartbeatStatus = "LICENSED";
    trade.SetExpertMagicNumber(MagicNumber);
    // Auto-select broker-native filling mode for the current symbol.
    // Before: SetTypeFilling(IOC); SetTypeFilling(FOK); → line 169 overwrote 168
@@ -215,7 +240,33 @@ void OnTimer()
 {
    if(!licenseValid) return;
 
-   if(TimeCurrent() - lastHeartbeat >= HeartbeatInterval)
+   // Connection state bookkeeping: track when DISCONNECTED started for dead-man + stale-command guard.
+   EConnState curState = FxScalpKing.GetConnState();
+   if(curState == CONN_DISCONNECTED || curState == CONN_RATE_LIMITED ||
+      curState == CONN_SERVER_ERROR || curState == CONN_AUTH_FAILURE)
+   {
+      if(disconnectedAt == 0)
+         disconnectedAt = TimeCurrent();
+      else
+      {
+         // Dead-man: one single strong WARNING at 5 minutes (never close positions).
+         int age = (int)(TimeCurrent() - disconnectedAt);
+         if(age == 300) // exactly at 5 min (OnTimer runs every 1s — this will be hit once)
+            LogAction("WARN", "DEADMAN",
+               "Backend unreachable 5 min+. Local trailing stops still active. Positions untouched. "
+               "Check: (1) WebRequest allowlist " + ServerURL + " (2) Render health (3) ApiKey match.");
+      }
+   }
+   else
+   {
+      if(disconnectedAt != 0)
+         disconnectedAt = 0;
+   }
+
+   bool hbDue = (TimeCurrent() - lastHeartbeat >= HeartbeatInterval);
+   bool backoffOpen = FxScalpKing.BackoffDeadlineMet();
+
+   if(hbDue && backoffOpen)
    {
       string heartbeatResp = "";
       SendHeartbeat(heartbeatResp); // returns response, inline commands pulled here
@@ -230,15 +281,21 @@ void OnTimer()
          if(cmdsArr != "")
             inlineCount = DispatchCommands(cmdsArr);
       }
-      // /commands compat poll ONLY if inline returned nothing (for older
-      // backends pre-inline patch or if the response JSON missed the key).
-      // Saves half the HTTP calls (cuts 429/5203 burn rate for scanners too).
-      if(inlineCount == 0)
+      // /commands compat poll ONLY if inline returned nothing AND we are still
+      // within backoff deadline (which we are since hbDue passed above).
+      if(inlineCount == 0 && FxScalpKing.BackoffDeadlineMet())
          PollCommands();
       ProcessPendingOrders();
       lastHeartbeat = TimeCurrent();
-      UpdateExpertComment();
    }
+   else if(hbDue && !backoffOpen)
+   {
+      // Due but backoff still active — defer heartbeat. Only update comment
+      // so user sees the countdown; DO NOT run any EA HTTP action here.
+      // ProcessPendingOrders() still runs because it talks to MT5 broker locally.
+      ProcessPendingOrders();
+   }
+   UpdateExpertComment();
 }
 
 void OnTick()
@@ -504,7 +561,6 @@ void SendHeartbeat(string &response)
       response = resp;
       heartbeatOkCount++;
       lastHeartbeatOk = TimeCurrent();
-      lastHeartbeatStatus = "OK";
       LogAction("INFO", "HEARTBEAT",
          "OK · #" + IntegerToString(heartbeatSeq) +
          " " + _Symbol +
@@ -521,8 +577,8 @@ void SendHeartbeat(string &response)
    else
    {
       heartbeatFailCount++;
-      lastHeartbeatStatus = "FAIL http=" + IntegerToString(FxScalpKing.LastHttpCode()) +
-         " err=" + IntegerToString(FxScalpKing.LastError());
+      // Status is tracked by FxScalpKing state machine (transition-only logging,
+      // backoff countdown already printed in [CONNECTION] lines). No repeat here.
       LogAction("ERROR", "HEARTBEAT",
          "Failed · http=" + IntegerToString(FxScalpKing.LastHttpCode()) +
          " err=" + IntegerToString(FxScalpKing.LastError()) +
@@ -615,10 +671,44 @@ int DispatchCommands(string resp)
 
       string obj = StringSubstr(resp, objStart, objEnd - objStart + 1);
       searchFrom = objEnd + 1;
-      cmdCount++;
 
+      // --- STALE COMMAND GUARD (safety model) ---
+      // If EA has been fully DISCONNECTED for >60s, drop any BUY/SELL/CLOSE/MODIFY
+      // command that carries a timestamp earlier than the disconnect window.
+      // Commands without timestamps are always accepted: backend clears its queue
+      // once per successful /update cycle, so an inline command with no timestamp
+      // was produced by this cycle and is fresh.
+      bool isWrite = false;
       string action = JsonGetString(obj, "action", "");
       if(action == "") action = JsonGetString(obj, "type", "");
+      if(action == "BUY" || action == "SELL" || action == "CLOSE_ALL" ||
+         action == "UPDATE_SL" || action == "UPDATE_TP" ||
+         action == "PAUSE" || action == "RESUME" ||
+         action == "TPCLOSE" || action == "CLOSE_SINGLE" || action == "CLOSE_TICKET" ||
+         action == "CLOSE_POSITION" || action == "MANUAL_CLOSE")
+      {
+         isWrite = true;
+      }
+      if(isWrite && disconnectedAt != 0 && (TimeCurrent() - disconnectedAt) > 60)
+      {
+         double tsNum = JsonGetNumber(obj, "timestamp", 0);
+         if(tsNum > 0)
+         {
+            long cmdMs = (tsNum < 1e12) ? (long)(tsNum * 1000L) : (long)tsNum;
+            long discMs = (long)disconnectedAt * 1000L;
+            if(cmdMs < discMs)
+            {
+               LogAction("WARN", "COMMAND",
+                  "STALE command dropped (disconnectedAt=" +
+                  IntegerToString((int)disconnectedAt) + "s age=" +
+                  IntegerToString((int)(TimeCurrent() - (int)(cmdMs/1000L))) +
+                  "s). Action=" + action);
+               continue; // skip this command
+            }
+         }
+      }
+
+      cmdCount++;
 
       if(action == "BUY" || action == "SELL")
       {
@@ -696,14 +786,22 @@ void UpdateExpertComment()
       spreadPts = (tick.ask - tick.bid) / _Point;
 
    int age = lastHeartbeatOk > 0 ? (int)(TimeCurrent() - lastHeartbeatOk) : -1;
+   long backoffMs = FxScalpKing.BackoffRemainingMs();
+   int backoffS = (int)(backoffMs / 1000L);
+   string connLine =
+      "Conn: " + FxScalpKing.GetConnStateText() +
+      (backoffS > 0 ? (" (retry in " + IntegerToString(backoffS) + "s)") : "") +
+      " " + FxScalpKing.GetLastConnDetail();
+
    string line =
       EA_Name + " · " + (licenseValid ? "ONLINE" : "OFFLINE") + "\n" +
       "Server: " + ServerURL + "\n" +
-      "HB: " + lastHeartbeatStatus +
-         " ok=" + IntegerToString(heartbeatOkCount) +
+      connLine + "\n" +
+      "HB: ok=" + IntegerToString(heartbeatOkCount) +
          " fail=" + IntegerToString(heartbeatFailCount) +
          " age=" + IntegerToString(age) + "s" +
-         " seq=" + IntegerToString(heartbeatSeq) + "\n" +
+         " seq=" + IntegerToString(heartbeatSeq) +
+         " interval=" + IntegerToString(HeartbeatInterval) + "s" + "\n" +
       _Symbol + " spread=" + DoubleToString(spreadPts, 0) + "pts" +
          " bid=" + DoubleToString(tick.bid, _Digits) + "\n" +
       "Paused=" + (isPaused ? "YES" : "NO") +
