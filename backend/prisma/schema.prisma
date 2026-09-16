@@ -207,9 +207,9 @@ model FeatureSet {
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
-  @@index([symbol, timeframe, createdAt])
-  @@index([symbol, timeframe, createdAt(sort: Desc)])
-  @@index([symbol, createdAt(sort: Desc)])
+  @@index([symbol, timeframe, createdAt], map: "FeatureSet_sym_tf_createdAt_asc_idx")
+  @@index([symbol, timeframe, createdAt(sort: Desc)], map: "FeatureSet_sym_tf_createdAt_desc_idx")
+  @@index([symbol, createdAt(sort: Desc)], map: "FeatureSet_sym_createdAt_desc_idx")
 }
 
 // --- TRADING ACCOUNT ---
@@ -559,9 +559,9 @@ model TrainingRun {
 
   @@index([version])
   @@index([status])
-  @@index([startedAt])
-  @@index([startedAt(sort: Desc)])
-  @@index([status, startedAt(sort: Desc)])
+  @@index([startedAt], map: "TrainingRun_startedAt_asc_idx")
+  @@index([startedAt(sort: Desc)], map: "TrainingRun_startedAt_desc_idx")
+  @@index([status, startedAt(sort: Desc)], map: "TrainingRun_status_startedAt_desc_idx")
 }
 
 model PredictionLog {
@@ -579,11 +579,11 @@ model PredictionLog {
   featuresSnapshot    Json?
   createdAt           DateTime @default(now())
 
-  @@index([modelVersion, createdAt])
-  @@index([createdAt])
-  @@index([createdAt(sort: Desc)])
-  @@index([modelVersion, createdAt(sort: Desc)])
-  @@index([symbol, createdAt(sort: Desc)])
+  @@index([modelVersion, createdAt], map: "PredictionLog_modelV_createdAt_asc_idx")
+  @@index([createdAt], map: "PredictionLog_createdAt_asc_idx")
+  @@index([createdAt(sort: Desc)], map: "PredictionLog_createdAt_desc_idx")
+  @@index([modelVersion, createdAt(sort: Desc)], map: "PredictionLog_modelV_createdAt_desc_idx")
+  @@index([symbol, createdAt(sort: Desc)], map: "PredictionLog_symbol_createdAt_desc_idx")
 }
 
 // --- MONITORING ---
