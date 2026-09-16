@@ -815,6 +815,18 @@ export async function upsertGateOverride(data: {
   }
 }
 
+export async function clearAllGateOverrides(): Promise<number> {
+  try {
+    const client: any = prisma;
+    const res = await client.gateOverride.deleteMany({});
+    logger.success(`Cleared ${res?.count ?? 0} GateOverride row(s) from DB`);
+    return Number(res?.count ?? 0);
+  } catch (e) {
+    logger.error('Failed to clear GateOverride rows', e);
+    return 0;
+  }
+}
+
 // --- AI PROPOSALS (every proposed gate change; PENDING_APPROVAL until user clicks!) ---
 export async function createGateProposal(data: {
   targetGateKey: string;

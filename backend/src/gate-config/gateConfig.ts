@@ -1,4 +1,4 @@
-import { getAllGateOverrides, upsertGateOverride } from '../database';
+import { getAllGateOverrides, upsertGateOverride, clearAllGateOverrides } from '../database';
 import { logger } from '../logging';
 
 // Human-in-the-loop Gate Config: resolves every gate used by the validator.
@@ -19,24 +19,24 @@ type GateMeta = {
 };
 
 export const GATE_DEFAULTS: Record<string, GateMeta> = {
-  'hardGateThreshold':    { defaultValue: 3, type: 'THRESHOLD', label: 'Hard Gate Passing Threshold (out of 7)', min: 1, max: 7 },
-  'softThreshold.buy':    { defaultValue: 2, type: 'THRESHOLD', label: 'BUY Soft Requirements (out of 12)', min: 1, max: 12 },
-  'softThreshold.sell':   { defaultValue: 2, type: 'THRESHOLD', label: 'SELL Soft Requirements (out of 12)', min: 1, max: 12 },
-  'filter.spread.enabled':  { defaultValue: 0, type: 'ENABLE',  label: 'Spread Hard Filter (0=off, 1=on)' },
-  'filter.session.enabled': { defaultValue: 0, type: 'ENABLE',  label: 'Session Hard Filter (0=off, 1=on)' },
-  'filter.rr.enabled':      { defaultValue: 0, type: 'ENABLE',  label: 'Risk/Reward Hard Filter (0=off, 1=on)' },
-  'filter.rr.min':         { defaultValue: 1, type: 'THRESHOLD', label: 'Min RR Ratio if filter enabled', min: 0.5, max: 10 },
+  'hardGateThreshold':    { defaultValue: 5, type: 'THRESHOLD', label: 'Hard Gate Passing Threshold (out of 7)', min: 1, max: 7 },
+  'softThreshold.buy':    { defaultValue: 6, type: 'THRESHOLD', label: 'BUY Soft Requirements (out of 12)', min: 1, max: 12 },
+  'softThreshold.sell':   { defaultValue: 6, type: 'THRESHOLD', label: 'SELL Soft Requirements (out of 12)', min: 1, max: 12 },
+  'filter.spread.enabled':  { defaultValue: 1, type: 'ENABLE',  label: 'Spread Hard Filter (0=off, 1=on)' },
+  'filter.session.enabled': { defaultValue: 1, type: 'ENABLE',  label: 'Session Hard Filter (0=off, 1=on)' },
+  'filter.rr.enabled':      { defaultValue: 1, type: 'ENABLE',  label: 'Risk/Reward Hard Filter (0=off, 1=on)' },
+  'filter.rr.min':         { defaultValue: 1.5, type: 'THRESHOLD', label: 'Min RR Ratio if filter enabled', min: 0.5, max: 10 },
   'filter.rsi.min':        { defaultValue: 0.15, type: 'FILTER', label: 'RSI Min (0-1)', min: 0, max: 1 },
   'filter.rsi.max':        { defaultValue: 0.92, type: 'FILTER', label: 'RSI Max (0-1)', min: 0, max: 1 },
-  'filter.adxTrend.min':   { defaultValue: 10, type: 'FILTER', label: 'ADX Trend Minimum', min: 0, max: 80 },
-  'filter.bb.enabled':     { defaultValue: 0, type: 'ENABLE',  label: 'Bollinger Band Hard Filter' },
-  'filter.volume.multiplier': { defaultValue: 0.5, type: 'THRESHOLD', label: 'Volume Spike Multiplier (applied on top of base)', min: 0.1, max: 5 },
-  'structure.smcProximity.enabled': { defaultValue: 0, type: 'ENABLE', label: 'Require strict SMC (OB/FVG) Proximity Check' },
+  'filter.adxTrend.min':   { defaultValue: 15, type: 'FILTER', label: 'ADX Trend Minimum', min: 0, max: 80 },
+  'filter.bb.enabled':     { defaultValue: 1, type: 'ENABLE',  label: 'Bollinger Band Hard Filter' },
+  'filter.volume.multiplier': { defaultValue: 1.0, type: 'THRESHOLD', label: 'Volume Spike Multiplier (applied on top of base)', min: 0.1, max: 5 },
+  'structure.smcProximity.enabled': { defaultValue: 1, type: 'ENABLE', label: 'Require strict SMC (OB/FVG) Proximity Check' },
   'filter.winrateSimilar.enabled': { defaultValue: 0, type: 'ENABLE', label: 'Similar-Setup Winrate Hard Gate' },
-  'structure.minStrength': { defaultValue: 0.25, type: 'THRESHOLD', label: 'Min Structure Strength to Consider Entry', min: 0, max: 1 },
-  'trend.minStrength':    { defaultValue: 0.25, type: 'THRESHOLD', label: 'Min Trend Strength to Consider Entry', min: 0, max: 1 },
-  'entry.cooldownSeconds.buy':  { defaultValue: 60, type: 'THRESHOLD', label: 'Min Seconds Between BUY Entries', min: 0, max: 3600 },
-  'entry.cooldownSeconds.sell': { defaultValue: 60, type: 'THRESHOLD', label: 'Min Seconds Between SELL Entries', min: 0, max: 3600 },
+  'structure.minStrength': { defaultValue: 0.5, type: 'THRESHOLD', label: 'Min Structure Strength to Consider Entry', min: 0, max: 1 },
+  'trend.minStrength':    { defaultValue: 0.5, type: 'THRESHOLD', label: 'Min Trend Strength to Consider Entry', min: 0, max: 1 },
+  'entry.cooldownSeconds.buy':  { defaultValue: 180, type: 'THRESHOLD', label: 'Min Seconds Between BUY Entries', min: 0, max: 3600 },
+  'entry.cooldownSeconds.sell': { defaultValue: 180, type: 'THRESHOLD', label: 'Min Seconds Between SELL Entries', min: 0, max: 3600 },
 };
 
 export class GateConfig {
@@ -51,6 +51,9 @@ export class GateConfig {
 
   async init(): Promise<void> {
     try {
+      if (process.env.RESET_GATE_OVERRIDES === '1' || process.env.RESET_GATE_OVERRIDES === 'true') {
+        await clearAllGateOverrides();
+      }
       const rows = await getAllGateOverrides();
       const loaded: Record<string, { value: GateValue; note?: string }> = {};
       for (const r of rows) {
@@ -190,6 +193,18 @@ export class GateConfig {
       note,
     };
     logger.info(`GateConfig: applied APPROVED proposal → ${key}=${String(value)}`);
+  }
+
+  /**
+   * Wipe all GateOverride rows from Postgres and reset the in-memory cache to
+   * pure defaults. This is the nuclear option — it drops every user-approved
+   * override and proposal-approved override until new ones are applied.
+   */
+  async resetAllOverrides(): Promise<number> {
+    const removed = await clearAllGateOverrides();
+    this.overrides = {};
+    logger.info(`GateConfig.resetAllOverrides complete — ${removed} row(s) removed, all defaults restored`);
+    return removed;
   }
 }
 

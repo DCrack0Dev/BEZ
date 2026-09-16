@@ -238,8 +238,8 @@ export const validateSignal = (
 
   const isBullishStructure = features.trendDirection === 'BULLISH';
   const isBearishStructure = features.trendDirection === 'BEARISH';
-  const trendStrengthOk = features.trendStrength >= 0.35;
-  const structureStrengthOk = (features.structureStrength ?? 0) >= 0.4;
+  const trendStrengthOk = features.trendStrength >= 0.55;
+  const structureStrengthOk = (features.structureStrength ?? 0) >= 0.55;
   const trendConfidenceOk = (trendStrengthOk && (isBullishStructure || isBearishStructure)) || structureStrengthOk;
 
   const hasBullishOB = features.orderBlockConfirmed === 'BULLISH';
