@@ -66,7 +66,8 @@ app.use(
 app.use(cors({ origin: corsOriginCheck, credentials: true }));
 
 const server = http.createServer(app);
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
+const RENDER_PORT_WATCHDOG_MS = 8_000;
 
 // EA heartbeats can include multi-TF candle arrays — parse JSON on the app itself
 // (not only on the /api router) so /api/ea/* routes always see req.body.
@@ -789,26 +790,74 @@ io.on('connection', (socket) => {
 
 // Start server
 async function startServer() {
-  // Render "Timed Out deploy" fix: Listen on port FIRST, then run slow
-  // cold-start async work (DB restores / engine init / snapshots). Render's
-  // deploy probes the service within ~10s of the build command exiting;
-  // tradingEngine.init can take 15–25s on Postgres free-tier because of
-  // checkDbHealth SELECT 1 + table counts + cold-boot DB restore loops, so
-  // previously server.listen happened AFTER engine init → Render saw no
-  // response → "Timed Out" even though the process came up.
-  const httpListenPromise = new Promise<void>((resolve) => {
-    server.listen(Number(PORT), '0.0.0.0', () => resolve());
-  });
-  // Register the fast health probe endpoint BEFORE awaiting engine init.
-  // Render Web Service → Health Check Path: set this to /health-fast in
-  // Render dashboard (Settings → Health Check) for zero-latency deploy
-  // checks. /health and / still run the real SELECT 1 watchdog for live LB.
+  // /health-fast must be registered BEFORE server.listen() executes any
+  // net.Server#listen path resolution. Render's orchestrator opens its
+  // outbound TCP probe within ~200ms of PORT being bound; if the handler
+  // isn't yet attached we can get a SYN→RST that the probe interprets as
+  // "port not open", even though listen() completed synchronously.
   app.get('/health-fast', (_req, res) => {
     res.type('application/json');
     res.status(200).json({ status: 'UP', fast: true, ts: Date.now() });
   });
-  await httpListenPromise;
-  logger.info('[Listen] HTTP + Socket.IO port bound, Render probes see 200 on /health-fast');
+  app.get('/health', (_req, res) => {
+    res.type('application/json');
+    res.status(200).json({
+      status: 'ok',
+      service: 'liquibot-backend',
+      timestamp: new Date().toISOString(),
+      version: '4.0',
+    });
+  });
+
+  logger.info('[Boot] Preparing to bind HTTP port', {
+    port: PORT,
+    isNumber: Number.isFinite(PORT),
+    host: '0.0.0.0',
+    renderServiceId: process.env.RENDER_SERVICE_ID ? 'SET' : 'UNSET',
+    nodeEnv: process.env.NODE_ENV || 'dev',
+  });
+
+  // Render "Timed Out deploy" root cause: server.listen(Number, '0.0.0.0', cb)
+  // only calls cb on SUCCESS. On EADDRINUSE / EACCES / kernel bind timeout the
+  // callback never fires, so await hangs forever and the deploy watchdog kills
+  // us at ~30s total (build+deploy+probe window). We also race against a hard
+  // 8s watchdog so Render's ~10s deploy probe window is never exhausted.
+  let listenErrored = false;
+  const httpListenPromise = new Promise<void>((resolve, reject) => {
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      listenErrored = true;
+      logger.error('[Listen] server error event', {
+        code: err.code, message: err.message, syscall: err.syscall, port: PORT,
+      });
+      reject(err);
+    });
+    try {
+      server.listen(Number(PORT), '0.0.0.0', () => {
+        resolve();
+      });
+    } catch (e) {
+      listenErrored = true;
+      logger.error('[Listen] server.listen() threw synchronously', { error: String(e), port: PORT });
+      reject(e);
+    }
+  });
+
+  const watchdogPromise = new Promise<never>((_, reject) => {
+    const t = setTimeout(() => {
+      clearTimeout(t);
+      if (!listenErrored) {
+        logger.error('[Listen] watchdog fired — listen did not complete within', RENDER_PORT_WATCHDOG_MS, 'ms. Killing process so Render retries a fresh cold-start.');
+      }
+      reject(new Error(`listen watchdog timed out after ${RENDER_PORT_WATCHDOG_MS}ms`));
+    }, RENDER_PORT_WATCHDOG_MS);
+  });
+
+  await Promise.race([httpListenPromise, watchdogPromise]);
+  logger.info('[Listen] HTTP + Socket.IO port bound, Render probes see 200 on /health-fast and /health', {
+    port: PORT,
+    address: (server.address() as any)?.address,
+    family: (server.address() as any)?.family,
+  });
   {
     const diag = eaApiKeyDiagnostic();
     logger.info('[EA_DIAG] Boot config', {
@@ -823,20 +872,38 @@ async function startServer() {
     });
   }
 
-  // --- Cloud cold-start restore BEFORE engine init ---
-  const restore = await restoreFromDbIfCold();
-  if (restore.restored > 0) {
-    logger.success(`[CloudPersistence] Restored ${restore.restored} artifacts from DB on cold boot`);
-  }
-
-  await tradingEngine.init();
-  continuousLearning.start();
-  logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
-  logger.info('Monitoring + continuous learning active');
-  if (process.env.NODE_ENV === 'production') {
-    logger.info('[CloudPersistence] Running in production — models/scalers/datasets dual-written to FS + DB');
-    setTimeout(() => snapshotAllToDb().catch(() => {}), 10000);
-  }
+  // --- Cloud cold-start restore + engine init AFTER port bind.
+  // Render deploy already succeeded once we bound PORT; if Prisma free-tier
+  // cold-start takes 25+s we do NOT want the deploy watchdog to retroactively
+  // time out. Run this block async with its own timeout so slow DBs surface
+  // as operational logs, not a deploy failure.
+  const BOOT_DB_WATCHDOG_MS = 45_000;
+  let dbBootDone = false;
+  const dbBoot = (async () => {
+    logger.info('[Boot] Postgres/cold-restore phase starting (port already bound)');
+    const restore = await restoreFromDbIfCold();
+    if (restore.restored > 0) {
+      logger.success(`[CloudPersistence] Restored ${restore.restored} artifacts from DB on cold boot`);
+    }
+    await tradingEngine.init();
+    continuousLearning.start();
+    dbBootDone = true;
+    logger.success('LiquiBot backend v4.0 LIVE on port', PORT);
+    logger.info('Monitoring + continuous learning active');
+    if (process.env.NODE_ENV === 'production') {
+      logger.info('[CloudPersistence] Running in production — models/scalers/datasets dual-written to FS + DB');
+      setTimeout(() => snapshotAllToDb().catch(() => {}), 10000);
+    }
+  })();
+  const dbWatchdog = new Promise<never>((_, reject) => {
+    const t = setTimeout(() => {
+      clearTimeout(t);
+      if (!dbBootDone) reject(new Error(`DB/cold-restore phase hung after ${BOOT_DB_WATCHDOG_MS}ms`));
+    }, BOOT_DB_WATCHDOG_MS);
+  });
+  Promise.race([dbBoot, dbWatchdog]).catch((e) => {
+    logger.error('[Boot] DB/cold-restore phase failed or hung — continuing with port bound (EA heartbeats still return commands via cache, no new trades)', { error: String(e) });
+  });
 }
 
 startServer();
