@@ -19,8 +19,8 @@ import {
   verifyToken,
   verifyEaApiKey,
   RefreshTokenPayload,
-  eaApiKeyDiagnostic,
 } from './middleware/auth';
+import crypto from 'crypto';
 import { eaValidateLimiter, userActionLimiter, eaPollingLimiter, eaCommandsLimiter } from './middleware/rateLimiter';
 import { validateBody, eaUpdateSchema, orderSchema, botConfigSchema, eaValidateSchema, eaExecutionReportSchema } from './middleware/validation';
 import { replayGuard } from './middleware/replayGuard';
@@ -41,6 +41,24 @@ dotenv.config();
 let lastCommandsCache: any[] = [];
 let lastCommandsCachedAt = 0;
 const COMMANDS_CACHE_TTL_MS = 120_000;
+
+interface EaKeyDiag {
+  configured: boolean;
+  length: number;
+  fingerprintSha256First8: string;
+}
+
+function safeEaApiKeyDiagnostic(): EaKeyDiag {
+  const key = process.env.EA_API_KEY;
+  const configured = Boolean(key);
+  const length = key ? key.length : 0;
+  let fingerprint = '00000000';
+  if (key) {
+    const full = crypto.createHash('sha256').update(key, 'utf8').digest('hex');
+    fingerprint = full.slice(0, 8);
+  }
+  return { configured, length, fingerprintSha256First8: fingerprint };
+}
 
 const app = express();
 // Render always runs behind a Cloudflare LB + their own nginx reverse proxy.
@@ -438,7 +456,7 @@ app.post('/api/ea/execution-report',
 // Safe EA API key diagnostic — returns length + SHA-256 fingerprint prefix only,
 // NEVER the secret. Requires a valid key so anonymous probes never see the fingerprint.
 app.get('/api/ea/diag', eaTraceMiddleware, requireEaKey, (_req, res) => {
-  const diag = eaApiKeyDiagnostic();
+  const diag = safeEaApiKeyDiagnostic();
   res.json({
     success: true,
     ...diag,
@@ -860,7 +878,7 @@ async function startServer() {
     family: (server.address() as any)?.family,
   });
   {
-    const diag = eaApiKeyDiagnostic();
+    const diag = safeEaApiKeyDiagnostic();
     logger.info('[EA_DIAG] Boot config', {
       eaKeyConfigured: diag.configured,
       eaKeyLength: diag.length,
