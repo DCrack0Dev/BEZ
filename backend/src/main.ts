@@ -845,8 +845,9 @@ async function startServer() {
   const watchdogPromise = new Promise<never>((_, reject) => {
     const t = setTimeout(() => {
       clearTimeout(t);
+      const errMsg = `[Listen] watchdog fired — listen did not complete within ${RENDER_PORT_WATCHDOG_MS} ms. Killing process so Render retries a fresh cold-start.`;
       if (!listenErrored) {
-        logger.error('[Listen] watchdog fired — listen did not complete within', RENDER_PORT_WATCHDOG_MS, 'ms. Killing process so Render retries a fresh cold-start.');
+        logger.error(errMsg, { port: PORT });
       }
       reject(new Error(`listen watchdog timed out after ${RENDER_PORT_WATCHDOG_MS}ms`));
     }, RENDER_PORT_WATCHDOG_MS);
