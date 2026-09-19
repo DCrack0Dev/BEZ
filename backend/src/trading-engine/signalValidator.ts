@@ -1,6 +1,7 @@
 import { CONFIG } from '../config/tradingConfig';
 import { calculateRisk, RiskParams } from '../risk-manager/riskEngine';
 import { TradeSignal, FeatureSet, Candle, MT5Payload, MarketRegime } from '../types';
+import { TradingPrediction } from '../ai/tradingModel';
 import { v4 as uuidv4 } from 'uuid';
 import { gateConfig, GATE_DEFAULTS } from '../gate-config/gateConfig';
 
@@ -465,3 +466,156 @@ export const validateSignal = (
     confidence,
   } as TradeSignal;
 };
+
+export interface AISafetyResult {
+  passed: boolean;
+  reason?: string;
+  spreadOk: boolean;
+  drawdownOk: boolean;
+  positionsOk: boolean;
+  marginOk: boolean;
+  dailyLossOk: boolean;
+  newsOk: boolean;
+}
+
+export function checkAISafetyGates(payload: MT5Payload): AISafetyResult {
+  const {
+    symbol, candles, spread, balance, equity, pipSize, pointSize,
+    newsFilterActive, openPositionsCount,
+  } = payload;
+  const isXAUUSD = symbol.includes("XAU") || symbol.includes("GOLD");
+  const drawdown = balance > 0 ? ((balance - equity) / balance) * 100 : 0;
+  const maxOpen = isXAUUSD ? 2 : CONFIG.maxOpenTrades;
+  const maxSpreadPts =
+    (payload as MT5Payload & { maxSpreadPoints?: number }).maxSpreadPoints ??
+    CONFIG.maxSpreadPoints;
+  const spreadXAUUSDOk = spread <= maxSpreadPts;
+  const spreadForexOk = (() => {
+    const spreadPips = pointSize > 0 ? (spread * pointSize) / pipSize : spread;
+    return spreadPips <= CONFIG.maxSpreadPips;
+  })();
+  const spreadFilterEnabled = gateConfig.getBool('filter.spread.enabled');
+  const spreadOk = spreadFilterEnabled ? (isXAUUSD ? spreadXAUUSDOk : spreadForexOk) : true;
+  const drawdownOk = drawdown <= CONFIG.maxDrawdownPercent;
+  const positionsOk = openPositionsCount < maxOpen;
+  const marginOk = payload.marginLevel === undefined || payload.marginLevel >= CONFIG.minMarginLevelPercent;
+  const dailyLossOk = payload.dailyLossPercent === undefined || payload.dailyLossPercent < CONFIG.maxDailyLossPercent;
+  const newsOk = !newsFilterActive;
+
+  let reason: string | undefined;
+  if (!spreadOk) reason = `Spread too high: ${spread}pts > max ${maxSpreadPts}pts`;
+  else if (!drawdownOk) reason = `Drawdown ${drawdown.toFixed(2)}% exceeds max ${CONFIG.maxDrawdownPercent}%`;
+  else if (!positionsOk) reason = `Max open positions ${maxOpen} reached`;
+  else if (!marginOk) reason = `Margin level ${payload.marginLevel}% below min ${CONFIG.minMarginLevelPercent}%`;
+  else if (!dailyLossOk) reason = `Daily loss ${payload.dailyLossPercent}% exceeds max ${CONFIG.maxDailyLossPercent}%`;
+  else if (!newsOk) reason = `High-impact news active`;
+
+  return {
+    passed: spreadOk && drawdownOk && positionsOk && marginOk && dailyLossOk && newsOk,
+    reason,
+    spreadOk,
+    drawdownOk,
+    positionsOk,
+    marginOk,
+    dailyLossOk,
+    newsOk,
+  };
+}
+
+export function buildAISignal(
+  aiDirection: 'BUY' | 'SELL',
+  aiPrediction: TradingPrediction,
+  payload: MT5Payload,
+  features?: FeatureSet,
+  regime?: MarketRegime,
+  regimeConfidence: number = 0.6
+): TradeSignal | null {
+  if (!features) return null;
+  const {
+    symbol, candles, balance, pipSize, pointSize,
+    ema20, ema20Prev, openPositionsCount,
+  } = payload;
+  const safety = checkAISafetyGates(payload);
+  if (!safety.passed) return null;
+
+  const atr14 = payload.atr14 !== undefined ? payload.atr14 : calculateATR(candles, 14);
+  const swingHighsPrices = payload.swingHighs !== undefined ? payload.swingHighs : calculateSwingHighs(candles);
+  const swingLowsPrices = payload.swingLows !== undefined ? payload.swingLows : calculateSwingLows(candles);
+  const currentCandle = candles[candles.length - 1];
+  const price = currentCandle.close;
+  const isXAUUSD = symbol.includes("XAU") || symbol.includes("GOLD");
+
+  const activeRegime: MarketRegime = regime ?? (
+    features.marketSession === 'ASIA' ? 'LOW_LIQUIDITY'
+    : features.marketSession === 'OVERLAP' ? 'HIGH_LIQUIDITY'
+    : features.volatility === 'EXTREME' ? 'VOLATILE'
+    : features.trendStrength >= 0.6 ? 'TRENDING'
+    : features.trendStrength <= 0.3 ? 'RANGING'
+    : 'HIGH_LIQUIDITY'
+  );
+  const activeConf = Math.max(0.5, regimeConfidence || 0.6);
+
+  const { stopLoss, tpLevels, slDistancePips } = calculateDynamicSLTP(
+    aiDirection, price, atr14, pipSize, pointSize, isXAUUSD,
+    swingHighsPrices, swingLowsPrices, features, activeRegime, activeConf,
+  );
+
+  const nearestResistanceRaw = swingHighsPrices.filter(h => h >= price);
+  const nearestSupportRaw = swingLowsPrices.filter(l => l <= price);
+  const nearestResistance = nearestResistanceRaw.length > 0 ? Math.min(...nearestResistanceRaw) : price + (isXAUUSD ? pointSize * 100 : pipSize * 50);
+  const nearestSupport = nearestSupportRaw.length > 0 ? Math.max(...nearestSupportRaw) : price - (isXAUUSD ? pointSize * 100 : pipSize * 50);
+
+  const riskParams: RiskParams = {
+    accountBalance: balance,
+    entryPrice: price,
+    stopLoss,
+    pipSize,
+    pointSize,
+    pipValue: payload.pipValue,
+    minLot: payload.minLot,
+    maxLot: payload.maxLot,
+    minLotStep: payload.minLotStep,
+    priorTarget: aiDirection === "BUY" ? nearestResistance : nearestSupport,
+    direction: aiDirection,
+    spread: payload.spread,
+  };
+  const risk = calculateRisk(riskParams);
+  const takeProfitLevels: number[] = risk.takeProfitLevels && risk.takeProfitLevels.length >= 3
+    ? risk.takeProfitLevels
+    : tpLevels;
+
+  const rrMin = Math.max(0.1, gateConfig.getNum('filter.rr.min'));
+  const rrEnabled = gateConfig.getBool('filter.rr.enabled');
+  const tp1 = takeProfitLevels[0];
+  if (rrEnabled && tp1 !== undefined && slDistancePips > 0) {
+    const riskDistance = Math.abs(price - stopLoss);
+    const rewardDistance = Math.abs(tp1 - price);
+    const rrRatio = riskDistance === 0 ? 0 : rewardDistance / riskDistance;
+    if (rrRatio < rrMin) return null;
+  }
+
+  const dirProb = aiDirection === 'BUY' ? aiPrediction.buy_probability : aiPrediction.sell_probability;
+  let confidence = Math.round(Math.max(0.5, Math.min(0.95, Number(aiPrediction.confidence) * 0.7 + dirProb * 0.3)) * 100);
+  confidence = Math.min(95, Math.max(50, confidence));
+
+  return {
+    ...risk,
+    takeProfitLevels,
+    stopLoss,
+    scaleInLevels: (risk.scaleInLevels || []).map(si => ({
+      price: si.price,
+      lotSize: si.lotSize,
+      newStopLoss: si.newStopLoss,
+      isRiskFree: si.isRiskFree,
+    })),
+    lotSizes: {
+      entry1: risk.lotSizes?.entry1 || 0.01,
+      entry2: risk.lotSizes?.entry2 || 0,
+      entry3: risk.lotSizes?.entry3 || 0,
+    },
+    id: uuidv4(),
+    symbol: payload.symbol,
+    timeframe: payload.timeframe,
+    confidence,
+  } as TradeSignal;
+}

@@ -27,7 +27,7 @@
 input string   ApiKey            = "FXSK-90e36448c3d1ef9d749aa155ba228541";
 input string   ServerURL         = "https://liquibot-back.onrender.com";
 input int      MagicNumber       = 20260101;
-input int      HeartbeatInterval = 10; // seconds (10=safe Render/Cloudflare default; minimum 5 if low-latency verified w/o Cloudflare 429)
+input int      HeartbeatInterval = 5; // seconds (5=safe default per spec; can be reduced by user if validated)
 input double   FixedLotSize      = 0.01;
 input int      StopLoss_Points   = 300;
 input int      TakeProfit_Points = 600;
@@ -46,6 +46,7 @@ input color    BullOBColor       = clrBlue;
 input color    BearOBColor       = clrRed;
 input int      MaxRetries        = 3; // Max retries for failed orders
 input int      RetryDelayMs      = 500; // Delay between retries (ms)
+input int      MaxDeviationPts   = 50; // Slippage/deviation tolerance in points (Deriv synthetic indices need ≥40)
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -218,7 +219,7 @@ int OnInit()
    }
    else
       trade.SetTypeFilling(ORDER_FILLING_FOK); // last resort, works for 95% mt5 metals
-   trade.SetDeviationInPoints(20); // Allow 20 points deviation for requotes
+   trade.SetDeviationInPoints(MathMax(1, MaxDeviationPts)); // Deviation tolerance (Deriv Step Index needs higher)
 
    handle_ema20 = iMA(_Symbol, PERIOD_M5, 20, 0, MODE_EMA, PRICE_CLOSE);
    handle_ema50 = iMA(_Symbol, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE);
@@ -876,7 +877,7 @@ void QueueOrder(string type, double lotSize, double brainSL, double brainTP)
 //+------------------------------------------------------------------+
 //| VALIDATE COMMAND                                                 |
 //+------------------------------------------------------------------+
-bool ValidateCommand(string type, double entryPrice, double &sl, double &tp, double lotSize)
+bool ValidateCommand(string type, double entryPrice, double &sl, double &tp, double &lotSize)
 {
    // Check valid symbol
    if(!SymbolSelect(_Symbol, true))
@@ -889,10 +890,40 @@ bool ValidateCommand(string type, double entryPrice, double &sl, double &tp, dou
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(minLot <= 0)   minLot = 0.01;
+   if(maxLot <= 0)   maxLot = 100.0;
+   if(lotStep <= 0)  lotStep = 0.01;
 
-   if(lotSize < minLot || lotSize > maxLot)
+   // Deriv / Step Index account-protection: cap lots to a sensible fraction of
+   // balance-based max leverage to avoid 47xx margin / auto-disable loops.
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double pointSz = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSz  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double unitPerLot = (tickVal > 0 && tickSz > 0 && pointSz > 0) ? (tickVal / (tickSz / pointSz)) : 1.0;
+   double safeMaxByBal = (bal > 0 && unitPerLot > 0) ? MathMax(minLot, bal / 5000.0 / MathMax(0.01, unitPerLot)) : maxLot;
+   double effectiveMaxLot = MathMin(maxLot, safeMaxByBal);
+
+   // Snap to lotStep to avoid "invalid volume" rejects (common on Deriv/MT5 brokers
+   // that enforce exact volume steps — 0.68 is not a valid step for many synthetics).
+   double stepRounded = MathFloor(lotSize / lotStep) * lotStep;
+   if(stepRounded < minLot) stepRounded = MathCeil(lotSize / lotStep) * lotStep;
+   if(stepRounded < minLot) stepRounded = minLot;
+   if(stepRounded > effectiveMaxLot) stepRounded = effectiveMaxLot;
+   stepRounded = MathFloor(stepRounded / lotStep) * lotStep;
+   if(stepRounded < minLot) stepRounded = minLot;
+   if(stepRounded != lotSize)
    {
-      LogAction("ERROR", "VALIDATE", "Invalid lot size: " + DoubleToString(lotSize,2) + ". Min: " + DoubleToString(minLot,2) + " Max: " + DoubleToString(maxLot,2));
+      LogAction("WARN", "VALIDATE",
+         "Lot size " + DoubleToString(lotSize,2) + " adjusted to broker step/limits → " +
+         DoubleToString(stepRounded,2) + " (min=" + DoubleToString(minLot,2) +
+         " max=" + DoubleToString(effectiveMaxLot,2) + " step=" + DoubleToString(lotStep,2) + ")");
+      lotSize = stepRounded;
+   }
+
+   if(lotSize < minLot || lotSize > effectiveMaxLot)
+   {
+      LogAction("ERROR", "VALIDATE", "Invalid lot size: " + DoubleToString(lotSize,2) + ". Min: " + DoubleToString(minLot,2) + " EffectiveMax: " + DoubleToString(effectiveMaxLot,2));
       return false;
    }
 
@@ -970,14 +1001,34 @@ void ProcessPendingOrders()
       if(now - (ulong)order.lastAttempt * 1000 < (ulong)RetryDelayMs) continue;
 
       // Attempt execution (may update ticket/entry/sl/tp on the copy)
+      ResetLastError();
       bool success = ExecuteOrder(order);
+      int lastErr = GetLastError();
       if(success)
       {
          RemovePendingOrder(i);
       }
       else
       {
-         order.retriesLeft--;
+         // NON-RETRYABLE errors (client/terminal-side misconfiguration):
+         //   4752 / 4756 / 4753 → Deriv/MT5 auto-trade / Algo switch OFF
+         //   133 → TRADE IS DISABLED (broker account disabled trading)
+         //   7   → NOT ENOUGH RIGHTS
+         //   64  → ACCOUNT BLOCKED
+         // For these, retrying is useless and burns retries on transient issues.
+         bool nonRetryable = (lastErr == 4752 || lastErr == 4756 || lastErr == 4753 ||
+                              lastErr == 133  || lastErr == 7    || lastErr == 64);
+         if(nonRetryable)
+         {
+            LogAction("ERROR", "EXECUTE",
+               "Non-retryable terminal/broker error " + IntegerToString(lastErr) +
+               " (" + TradeErrorDescription(lastErr) + "). Skipping remaining retries.");
+            order.retriesLeft = 0;
+         }
+         else
+         {
+            order.retriesLeft--;
+         }
          order.retriesUsed++;
          order.lastAttempt = TimeCurrent();
          pendingOrders[i] = order; // write back retry state + any requote SL/TP tweaks
@@ -1187,6 +1238,9 @@ string TradeErrorDescription(int err)
       case 148: return "Too many orders";
       case 149: return "Hedge is prohibited";
       case 150: return "Prohibited by FIFO rules";
+      case 4752: return "Auto-trading disabled by client — TURN ON 'Algo Trading' / 'Auto Trading' button in MT5 (Deriv/Step Index)";
+      case 4756: return "Auto-trading disabled via EA properties — check 'Allow algorithmic trading' on EA inputs";
+      case 4753: return "Trade blocked by terminal — check MT5 auto-trade permissions";
       default: return "Unknown error";
    }
 }

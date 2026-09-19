@@ -90,4 +90,16 @@ export const CONFIG = {
   // pass — a strong disagreement is treated as a hard veto, not just a
   // confidence penalty.
   aiContradictionVetoThreshold: envNum('AI_CONTRADICTION_VETO_THRESHOLD', 0.55),
+  // AI-ONLY MODE: when true AND aiTradingEnabled=true, the bot generates
+  // trade signals DIRECTLY from the AI model's BUY/SELL probabilities
+  // WITHOUT requiring the rule engine's validateSignal() gates to pass
+  // (session filter, SMC structure, patterns, trend checks etc are skipped).
+  // Safety-only hard gates (drawdown, max positions, margin, spread) still
+  // apply because those protect account integrity, not strategy selection.
+  aiOnlyMode: envBool('AI_ONLY_MODE', true),
+  // Minimum BUY or SELL probability required in AI-only mode to open a trade.
+  // Must be strictly greater than hold_probability for the same sample.
+  aiOnlyMinDirectionProb: envNum('AI_ONLY_MIN_DIR_PROB', 0.45),
+  // Minimum model confidence required for AI-only entries (0-1 scale).
+  aiOnlyMinConfidence: envNum('AI_ONLY_MIN_CONFIDENCE', 0.55),
 };

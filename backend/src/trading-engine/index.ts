@@ -14,7 +14,7 @@ import { CONFIG } from '../config/tradingConfig';
 import { FeatureEngineeringEngine } from '../feature-engineering/featureEngine';
 import { FeatureStorage } from '../feature-engineering/featureStorage';
 import { processTrailingStop } from '../trade-execution/trailingStopManager';
-import { validateSignal, calculateATR, calculateSwingHighs, calculateSwingLows, calculateEMA } from './signalValidator';
+import { validateSignal, calculateATR, calculateSwingHighs, calculateSwingLows, calculateEMA, buildAISignal, checkAISafetyGates } from './signalValidator';
 import { evaluateSetupProgress, SetupProgress } from './setupProgress';
 import { TradeDnaEngine } from '../analytics/tradeDna';
 import { ExperienceEngine } from '../analytics/experienceEngine';
@@ -1902,35 +1902,62 @@ export class TradingEngine {
     this.accountState.lastSignalReason = setupProgress.summary;
 
     if (this.accountState.autoTradingEnabled) {
-      const signal = validateSignal(
-        signalPayload,
-        features,
-        this.latestRegime?.regime,
-        this.latestRegime?.confidence ?? 0.6
-      );
       const now = Date.now();
-      if (signal && now - this.lastTradeTime > 30000 && now > this.cooldowns[signal.direction]) {
-        // --- AI GATE — old + new side-by-side, shadow-safe ---
-        // 1) Legacy confidence engine still runs first. Behavioral contract
-        //    with `aiTradingEnabled` is preserved 100%.
-        // 2) NEW: EnsembleDecisionEngine blends rule + FNN + CNN + LSTM.
-        //    CNN/LSTM are absent for now → weights renormalize around rule +
-        //    FNN bridge. Current production python weights (via the
-        //    TradingPrediction object) count as the FNN voter immediately,
-        //    so we get ensemble logging without waiting for new weights.
-        // 3) Ensemble default: HARD GATE OFF. Any ensemble veto becomes
-        //    SHADOW_REJECT, logged and SQL-saved, but NEVER stops a trade.
-        //    Flipping (CONFIG as any).ensembleHardGate = true (opt-in, no
-        //    env var exposed yet) enables real REJECTs from the ensemble.
-        let aiPrediction: TradingPrediction | null = null;
-        try {
-          const vector = featureVector(features);
-          aiPrediction = await modelManager.predictWithProduction(vector, signal.symbol);
-        } catch (error) {
-          tradingLogger.warn('AI prediction unavailable for this signal, proceeding rule-only', String(error));
-        }
+      const vector = featureVector(features);
+      let aiPrediction: TradingPrediction | null = null;
+      try {
+        aiPrediction = await modelManager.predictWithProduction(vector, signalPayload.symbol);
+      } catch (error) {
+        tradingLogger.warn('AI prediction unavailable', String(error));
+      }
 
-        // Legacy evaluation — behavioral contract with aiTradingEnabled preserved
+      let signal: TradeSignal | null = null;
+      let aiOnlySignalOrigin = false;
+
+      if (CONFIG.aiOnlyMode && this.accountState.aiTradingEnabled && aiPrediction) {
+        aiOnlySignalOrigin = true;
+        const safety = checkAISafetyGates(signalPayload);
+        if (!safety.passed) {
+          tradingLogger.warn(`AI-only signal blocked (safety): ${safety.reason}`);
+          this.io.emit('shadowReject', { reason: safety.reason, origin: 'AI_SAFETY_GATE', aiPrediction });
+        } else {
+          const buyP = aiPrediction.buy_probability ?? 0;
+          const sellP = aiPrediction.sell_probability ?? 0;
+          const holdP = aiPrediction.hold_probability ?? 0;
+          const aiDir: 'BUY' | 'SELL' | null = buyP > sellP ? 'BUY' : sellP > buyP ? 'SELL' : null;
+          const dirProb = Math.max(buyP, sellP);
+          if (!aiDir) {
+            tradingLogger.info('AI-only: BUY/SELL tie → HOLD');
+          } else if (dirProb < (CONFIG.aiOnlyMinDirectionProb ?? 0.45)) {
+            tradingLogger.info(`AI-only: dir_prob ${dirProb.toFixed(2)} < min ${CONFIG.aiOnlyMinDirectionProb ?? 0.45} → HOLD`);
+          } else if ((aiPrediction.confidence ?? 0) < (CONFIG.aiOnlyMinConfidence ?? 0.55)) {
+            tradingLogger.info(`AI-only: confidence ${(aiPrediction.confidence ?? 0).toFixed(2)} < min ${CONFIG.aiOnlyMinConfidence ?? 0.55} → HOLD`);
+          } else if (dirProb <= holdP) {
+            tradingLogger.info(`AI-only: dir_prob ${dirProb.toFixed(2)} <= hold ${holdP.toFixed(2)} → HOLD`);
+          } else {
+            signal = buildAISignal(
+              aiDir,
+              aiPrediction,
+              signalPayload,
+              features,
+              this.latestRegime?.regime,
+              this.latestRegime?.confidence ?? 0.6
+            );
+            if (signal) {
+              tradingLogger.info(`AI-only signal [${aiDir}] dir_prob=${dirProb.toFixed(2)} conf=${(aiPrediction.confidence ?? 0).toFixed(2)}`);
+            }
+          }
+        }
+      } else {
+        signal = validateSignal(
+          signalPayload,
+          features,
+          this.latestRegime?.regime,
+          this.latestRegime?.confidence ?? 0.6
+        );
+      }
+
+      if (signal && now - this.lastTradeTime > 30000 && now > this.cooldowns[signal.direction]) {
         const evaluation = confidenceEngine.evaluate(
           { direction: signal.direction, confidence: signal.confidence },
           aiPrediction
@@ -1940,7 +1967,6 @@ export class TradingEngine {
           evaluation.reasons.join(' | ')
         );
 
-        // --- NEW: Ensemble + Regime decision (Phase 1, additive) ---
         const riskScore = features.riskScore || 'MEDIUM';
         const tpDistancePips = signal.takeProfitLevels?.[0]
           ? Math.abs(signal.takeProfitLevels[0] - (signal.entryPrice || this.accountState.price)) / (this.accountState.pipSize || 0.01)
@@ -1966,7 +1992,9 @@ export class TradingEngine {
               fnn: null,
               cnn: null,
               lstm: null,
-              ruleReason: evaluation.reasons[0] || `Rule engine pass (${signal.confidence.toFixed(0)}/100)`,
+              ruleReason: aiOnlySignalOrigin
+                ? `AI-only signal (dir_prob=${(Math.max(aiPrediction?.buy_probability ?? 0, aiPrediction?.sell_probability ?? 0)).toFixed(2)})`
+                : evaluation.reasons[0] || `Rule engine pass (${signal.confidence.toFixed(0)}/100)`,
               hardGate: !!(CONFIG as any).ensembleHardGate,
               minAgreeingModels: (CONFIG as any).ensembleMinAgreeingModels ?? 1,
             });
@@ -2010,30 +2038,26 @@ export class TradingEngine {
           ensemble,
           regime: this.latestRegime,
           aiTradingEnabled: CONFIG.aiTradingEnabled,
+          aiOnlyMode: CONFIG.aiOnlyMode,
+          aiOnlySignalOrigin,
           ensembleHardGateEnabled: !!(CONFIG as any).ensembleHardGate,
         });
 
-        // Final execution: legacy gate + optional ensemble HARD veto,
-        // SHADOW_REJECT never blocks → zero behavior change by default.
-        const legacyShouldExecute = !CONFIG.aiTradingEnabled || evaluation.decision === 'ACCEPT';
+        const legacyShouldExecute = aiOnlySignalOrigin || !CONFIG.aiTradingEnabled || evaluation.decision === 'ACCEPT';
         const ensembleBlocks = !!(CONFIG as any).ensembleHardGate && ensemble?.decision === 'REJECT';
         const shouldExecute = legacyShouldExecute && !ensembleBlocks;
 
         if (!shouldExecute) {
-          const why = !legacyShouldExecute ? 'AI confidence gate (aiTradingEnabled=true)' : `Ensemble hard-gate: ${ensemble?.regimeBlocked ? 'regime incompatible' : 'score below threshold'}`;
+          const why = !legacyShouldExecute
+            ? 'AI confidence gate (aiTradingEnabled=true)'
+            : `Ensemble hard-gate: ${ensemble?.regimeBlocked ? 'regime incompatible' : 'score below threshold'}`;
           tradingLogger.warn(`Signal rejected: ${why}`, signal.direction);
         } else {
-          tradingLogger.success('New auto signal', signal.direction);
+          tradingLogger.success(aiOnlySignalOrigin ? 'New AI-only signal' : 'New auto signal', signal.direction);
           if (ensemble?.decision === 'SHADOW_REJECT') {
             tradingLogger.info(`Note: ensemble SHADOW_REJECT (shadow-only, not blocking). ${ensemble.explainability.reason}`);
           }
           this.lastSignal = signal;
-          // Enforce per-symbol trailing-profit re-entry limit if set.
-          //
-          // CRITICAL: skip the entire re-entry guard when the user has flipped the Trailing
-          // switch OFF via app toggle (CONFIG.trailingStopEnabled=false). Trailing-profit
-          // allowances are 100% trailing-behavior-specific; if trailing is off the user expects
-          // fully unlimited entries, not a hidden permanent block from the last loss/ban.
           const trailingOn = !!(CONFIG as any).trailingStopEnabled;
           try {
             const sym = signal.symbol;
@@ -2041,9 +2065,7 @@ export class TradingEngine {
             if (typeof remaining === 'number') {
               if (remaining <= 0) {
                 tradingLogger.warn(`Signal suppressed for ${sym}: trailing-profit re-entry limit reached`);
-                // Still emit signal (shadow) for observability but don't send an order command.
                 this.io.emit('tradeSignal', { ...signal, suppressedBy: 'TRAILING_REENTRY_LIMIT' });
-                // record lastSignalConfidence for dashboard comparability
                 this.lastTradeTime = now;
                 this.lastSignalConfidence = {
                   direction: signal.direction,
@@ -2067,7 +2089,6 @@ export class TradingEngine {
                   ensembleOutput: ensemble || null,
                 };
               } else {
-                // Consume one allowance and execute
                 this.trailingProfitReentries[sym] = Math.max(0, remaining - 1);
                 tradingLogger.info(`Consuming 1 trailing re-entry for ${sym}; remaining=${this.trailingProfitReentries[sym]}`);
                 this.pendingCommands.push({
@@ -2102,7 +2123,6 @@ export class TradingEngine {
                 };
               }
             } else {
-              // No limit set for this symbol — behave normally
               this.pendingCommands.push({
                 action: signal.direction,
                 symbol: signal.symbol,
@@ -2135,7 +2155,6 @@ export class TradingEngine {
               };
             }
           } catch (e) {
-            // Failsafe: if the guard code errors, fall back to original behavior
             tradingLogger.error(`Trailing re-entry guard failed: ${e}`);
             this.pendingCommands.push({
               action: signal.direction,
